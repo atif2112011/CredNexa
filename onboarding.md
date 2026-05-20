@@ -6,9 +6,10 @@ This document explains the complete onboarding flow for the EMI Shield ecosystem
 
 ### Architecture Components
 
-- Shield Android App (Device Owner App)
+- Shield Android App (Device Owner App — installed on borrower's device)
+- Distributor Android App (used by distributor staff to register users and generate QR codes)
+- Tenant Android App (used by tenant staff for daily lock/unlock operations)
 - Backend REST API (`/api/v1`)
-- Tenant Dashboard (web app for distributor/lender staff)
 - Firebase Cloud Messaging (FCM)
 - QR-based Android Device Owner provisioning
 - Backend-proxied third-party Aadhaar OTP Verification Service
@@ -74,9 +75,9 @@ This document explains the complete onboarding flow for the EMI Shield ecosystem
 
 ## Onboarding Flow
 
-### Step 1 — Tenant Dashboard Creates Enrollment
+### Step 1 — Distributor App Creates Enrollment
 
-Distributor staff logs into the Tenant Dashboard and registers the borrower + loan details.
+Distributor staff logs into the **Distributor Android App** and registers the borrower + loan details.
 
 **API Call:**
 ```
@@ -116,7 +117,7 @@ Body:
 
 ### Step 2 — Backend Generates QR Payload
 
-The Tenant Dashboard calls the backend to generate the Android Device Owner provisioning QR.
+The **Distributor Android App** calls the backend to generate the Android Device Owner provisioning QR, which is then displayed on-screen for scanning.
 
 **API Call:**
 ```

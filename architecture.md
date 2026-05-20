@@ -28,18 +28,18 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 
 ### Four Primary Interfaces
 
-| Interface | Users | Role |
-|---|---|---|
-| **Admin Dashboard** | Super Admin | Exception handling, escalation override, risk monitoring, platform governance |
-| **Partner Dashboard** | Tenant staff (NBFCs, Retail Chains, Standalone Outlets) | Daily lock/unlock operations, payment review, unlock request handling, policy config |
-| **Distributor Dashboard** | Tenant staff with distributor capability | Device sale registration, user onboarding, device-user binding |
-| **Android App** | User (borrower — device purchaser) | Pay EMI, request unlock, view escalation status, consent acceptance |
+| Interface | Users | Platform | Role |
+|---|---|---|---|
+| **Admin Dashboard** | Super Admin | Web app | Exception handling, escalation override, risk monitoring, platform governance |
+| **Partner App** | Tenant staff (NBFCs, Retail Chains, Standalone Outlets) | Android app | Daily lock/unlock operations, payment review, unlock request handling, policy config |
+| **Distributor App** | Tenant staff with distributor capability | Android app | Device sale registration, user onboarding, QR code generation, device-user binding |
+| **Borrower App** | User (borrower — device purchaser) | Android app | Pay EMI, request unlock, view escalation status, consent acceptance |
 
 ### Identity Model
 
 | Collection | Who it represents |
 |---|---|
-| `accounts` | All dashboard logins — super admin, channel partner staff, tenant staff |
+| `accounts` | All app logins for staff — super admin, channel partner staff, tenant staff (Partner App + Distributor App + Admin Dashboard) |
 | `users` | Device purchasers (borrowers) only — people who install the app |
 | `channelPartners` | B2B entities that resell the EMI Shield product |
 | `tenants` | Organisations under a channel partner — NBFCs, shops, retail chains, outlets |
@@ -53,8 +53,8 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 │                        EMI SHIELD PLATFORM                                  │
 │                                                                             │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌────────────────────────┐   │
-│  │  Admin Dashboard │  │ Partner Dashboard│  │ Distributor Dashboard  │   │
-│  │   (React/Web)    │  │   (React/Web)    │  │     (React/Web)        │   │
+│  │  Admin Dashboard │  │   Partner App    │  │   Distributor App      │   │
+│  │   (React/Web)    │  │   (Android)      │  │     (Android)          │   │
 │  └────────┬─────────┘  └────────┬─────────┘  └───────────┬────────────┘   │
 │           │                     │                          │                │
 │           └─────────────────────┼──────────────────────────┘                │
@@ -98,10 +98,9 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 
 | System | Purpose |
 |---|---|
-| **Payment Gateway / UPI** | Payment initiation and webhook callbacks |
 | **Firebase Cloud Messaging (FCM)** | Push notifications to Android devices |
 | **OTP / SMS Service** | OTP delivery for auth and consent |
-| **File Storage (S3 / compatible)** | Payment proof document uploads |
+| **File Storage (S3 / compatible)** | QR code image uploads + payment proof document uploads |
 
 ---
 
@@ -167,11 +166,11 @@ EMI Shield Super Admin (platform)
 - Policy versioning
 
 ### 4.5 Payment Engine Module
-- Payment initiation (UPI / Gateway)
-- Webhook ingestion from payment gateways
-- Payment deduplication by transaction reference
-- EMI schedule matching and validation
-- Post-payment action determination (full/partial/delayed unlock)
+- Tenant QR code management (upload, activate, delete via S3)
+- Payment submission by borrower ("I paid" tap)
+- Tenant approval workflow (Partner App review + approve)
+- Post-approval EMI schedule matching and validation
+- Post-approval action determination (unlock trigger)
 
 ### 4.6 Command Queue Module
 - Lock/unlock command dispatch to device via FCM
@@ -339,7 +338,18 @@ A tenant's `capabilities` array determines its permissions:
   isActive: { type: Boolean, default: true },
   createdBy: { type: ObjectId, ref: 'accounts' },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
+
+  // UPI QR codes — shown to borrowers when they tap "Pay Now"
+  // Only one entry can have isActive: true at any time (enforced at API layer)
+  qrCodes: [{
+    _id: { type: ObjectId, auto: true },
+    label: { type: String, required: true },     // e.g. "HDFC UPI", "PhonePe"
+    imageUrl: { type: String, required: true },  // S3/storage URL
+    isActive: { type: Boolean, default: false },
+    uploadedBy: { type: ObjectId, ref: 'accounts' },
+    createdAt: { type: Date, default: Date.now }
+  }]
 }
 ```
 
@@ -548,7 +558,8 @@ Per-tenant configurable policy for lock, unlock, and escalation behavior. Only t
 
   // Escalation SLA
   escalationRules: {
-    slaHours: { type: Number, default: 24 },            // hours before auto-escalate
+    slaHours: { type: Number, default: 24 },                        // hours tenant has to action before escalating to channel partner
+    partnerEscalationSlaHours: { type: Number, default: 48 },       // hours channel partner has before further escalation to super admin
     autoEscalateOnSLABreach: { type: Boolean, default: true }
   },
 
@@ -578,12 +589,15 @@ EMI repayment schedule per user/loan.
       penaltyAmount: { type: Number, default: 0 },
       status: {
         type: String,
-        enum: ['pending', 'paid', 'overdue', 'partial'],
+        enum: ['pending', 'paid', 'overdue', 'partial', 'waived'],
         default: 'pending'
       },
       paidAmount: { type: Number, default: 0 },
       paidAt: { type: Date },
-      paymentId: { type: ObjectId, ref: 'payments' }
+      paymentId: { type: ObjectId, ref: 'payments' },
+      waivedBy: { type: ObjectId, ref: 'accounts' },   // account that granted waive (case resolution)
+      waivedAt: { type: Date },
+      waiveReason: { type: String }                    // caseId or note
     }
   ],
 
@@ -597,7 +611,7 @@ EMI repayment schedule per user/loan.
 ```
 
 ### 5.10 `payments` Collection
-All payment transactions (deduplication by txnRef).
+All payment records for QR-based EMI payments pending or completed.
 
 ```js
 {
@@ -606,49 +620,45 @@ All payment transactions (deduplication by txnRef).
   tenantId: { type: ObjectId, ref: 'tenants', required: true },
   deviceId: { type: ObjectId, ref: 'devices' },
 
-  // Payment identifiers
-  txnRef: { type: String, required: true, unique: true },   // gateway transaction reference
-  orderId: { type: String },                                 // internal order ID
-  gatewayTxnId: { type: String },
-
   // Amount
   amount: { type: Number, required: true },
   currency: { type: String, default: 'INR' },
 
-  // Channel
+  // Channel — QR-based payment (borrower scans tenant's UPI QR externally)
   paymentMethod: {
     type: String,
-    enum: ['upi', 'gateway', 'wallet', 'manual'],
+    enum: ['qr', 'manual'],
     required: true
   },
-  upiId: { type: String },
+  qrCodeId: { type: ObjectId },   // references the tenants.qrCodes subdocument shown to borrower
 
-  // Status lifecycle
+  // Status lifecycle: initiated → approval_pending → success
   status: {
     type: String,
-    enum: ['initiated', 'pending', 'success', 'failed', 'refunded', 'duplicate'],
+    enum: ['initiated', 'approval_pending', 'success', 'cancelled'],
     default: 'initiated'
   },
-  gatewayStatus: { type: String },   // raw status from gateway
-  failureReason: { type: String },
 
-  // Validation
-  validationStatus: {
+  // Tenant approval
+  approvalStatus: {
     type: String,
-    enum: ['pending', 'matched', 'mismatch', 'manual_review'],
-    default: 'pending'
+    enum: ['pending_approval', 'approved'],
+    default: 'pending_approval'
   },
+  approvedBy: { type: ObjectId, ref: 'accounts' },   // tenant staff who approved
+  approvedAt: { type: Date },
+
+  // EMI matching (done at approval time)
   matchedInstallments: [{ type: ObjectId }],   // installment IDs matched
   validatedAt: { type: Date },
-  validatedBy: { type: String, default: 'system' },
+  validatedBy: { type: ObjectId, ref: 'accounts' },
 
   // Unlock outcome
   unlockTriggered: { type: Boolean, default: false },
   unlockCommandId: { type: ObjectId, ref: 'deviceCommands' },
 
-  initiatedAt: { type: Date, default: Date.now },
-  completedAt: { type: Date },
-  webhookReceivedAt: { type: Date }
+  submittedAt: { type: Date, default: Date.now },   // when borrower tapped "Payment Sent"
+  completedAt: { type: Date }                        // when approval + unlock completed
 }
 ```
 
@@ -707,7 +717,7 @@ Lock/unlock command queue with delivery tracking.
 ```
 
 ### 5.12 `unlockRequests` Collection
-User-initiated unlock request cases.
+User-initiated unlock request cases with two-tier escalation (Tenant → Channel Partner → Super Admin).
 
 ```js
 {
@@ -716,43 +726,61 @@ User-initiated unlock request cases.
   userId: { type: ObjectId, ref: 'users', required: true },
   deviceId: { type: ObjectId, ref: 'devices', required: true },
   tenantId: { type: ObjectId, ref: 'tenants', required: true },
+  channelPartnerId: { type: ObjectId, ref: 'channelPartners' },  // populated on escalation to partner
 
-  reason: { type: String, required: true },
+  // Borrower submission
+  reason: { type: String, required: true },                 // short required reason
+  details: { type: String },                                // optional longer description
   reasonCategory: {
     type: String,
-    enum: ['payment_made', 'temporary_emergency', 'gateway_issue', 'payment_mismatch', 'other']
+    enum: ['payment_made', 'temporary_emergency', 'payment_mismatch', 'other']
   },
-  proofDocumentUrl: { type: String },
+  imageUrl: { type: String },                               // optional JPEG evidence image (S3)
 
   // Case state
   status: {
     type: String,
     enum: [
-      'PENDING_TENANT',
-      'ESCALATED',
-      'UNDER_REVIEW',
-      'RESOLVED_TENANT',
-      'RESOLVED_SUPER_ADMIN',
-      'REJECTED',
-      'CLOSED'
+      'PENDING_TENANT',          // Waiting for tenant to action
+      'ESCALATED_PARTNER',       // Tenant SLA breached → escalated to channel partner
+      'ESCALATED_ADMIN',         // Channel partner SLA breached → escalated to super admin
+      'UNDER_REVIEW',            // Super admin is actively reviewing
+      'RESOLVED_TENANT',         // Tenant resolved (unlocked, temp-unlocked, or rejected)
+      'RESOLVED_PARTNER',        // Channel partner resolved
+      'RESOLVED_SUPER_ADMIN',    // Super admin resolved (override)
+      'REJECTED',                // Denied (by tenant, partner, or super admin)
+      'CLOSED'                   // Final state after resolution acknowledged
     ],
     default: 'PENDING_TENANT'
   },
 
-  // SLA tracking
-  slaHours: { type: Number },
-  slaDeadline: { type: Date },
+  // Tenant-level SLA
+  slaHours: { type: Number },                              // from tenantPolicies.escalationRules.slaHours
+  slaDeadline: { type: Date },                             // createdAt + slaHours
   slaBreached: { type: Boolean, default: false },
-  escalatedAt: { type: Date },
+  escalatedToPartnerAt: { type: Date },
+
+  // Channel partner-level SLA (populated on ESCALATED_PARTNER)
+  partnerSlaHours: { type: Number },                       // from tenantPolicies.escalationRules.partnerEscalationSlaHours
+  partnerSlaDeadline: { type: Date },                      // escalatedToPartnerAt + partnerSlaHours
+  partnerSlaBreached: { type: Boolean, default: false },
+  escalatedToAdminAt: { type: Date },
 
   // Resolution
-  resolvedBy: { type: ObjectId, ref: 'accounts' },
+  resolvedBy: { type: ObjectId, ref: 'accounts' },         // account that resolved
   resolvedAt: { type: Date },
   resolutionNote: { type: String },
   resolutionAction: {
     type: String,
-    enum: ['unlocked', 'temp_unlocked', 'rejected', 'override']
+    enum: [
+      'unlocked',                 // full unlock (device set to ACTIVE/EMI_PAID)
+      'waived',                   // full unlock + current overdue installment marked waived
+      'temp_unlocked',            // temporary unlock for N hours
+      'rejected',                 // request denied
+      'override'                  // super admin forced unlock on escalated case
+    ]
   },
+  tempUnlockDurationHours: { type: Number },               // set when resolutionAction = 'temp_unlocked'
 
   deviceCommandId: { type: ObjectId, ref: 'deviceCommands' },
 
@@ -791,7 +819,10 @@ Immutable tamper-evident log of all critical platform events.
       'ROOT_DETECTED',
       'APP_TAMPER_DETECTED',
       'SLA_BREACHED',
-      'CASE_RESOLVED'
+      'CASE_RESOLVED',
+      'CASE_WAIVED',
+      'PAYMENT_SUBMITTED',
+      'PAYMENT_APPROVED'
     ],
     required: true
   },
@@ -857,7 +888,10 @@ Notification records sent to borrowers and lender dashboard users.
       'TEMP_UNLOCK_APPROVED',
       'TEMP_UNLOCK_EXPIRING',
       'CASE_RESOLVED',
-      'PAYMENT_CONFIRMED'
+      'PAYMENT_CONFIRMED',
+      'PAYMENT_APPROVAL_REQUIRED',    // sent to tenant staff when borrower taps "Payment Sent"
+      'CASE_ESCALATED_TO_PARTNER',    // sent to channel partner staff when tenant SLA breaches
+      'CASE_ESCALATED_TO_ADMIN'       // sent to super admin when channel partner SLA breaches
     ],
     required: true
   },
@@ -1073,6 +1107,7 @@ Risk monitoring signals surfaced to super admin.
 | GET | `/app/device/state` | Get current device state (UC-7 to UC-11) |
 | GET | `/app/device/policy` | Fetch active enforcement policy for this device |
 | POST | `/app/device/ping` | Update FCM token, report health stats, heartbeat |
+| POST | `/app/device/command/ack` | Acknowledge that a policy command was applied on-device |
 
 **Response — GET `/app/device/state`**
 ```json
@@ -1114,27 +1149,71 @@ Risk monitoring signals surfaced to super admin.
 }
 ```
 
+**Request — POST `/app/device/command/ack`**
+```json
+{
+  "commandId": "<deviceCommands._id>",
+  "appliedPolicyVersion": 5,
+  "appliedAt": "2024-01-15T00:03:47.000Z"
+}
+```
+
+**Backend actions — POST `/app/device/command/ack`:**
+1. Validates `commandId` belongs to the authenticated device (tenantId + deviceId match)
+2. Updates `deviceCommands`: `{ status: 'acknowledged', acknowledgedAt: appliedAt }`
+3. Confirms device state based on command type:
+   - `LOCK` or `TEMP_UNLOCK` → `devices.state` stays as set by scheduler/server
+   - `UNLOCK` or `TEMP_UNLOCK` expiry → `devices.state` transitions to `ACTIVE`
+4. Writes `auditLogs` entry: `{ event: 'POLICY_ACKNOWLEDGED', ... }`
+
+**Response:**
+```json
+{ "success": true }
+```
+
 #### EMI & Payment
 
 | Method | Route | Description |
 |---|---|---|
 | GET | `/app/emi/schedule` | Full EMI schedule (UC-32) |
 | GET | `/app/emi/summary` | Current EMI summary (amount due, DPD, due date) |
-| POST | `/app/payment/initiate` | Initiate UPI / gateway payment (UC-12) |
-| POST | `/app/payment/callback` | App-side payment callback after UPI return (UC-12) |
+| GET | `/app/payment/qr` | Fetch the tenant's active QR code image for payment |
+| POST | `/app/payment/submit` | Borrower taps "Payment Sent" — creates payment record |
 | GET | `/app/payment/history` | List all payments (UC-15) |
 | GET | `/app/payment/:paymentId` | Single payment details |
 
-**Request — POST `/app/payment/initiate`**
+**Response — GET `/app/payment/qr`**
 ```json
-{ "amount": 3500, "method": "upi", "upiId": "borrower@upi" }
+{
+  "qrCodeId": "<ObjectId>",
+  "label": "HDFC UPI",
+  "imageUrl": "https://storage.emishield.in/qr/tenant123_hdfc.png"
+}
 ```
+
+> If no active QR code is configured for the tenant, returns `404` with message `"Payment not available — contact your lender"`.
+
+**Request — POST `/app/payment/submit`**
+```json
+{
+  "qrCodeId": "<ObjectId>",
+  "amount": 3500
+}
+```
+
+**Backend actions — POST `/app/payment/submit`:**
+1. Validates JWT — device belongs to this tenant
+2. Checks no `approval_pending` payment already exists for this device (prevents duplicates)
+3. Creates `payments` document: `{ status: 'approval_pending', paymentMethod: 'qr', qrCodeId, amount, submittedAt }`
+4. Sends FCM `NOTIFICATION` to tenant staff (`notificationType: PAYMENT_APPROVAL_REQUIRED`) — alerts them in Partner App
+5. Writes `auditLogs` entry
+
 **Response:**
 ```json
 {
-  "orderId": "ORD-20240109-001",
-  "upiDeepLink": "upi://pay?...",
-  "txnRef": "EMI-TXN-001"
+  "paymentId": "<ObjectId>",
+  "status": "approval_pending",
+  "message": "Payment submitted — awaiting lender confirmation"
 }
 ```
 
@@ -1142,24 +1221,44 @@ Risk monitoring signals surfaced to super admin.
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/app/unlock-request` | Submit unlock request with reason (UC-16) |
-| POST | `/app/unlock-request/:requestId/proof` | Upload payment proof document (UC-17) |
+| POST | `/app/unlock-request` | Submit unlock request with reason + optional image (UC-16) |
+| POST | `/app/unlock-request/:requestId/image` | Upload or replace evidence JPEG after submission (UC-17) |
 | GET | `/app/unlock-request/active` | Get active unlock request status (UC-18) |
 | GET | `/app/unlock-request/history` | All past unlock requests |
 
 **Request — POST `/app/unlock-request`**
-```json
-{
-  "reason": "I have already paid the EMI. Transaction ID: UPI-123",
-  "reasonCategory": "payment_made"
-}
-```
+
+`Content-Type: multipart/form-data`
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `reason` | String | ✅ | Short required reason |
+| `reasonCategory` | String | ✗ | `payment_made` \| `temporary_emergency` \| `payment_mismatch` \| `other` |
+| `details` | String | ✗ | Optional longer description (up to 1000 chars) |
+| `image` | File | ✗ | Optional JPEG evidence image (max 5MB) |
+
+**Backend actions:**
+1. Validate JWT, extract `userId`, `deviceId`, `tenantId`
+2. Check no active (`PENDING_TENANT` or `ESCALATED_*`) case already exists for this device — return `409` if one is open
+3. Upload image to S3 if provided → get `imageUrl`
+4. Resolve `channelPartnerId` from `tenants` document
+5. Create `unlockRequests` document:
+   ```
+   { caseId: 'CASE-YYYY-NNNNN', status: 'PENDING_TENANT',
+     slaHours: policy.escalationRules.slaHours,
+     slaDeadline: now + slaHours,
+     details, imageUrl, reasonCategory }
+   ```
+6. Send FCM `NOTIFICATION` to tenant staff: `UNLOCK_REQUEST_RECEIVED`, deepLink to case
+7. Write `auditLogs`: `UNLOCK_REQUEST_CREATED`
+
 **Response:**
 ```json
 {
   "caseId": "CASE-2024-00123",
   "status": "PENDING_TENANT",
-  "slaDeadline": "2024-01-10T10:00:00Z"
+  "slaDeadline": "2024-01-10T10:00:00Z",
+  "message": "Your request has been submitted. The lender has been notified."
 }
 ```
 
@@ -1235,6 +1334,27 @@ Risk monitoring signals surfaced to super admin.
 > Requires `tokenType: account` + `role: tenant_admin | tenant_staff`  
 > Lock/unlock routes additionally require tenant has `lend` capability
 
+#### Staff Account Management
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/partner/accounts` | List all staff accounts under this tenant |
+| POST | `/partner/accounts` | Create a new `tenant_staff` account (tenant_admin only) |
+| PATCH | `/partner/accounts/:accountId` | Update staff account details |
+| PATCH | `/partner/accounts/:accountId/status` | Activate / deactivate a staff account |
+
+**Request — POST `/partner/accounts`**
+```json
+{
+  "name": "Suresh Patil",
+  "email": "suresh@bharatpune.in",
+  "mobile": "9800000004",
+  "role": "tenant_staff",
+  "temporaryPassword": "Staff@456"
+}
+```
+> `tenantId` is resolved from the requesting account's JWT. Only `tenant_admin` can call this route. Only `tenant_staff` role can be created here (to prevent privilege escalation).
+
 #### Device Management
 
 | Method | Route | Description |
@@ -1259,16 +1379,63 @@ Risk monitoring signals surfaced to super admin.
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/partner/unlock-requests` | List requests (filter: status, SLA breached) |
-| GET | `/partner/unlock-requests/:requestId` | Request detail with borrower info |
-| POST | `/partner/unlock-requests/:requestId/approve` | Approve → triggers unlock |
-| POST | `/partner/unlock-requests/:requestId/reject` | Reject request with reason |
-| POST | `/partner/unlock-requests/:requestId/temp-unlock` | Grant temporary unlock as resolution |
+| GET | `/partner/unlock-requests` | List requests (filter: status, SLA breached, date range) |
+| GET | `/partner/unlock-requests/:requestId` | Request detail with borrower info, image, history |
+| POST | `/partner/unlock-requests/:requestId/approve` | Full unlock — optionally waive overdue installment |
+| POST | `/partner/unlock-requests/:requestId/temp-unlock` | Grant temporary unlock for N hours |
+| POST | `/partner/unlock-requests/:requestId/reject` | Reject request with mandatory reason |
 
 **Request — POST `/partner/unlock-requests/:requestId/approve`**
 ```json
-{ "note": "Verified payment via bank statement" }
+{
+  "note": "Verified borrower's payment receipt via call",
+  "emiAction": "waive"
+}
 ```
+
+`emiAction` options:
+- `"waive"` — marks the current overdue installment as `waived` in `emiSchedules`; device gets `EMI_PAID` policy and won't be auto-relocked by the DPD scheduler
+- `"none"` (default) — unlocks device to `ACTIVE`/`EMI_PAID` policy for the current cycle only; EMI installment remains `overdue` (use with caution — DPD scheduler may re-lock)
+
+**Backend actions — POST `/partner/unlock-requests/:requestId/approve`:**
+1. Validate case belongs to this tenant, is `PENDING_TENANT` status
+2. If `emiAction === 'waive'`:
+   - Find current overdue installment in `emiSchedules`
+   - Update: `{ status: 'waived', waivedBy: <accountId>, waivedAt: now, waiveReason: caseId }`
+   - Update `emiSchedules.overdueAmount`, `overdueInstallments`
+3. Update `devices.state → UNLOCK_PENDING`, `policyKey → EMI_PAID`, `policyVersion: N+1`
+4. Create `deviceCommands`: `{ commandType: 'UNLOCK', triggeredBy: 'manual_tenant' }`
+5. Send FCM `POLICY_UPDATE` to device
+6. Update `unlockRequests`: `{ status: 'RESOLVED_TENANT', resolutionAction: 'waived' | 'unlocked', resolvedBy, resolvedAt, resolutionNote }`
+7. Send FCM `NOTIFICATION` to borrower: `UNLOCK_SUCCESS`
+8. Write `auditLogs`: `CASE_RESOLVED` (+ `CASE_WAIVED` if emiAction = waive), `UNLOCK_TRIGGERED`
+
+**Request — POST `/partner/unlock-requests/:requestId/temp-unlock`**
+```json
+{
+  "durationHours": 24,
+  "note": "Borrower is travelling, will pay on return"
+}
+```
+
+**Backend actions:**
+1. Validate case is `PENDING_TENANT`
+2. Update `devices`: `{ state: 'TEMP_UNLOCK', policyKey: 'TEMP_UNLOCKED', tempUnlockExpiresAt: now + durationHours }`
+3. Create `deviceCommands`: `{ commandType: 'TEMP_UNLOCK', payload: { durationHours } }`
+4. Send FCM `POLICY_UPDATE` to device
+5. Update `unlockRequests`: `{ status: 'RESOLVED_TENANT', resolutionAction: 'temp_unlocked', tempUnlockDurationHours: durationHours, resolvedBy, resolvedAt, resolutionNote }`
+6. Send FCM `NOTIFICATION` to borrower: `TEMP_UNLOCK_APPROVED` (includes expiry time)
+7. Write `auditLogs`: `TEMP_UNLOCK_TRIGGERED`, `CASE_RESOLVED`
+
+**Request — POST `/partner/unlock-requests/:requestId/reject`**
+```json
+{ "note": "Payment not received per bank records. Please use the Pay Now option." }
+```
+
+**Backend actions:**
+1. Update `unlockRequests`: `{ status: 'REJECTED', resolutionAction: 'rejected', resolvedBy, resolvedAt, resolutionNote }`
+2. Send FCM `NOTIFICATION` to borrower: `ESCALATION_UPDATE` with rejection reason
+3. Write `auditLogs`: `CASE_RESOLVED`
 
 #### Escalation Queue
 
@@ -1281,9 +1448,74 @@ Risk monitoring signals surfaced to super admin.
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/partner/payments` | Payment list (filter by status, date range) |
-| GET | `/partner/payments/:paymentId` | Payment detail with validation status |
-| POST | `/partner/payments/:paymentId/manual-validate` | Manually mark payment as validated |
+| GET | `/partner/payments` | Payment list (filter by approvalStatus, date range) |
+| GET | `/partner/payments/:paymentId` | Payment detail |
+| GET | `/partner/payments/pending-approval` | List payments awaiting tenant approval |
+| POST | `/partner/payments/:paymentId/approve` | Approve payment → triggers EMI match + unlock |
+
+**Backend actions — POST `/partner/payments/:paymentId/approve`:**
+1. Validates payment belongs to this tenant and is in `approvalStatus: 'pending_approval'`
+2. Updates `payments`: `{ approvalStatus: 'approved', approvedBy: <accountId>, approvedAt: now, status: 'success' }`
+3. Matches payment amount against `emiSchedules` — marks installment(s) as `paid`
+4. Evaluates `tenantPolicies.unlockRules` — determines unlock type (instant / delayed)
+5. Updates `devices.state` → `UNLOCK_PENDING`, `policyKey` → `EMI_PAID`, increments `policyVersion`
+6. Creates `deviceCommands` record (`commandType: UNLOCK`, `triggeredBy: payment_unlock`)
+7. Sends FCM `POLICY_UPDATE` to device
+8. Sends FCM `NOTIFICATION` (`notificationType: UNLOCK_SUCCESS`) to borrower
+9. Writes `auditLogs` entry
+
+**Response:**
+```json
+{
+  "success": true,
+  "paymentId": "<ObjectId>",
+  "unlockCommandId": "<ObjectId>",
+  "matchedInstallments": ["<ObjectId>"]
+}
+```
+
+#### QR Code Management
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/partner/qr-codes` | List all QR codes for this tenant |
+| POST | `/partner/qr-codes` | Upload a new QR code image (multipart/form-data) |
+| PUT | `/partner/qr-codes/:qrId/activate` | Set this QR as active (deactivates all others) |
+| DELETE | `/partner/qr-codes/:qrId` | Delete a QR code (blocked if `isActive: true`) |
+
+**Request — POST `/partner/qr-codes`** (`multipart/form-data`):
+
+| Field | Type | Description |
+|---|---|---|
+| `image` | File | QR code image (PNG/JPG, max 2MB) |
+| `label` | String | Human-readable label, e.g. "HDFC UPI" |
+
+**Backend actions — POST `/partner/qr-codes`:**
+1. Validates image type and size
+2. Uploads image to S3, gets `imageUrl`
+3. Appends to `tenants.qrCodes` array: `{ label, imageUrl, isActive: false, uploadedBy }`
+4. If this is the first QR code, sets `isActive: true` automatically
+
+**Backend actions — PUT `/partner/qr-codes/:qrId/activate`:**
+1. Sets all `tenants.qrCodes[].isActive` → `false`
+2. Sets the target entry's `isActive` → `true`
+3. Atomic update to prevent race conditions
+
+**Response — GET `/partner/qr-codes`:**
+```json
+{
+  "qrCodes": [
+    {
+      "_id": "<ObjectId>",
+      "label": "HDFC UPI",
+      "imageUrl": "https://storage.emishield.in/qr/tenant123_hdfc.png",
+      "isActive": true,
+      "uploadedBy": "<accountId>",
+      "createdAt": "2024-01-10T10:00:00.000Z"
+    }
+  ]
+}
+```
 
 #### Policy Configuration
 
@@ -1333,7 +1565,52 @@ Risk monitoring signals surfaced to super admin.
 
 ---
 
-### 6.5 Super Admin Dashboard Routes (`/admin`)
+### 6.5 Channel Partner Routes (`/cp`)
+
+> Requires `tokenType: account` + `role: channel_partner_admin | channel_partner_staff`  
+> `channelPartnerId` is resolved from the requesting account's JWT. All cases shown are scoped to tenants under this channel partner.
+
+#### Escalation Queue
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/cp/escalations` | All `ESCALATED_PARTNER` cases from this CP's tenants |
+| GET | `/cp/escalations/:caseId` | Escalation detail — device, borrower, tenant, history, evidence image |
+| POST | `/cp/escalations/:caseId/approve` | Full unlock — optionally waive overdue installment |
+| POST | `/cp/escalations/:caseId/temp-unlock` | Grant temporary unlock for N hours |
+| POST | `/cp/escalations/:caseId/reject` | Reject with mandatory reason |
+
+**Request — POST `/cp/escalations/:caseId/approve`**
+```json
+{
+  "reason": "Borrower confirmed payment. Tenant failed to respond.",
+  "emiAction": "waive"
+}
+```
+
+**Backend actions — POST `/cp/escalations/:caseId/approve`:**
+1. Validate case is `ESCALATED_PARTNER` and belongs to a tenant under this `channelPartnerId`
+2. If `emiAction === 'waive'`: mark overdue installment as `waived` in `emiSchedules`
+3. Update `devices.state → UNLOCK_PENDING`, `policyKey → EMI_PAID`
+4. Create `deviceCommands`: `{ commandType: 'UNLOCK', triggeredBy: 'manual_tenant' }`
+5. Send FCM `POLICY_UPDATE` to device
+6. Update `unlockRequests`: `{ status: 'RESOLVED_PARTNER', resolutionAction: 'waived' | 'unlocked', resolvedBy, resolvedAt }`
+7. Send FCM `NOTIFICATION` to borrower: `UNLOCK_SUCCESS`
+8. Write `auditLogs`: `CASE_RESOLVED`, `UNLOCK_TRIGGERED` (+ `CASE_WAIVED` if waive)
+
+**Request — POST `/cp/escalations/:caseId/temp-unlock`**
+```json
+{ "durationHours": 48, "reason": "Case under investigation, granting interim access" }
+```
+
+**Request — POST `/cp/escalations/:caseId/reject`**
+```json
+{ "reason": "No evidence provided. Escalating back to tenant." }
+```
+
+---
+
+### 6.6 Super Admin Dashboard Routes (`/admin`)
 
 > Requires `tokenType: account` + `role: super_admin`
 
@@ -1341,8 +1618,8 @@ Risk monitoring signals surfaced to super admin.
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/admin/escalations` | All escalated cases platform-wide |
-| GET | `/admin/escalations/:caseId` | Escalation detail — device, borrower, payment, history |
+| GET | `/admin/escalations` | All `ESCALATED_ADMIN` cases — channel partner SLA also breached |
+| GET | `/admin/escalations/:caseId` | Escalation detail — full history including tenant + CP inaction |
 | POST | `/admin/escalations/:caseId/unlock` | Override unlock (mandatory reason) (FR-5) |
 | POST | `/admin/escalations/:caseId/temp-unlock` | Override temporary unlock (FR-6) |
 | POST | `/admin/escalations/:caseId/reject` | Reject escalation with reason |
@@ -1350,7 +1627,7 @@ Risk monitoring signals surfaced to super admin.
 
 **Request — POST `/admin/escalations/:caseId/unlock`**
 ```json
-{ "reason": "Lender SLA breached 3x. Payment verified via bank records. Unlocking." }
+{ "reason": "Tenant + CP both SLA breached 3x. Payment verified via bank records. Unlocking." }
 ```
 
 #### Risk Monitoring
@@ -1369,10 +1646,29 @@ Risk monitoring signals surfaced to super admin.
 | GET | `/admin/channel-partners/:id` | Channel partner details |
 | PATCH | `/admin/channel-partners/:id` | Update channel partner |
 | GET | `/admin/tenants` | List all tenants |
-| POST | `/admin/tenants` | Create new tenant |
+| POST | `/admin/tenants` | Create new tenant (auto-seeds `tenantPolicies` + 5 default `devicePolicies`) |
 | GET | `/admin/tenants/:id` | Tenant detail |
 | PATCH | `/admin/tenants/:id/status` | Activate / deactivate tenant |
 | GET | `/admin/tenants/:id/accounts` | List staff accounts under a tenant |
+| POST | `/admin/accounts` | Create a staff account (tenant_admin or tenant_staff) under a tenant |
+
+**Auto-seed on `POST /admin/tenants`:**  
+When a tenant with `lend` capability is created, the backend automatically creates:
+1. One `tenantPolicies` document with default lock/unlock/escalation config
+2. Five `devicePolicies` documents (one per `policyKey`: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`) with default restrictions
+
+**Request — POST `/admin/accounts`**
+```json
+{
+  "name": "Priya Sharma",
+  "email": "priya@bharatpune.in",
+  "mobile": "9800000003",
+  "role": "tenant_admin",
+  "tenantId": "<tenantId>",
+  "temporaryPassword": "Welcome@123"
+}
+```
+> Valid roles for this route: `tenant_admin`, `tenant_staff`. Use `channelPartnerId` instead of `tenantId` for `channel_partner_admin` / `channel_partner_staff` roles.
 
 #### Consent Versions
 
@@ -1390,26 +1686,6 @@ Risk monitoring signals surfaced to super admin.
 | GET | `/admin/audit-logs/export` | Export audit log (CSV / JSON) |
 | GET | `/admin/reports/dashboard` | Platform KPIs and metrics |
 | GET | `/admin/reports/override-analysis` | Override volume and reason breakdown |
-
----
-
-### 6.6 Payment Gateway Webhook Routes (`/webhooks`)
-
-> Secured by webhook signature verification (not JWT)
-
-| Method | Route | Description |
-|---|---|---|
-| POST | `/webhooks/payment/:gateway` | Receive payment callback (UPI, gateway) |
-
-**Flow triggered by webhook:**
-1. Verify gateway signature
-2. Deduplicate by `txnRef`
-3. Update `payments.status` → `success` or `failed`
-4. If success → trigger Validation Engine → EMI schedule matching
-5. If matched → invoke Policy Engine → determine unlock action
-6. Update `devices.state` = `ACTIVE`, set `devices.currentPolicyKey` = `EMI_PAID`, increment `desiredPolicyVersion`
-7. Send `POLICY_UPDATE` FCM to device: `{ "type": "POLICY_UPDATE", "policyVersion": <n> }`
-8. Write `auditLogs` entry
 
 ---
 
@@ -1440,88 +1716,147 @@ Risk monitoring signals surfaced to super admin.
 ### 7.1 Payment-to-Unlock Flow
 
 ```
-Borrower pays via UPI
+Borrower taps "Pay Now" on lock screen
         │
         ▼
-Payment Gateway Webhook → POST /webhooks/payment/:gateway
+GET /app/payment/qr → returns active QR image URL from tenants.qrCodes
         │
         ▼
-Deduplicate by txnRef (check payments collection)
+App displays QR code image
+Borrower scans with their UPI app and pays externally
         │
         ▼
-Update payments.status = 'success'
+Borrower taps "Payment Sent" in app
         │
         ▼
-Validation Engine: match txnRef → EMI schedule installments
+POST /app/payment/submit → creates payments record
+{ status: 'approval_pending', paymentMethod: 'qr', submittedAt }
         │
-   ┌────┴────┐
-   │matched? │
-   └──┬──┬───┘
-      │  │
-    YES  NO → status = 'mismatch' → flag for manual review
-      │         do NOT trigger unlock
-      ▼
-Policy Engine: evaluate lenderPolicy.unlockRules
-      │
-  ┌───┴────────────────────────┐
-  │  unlockType?                │
-  └──┬──────────┬──────────────┘
-     │          │
-  instant    delayed (T+X min)
-     │          │
-     ▼          ▼
-Update devices.state = 'ACTIVE'
-Set devices.currentPolicyKey = 'EMI_PAID'
-Increment devices.desiredPolicyVersion
-    │
-    ▼
-Send POLICY_UPDATE FCM: { "type": "POLICY_UPDATE", "policyVersion": N }
-    │
-    ▼
+        ▼
+FCM NOTIFICATION → Tenant staff Partner App
+{ notificationType: 'PAYMENT_APPROVAL_REQUIRED' }
+        │
+        ▼
+[Tenant staff opens Partner App]
+GET /partner/payments/pending-approval → sees pending payment
+        │
+        ▼
+Tenant verifies receipt in their bank / UPI app
+        │
+        ▼
+POST /partner/payments/:paymentId/approve
+        │
+        ▼
+Update payments: { status: 'success', approvalStatus: 'approved' }
+        │
+        ▼
+Match payment amount → EMI schedule installments
+Mark installment(s) as paid
+        │
+        ▼
+Policy Engine: evaluate tenantPolicies.unlockRules
+        │
+        ▼
+Update devices.state → 'UNLOCK_PENDING'
+Set devices.policyKey → 'EMI_PAID'
+Increment devices.policyVersion
+        │
+        ▼
+Create deviceCommands: { commandType: 'UNLOCK', triggeredBy: 'payment_unlock' }
+        │
+        ▼
+Send FCM POLICY_UPDATE → device
+        │
+        ▼
 App fetches GET /app/device/policy → applies EMI_PAID policy (lockMode: false)
-    │
-    ▼
-Write auditLogs (UNLOCK_TRIGGERED)
-    │
-    ▼
-Send FCM notification: "Device Unlocked"
+App calls POST /app/device/command/ack → devices.state → 'ACTIVE'
+        │
+        ▼
+Write auditLogs (UNLOCK_TRIGGERED, POLICY_ACKNOWLEDGED)
+        │
+        ▼
+Send FCM NOTIFICATION: { notificationType: 'UNLOCK_SUCCESS' } → borrower
 ```
 
-### 7.2 Unlock Request & Auto-Escalation Flow
+### 7.2 Unlock Request & Two-Tier Escalation Flow
 
 ```
-Borrower taps "Request Unlock"
+[Borrower App — LOCKED state]
+Borrower taps "Request Unlock" → fills form (reason, details, optional JPEG)
         │
         ▼
-POST /app/unlock-request → create unlockRequests record
-caseId generated, status = PENDING_TENANT
-slaDeadline = now + policy.slaHours
+POST /app/unlock-request (multipart/form-data)
+  → image uploaded to S3 → imageUrl stored
+  → unlockRequests created: { status: 'PENDING_TENANT', caseId, slaDeadline }
+  → FCM NOTIFICATION (UNLOCK_REQUEST_RECEIVED) → tenant staff devices
         │
         ▼
-Notify lender dashboard (FCM / in-app)
+[Partner App — Tenant Staff]
+  GET /partner/unlock-requests → see case + image
+  Tenant chooses one of three actions:
+    ┌─────────────────────────────────────────────────────────┐
+    │ OPTION A — Full Unlock                                  │
+    │   POST /partner/unlock-requests/:id/approve             │
+    │   emiAction: 'waive' → installment.status = 'waived'   │
+    │   OR emiAction: 'none' → installment stays 'overdue'   │
+    │   → devices.state → UNLOCK_PENDING → FCM POLICY_UPDATE │
+    │   → case status → RESOLVED_TENANT                       │
+    ├─────────────────────────────────────────────────────────┤
+    │ OPTION B — Temp Unlock                                  │
+    │   POST /partner/unlock-requests/:id/temp-unlock         │
+    │   durationHours: N                                      │
+    │   → devices.state → TEMP_UNLOCK                        │
+    │   → case status → RESOLVED_TENANT                       │
+    ├─────────────────────────────────────────────────────────┤
+    │ OPTION C — Reject                                       │
+    │   POST /partner/unlock-requests/:id/reject              │
+    │   note: reason                                          │
+    │   → case status → REJECTED                              │
+    └─────────────────────────────────────────────────────────┘
+        │ (if tenant does NOT act before slaDeadline)
+        ▼
+[Background Scheduler — SLA Escalation Checker, runs every 5 min]
+Query: unlockRequests WHERE status='PENDING_TENANT' AND slaDeadline < now
         │
         ▼
-[Background Scheduler — runs every N minutes]
+Update status → ESCALATED_PARTNER
+escalatedToPartnerAt = now
+partnerSlaDeadline = now + policy.escalationRules.partnerEscalationSlaHours
+Write auditLogs (ESCALATION_RAISED, SLA_BREACHED)
+Create riskFlag if tenant has repeated SLA breaches
+FCM NOTIFICATION (CASE_ESCALATED_TO_PARTNER) → channel partner staff
+FCM NOTIFICATION (ESCALATION_UPDATE) → borrower
         │
         ▼
-Query: unlockRequests WHERE status=PENDING_TENANT AND slaDeadline < now
+[Partner App — Channel Partner Staff]
+  GET /cp/escalations → see cases from all their tenants
+  Channel partner chooses one of three actions (same as tenant):
+    - POST /cp/escalations/:id/approve (full unlock, optional waive)
+    - POST /cp/escalations/:id/temp-unlock
+    - POST /cp/escalations/:id/reject
+  → case status → RESOLVED_PARTNER
+        │ (if channel partner does NOT act before partnerSlaDeadline)
+        ▼
+[Background Scheduler — SLA Escalation Checker]
+Query: unlockRequests WHERE status='ESCALATED_PARTNER' AND partnerSlaDeadline < now
         │
         ▼
-Update status → ESCALATED
-escalatedAt = now
-Write auditLogs (ESCALATION_RAISED)
-Create riskFlags if repeated SLA breach
-Notify borrower: "Request escalated to admin"
-Notify super admin dashboard
+Update status → ESCALATED_ADMIN
+escalatedToAdminAt = now
+Write auditLogs (ESCALATION_RAISED, SLA_BREACHED)
+FCM NOTIFICATION (CASE_ESCALATED_TO_ADMIN) → super admin
+FCM NOTIFICATION (ESCALATION_UPDATE) → borrower: "Escalated to platform admin"
         │
         ▼
-Super Admin reviews → POST /admin/escalations/:id/unlock
-(mandatory reason required)
-        │
-        ▼
-Create deviceCommands (UNLOCK, triggeredBy: 'super_admin')
-Write auditLogs (OVERRIDE_EXECUTED)
-Update case status → RESOLVED_SUPER_ADMIN
+[Admin Dashboard — Super Admin]
+  GET /admin/escalations → see ESCALATED_ADMIN cases
+  Super admin takes action (mandatory reason on all):
+    - POST /admin/escalations/:id/unlock (override full unlock)
+    - POST /admin/escalations/:id/temp-unlock
+    - POST /admin/escalations/:id/reject
+  → deviceCommands (UNLOCK, triggeredBy: 'super_admin')
+  → auditLogs (OVERRIDE_EXECUTED)
+  → case status → RESOLVED_SUPER_ADMIN → CLOSED
 ```
 
 ### 7.3 Offline Lock / Unlock Flow
@@ -1608,26 +1943,44 @@ Write auditLogs (LOCK_TRIGGERED)
 ```
   Borrower submits → [PENDING_TENANT]
                            │
-              ┌────────────┼────────────┐
-              │            │            │
-         SLA breach   Tenant acts  Tenant rejects
-              │            │            │
-              ▼            ▼            ▼
-        [ESCALATED]  [RESOLVED_    [REJECTED]
-              │        TENANT]          │
-              │                         │
-         Admin acts                  [CLOSED]
-              │
-       ┌──────┴──────┐
-       │             │
-   Unlocked     Temp Unlock
-       │             │
-       ▼             ▼
+              ┌────────────┼────────────────┐
+              │            │                │
+         SLA breach   Tenant acts      Tenant rejects
+              │            │                │
+              ▼            ▼                ▼
+   [ESCALATED_PARTNER] [RESOLVED_TENANT]  [REJECTED]
+              │                              │
+    ┌─────────┼──────────┐               [CLOSED]
+    │         │          │
+ CP SLA    CP acts   CP rejects
+ breach       │          │
+    │         ▼          ▼
+    ▼  [RESOLVED_PARTNER] [REJECTED]
+[ESCALATED_ADMIN]           │
+    │                    [CLOSED]
+    │
+  Admin acts (mandatory reason)
+    │
+    ▼
 [RESOLVED_SUPER_ADMIN]
-       │
-       ▼
-   [CLOSED]
+    │
+    ▼
+[CLOSED]
 ```
+
+**Terminal states:** `RESOLVED_TENANT`, `RESOLVED_PARTNER`, `RESOLVED_SUPER_ADMIN`, `REJECTED`, `CLOSED`
+
+| Status | Who sets it | Trigger |
+|---|---|---|
+| `PENDING_TENANT` | System (on submit) | Borrower submits unlock request |
+| `ESCALATED_PARTNER` | Scheduler | Tenant `slaDeadline` exceeded |
+| `ESCALATED_ADMIN` | Scheduler | Channel partner `partnerSlaDeadline` exceeded |
+| `UNDER_REVIEW` | Super admin | Super admin opens case for investigation |
+| `RESOLVED_TENANT` | Tenant staff | Any of: approve, temp-unlock, reject |
+| `RESOLVED_PARTNER` | CP staff | Any of: approve, temp-unlock, reject |
+| `RESOLVED_SUPER_ADMIN` | Super admin | Override unlock / temp-unlock / reject |
+| `REJECTED` | Tenant / CP / Admin | Request denied |
+| `CLOSED` | System | Case acknowledged as complete |
 
 ---
 
@@ -1696,12 +2049,14 @@ db.devices.createIndex({ imei: 1 }, { unique: true })
 db.devices.createIndex({ state: 1, tenantId: 1 })
 
 // payments
-db.payments.createIndex({ txnRef: 1 }, { unique: true })
 db.payments.createIndex({ userId: 1, status: 1 })
+db.payments.createIndex({ tenantId: 1, approvalStatus: 1 })  // for pending-approval list
 
 // unlockRequests
 db.unlockRequests.createIndex({ tenantId: 1, status: 1 })
-db.unlockRequests.createIndex({ slaDeadline: 1, status: 1 })  // for SLA scheduler
+db.unlockRequests.createIndex({ channelPartnerId: 1, status: 1 })  // for CP escalation queue
+db.unlockRequests.createIndex({ slaDeadline: 1, status: 1 })  // for SLA scheduler (tier 1)
+db.unlockRequests.createIndex({ partnerSlaDeadline: 1, status: 1 })  // for SLA scheduler (tier 2)
 
 // auditLogs
 db.auditLogs.createIndex({ deviceId: 1, timestamp: -1 })
@@ -1722,13 +2077,98 @@ db.otpRecords.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
 
 ---
 
+## Appendix — FCM Message Types
+
+All FCM messages are sent via **Firebase Admin SDK** using the device's `devices.fcmToken`. Three distinct message types are used:
+
+### POLICY_UPDATE — Silent Data Message
+
+Tells the app its policy has changed. The app **must not trust the payload alone** — it must fetch the current policy from `GET /app/device/policy` and apply it via DevicePolicyManager, then acknowledge via `POST /app/device/command/ack`.
+
+**FCM payload:**
+```json
+{
+  "token": "<devices.fcmToken>",
+  "data": {
+    "type": "POLICY_UPDATE",
+    "commandId": "<deviceCommands._id>",
+    "policyVersion": "5"
+  },
+  "android": { "priority": "HIGH" }
+}
+```
+
+**Stored in:** `deviceCommands` (tracked with `fcmMessageId`, `sentAt`, `acknowledgedAt`)
+
+**App handling:**
+1. Receive → call `GET /app/device/policy`
+2. Apply policy via DevicePolicyManager
+3. Call `POST /app/device/command/ack` with `commandId`
+
+---
+
+### NOTIFICATION — User-Visible Push Notification
+
+Sends an in-app notification to the borrower (EMI reminder, device locked alert, unlock success, etc.). Contains a `deepLink` for tap-to-navigate behaviour.
+
+**FCM payload:**
+```json
+{
+  "token": "<devices.fcmToken>",
+  "notification": {
+    "title": "Device Restricted",
+    "body": "Your EMI payment is overdue. Your device has been restricted."
+  },
+  "data": {
+    "type": "NOTIFICATION",
+    "notificationType": "DEVICE_LOCKED",
+    "notificationId": "<notifications._id>",
+    "deepLink": "emishield://pay"
+  },
+  "android": { "priority": "HIGH" }
+}
+```
+
+**`notificationType` values (from `notifications.type` enum):**
+`EMI_REMINDER`, `OVERDUE_WARNING`, `GRACE_PERIOD_START`, `DEVICE_LOCKED`, `UNLOCK_SUCCESS`, `UNLOCK_REQUEST_RECEIVED`, `ESCALATION_UPDATE`, `TEMP_UNLOCK_APPROVED`, `TEMP_UNLOCK_EXPIRING`, `CASE_RESOLVED`, `PAYMENT_CONFIRMED`, `PAYMENT_APPROVAL_REQUIRED`, `CASE_ESCALATED_TO_PARTNER`, `CASE_ESCALATED_TO_ADMIN`
+
+**Stored in:** `notifications` (`channel: 'fcm'`)
+
+**App handling:** Show Android notification. On tap → open Borrower App at `deepLink` destination.
+
+---
+
+### SECURITY_ALERT — High-Priority Silent Data Message
+
+Sent for tamper events, consent violations, or fraud signals. The app logs the event, shows an alert to the user, and notifies the backend.
+
+**FCM payload:**
+```json
+{
+  "token": "<devices.fcmToken>",
+  "data": {
+    "type": "SECURITY_ALERT",
+    "alertCode": "CONSENT_MISSING",
+    "notificationId": "<notifications._id>"
+  },
+  "android": { "priority": "HIGH" }
+}
+```
+
+**`alertCode` values:** `CONSENT_MISSING`, `FACTORY_RESET_ATTEMPTED`, `SIM_SWAP_DETECTED`, `ROOT_DETECTED`, `DPC_REMOVED`
+
+**Stored in:** `notifications` (`channel: 'fcm'`, `type` mapped from alertCode)
+
+**App handling:** Log event locally, show alert UI, call security events API.
+
+---
+
 ## Appendix — Scheduled Jobs
 
 | Job | Frequency | Purpose |
 |---|---|---|
-| **SLA Escalation Checker** | Every 5 minutes | Query `PENDING_TENANT` cases past `slaDeadline`, auto-escalate |
+| **SLA Escalation Checker** | Every 5 minutes | Two-tier check: (1) `PENDING_TENANT` cases past `slaDeadline` → `ESCALATED_PARTNER` + notify CP; (2) `ESCALATED_PARTNER` cases past `partnerSlaDeadline` → `ESCALATED_ADMIN` + notify super admin |
 | **Temp Unlock Expiry** | Every 1 minute | Query `TEMP_UNLOCK` devices past `tempUnlockExpiresAt`, re-evaluate and relock |
 | **Command Retry** | Every 10 minutes | Retry `pending` device commands that haven't been delivered |
 | **EMI DPD Calculator** | Daily at midnight | Recalculate `dpd` on all active `emiSchedules`, trigger auto-lock policy evaluation |
 | **Risk Flag Generator** | Every 30 minutes | Detect override volume spikes, repeated SLA breaches, create `riskFlags` |
-| **Payment Validation Retry** | Every 15 minutes | Re-attempt validation for `mismatch` / `pending` payments |

@@ -57,8 +57,8 @@ Users  (the borrower — the person who buys the device on EMI)
   - Manage consent document versions
   - View platform-wide audit logs
 
-### 3.2 Partner Dashboard (Tenant Dashboard)
-- Web app used by tenant staff (NBFC managers, shop owners, agents)
+### 3.2 Partner App (Tenant App)
+- **Native Android app** used by tenant staff (NBFC managers, shop owners, agents)
 - **Scope:** Own tenant's data only (strict tenant isolation)
 - **Key functions:**
   - View all devices and their current state (ACTIVE, LOCKED, GRACE_PERIOD, etc.)
@@ -69,11 +69,12 @@ Users  (the borrower — the person who buys the device on EMI)
   - View payment history and manually validate mismatched payments
   - View audit logs for their own tenant
 
-### 3.3 Distributor Dashboard
-- Web app used by tenant staff who have the `distribute` capability
+### 3.3 Distributor App
+- **Native Android app** used by tenant staff who have the `distribute` capability
 - Note: This may be the same staff on the same tenant — it's a capability flag, not a separate role
 - **Key functions:**
   - Register a new user (borrower) with their loan details
+  - Generate and display the QR code for Android Device Owner provisioning (shown on-screen at point of sale)
   - Bind a device (by IMEI) to a registered user
   - View their device inventory and user list
 
@@ -89,11 +90,12 @@ Users  (the borrower — the person who buys the device on EMI)
 
 This is one of the most important decisions in the project — **two completely separate identity collections**:
 
-### `accounts` — Dashboard users
+### `accounts` — App users (tenant & distributor staff)
 - Super admins, channel partner staff, tenant admins, tenant staff
 - Authenticate with **email + password** (or OTP for some flows)
 - JWT contains `tokenType: "account"` and the account's `role` + `tenantId` / `channelPartnerId`
 - Roles: `super_admin` | `channel_partner_admin` | `channel_partner_staff` | `tenant_admin` | `tenant_staff`
+- Access the **Admin Dashboard** (web), **Partner App** (Android), or **Distributor App** (Android) depending on role and capabilities
 
 ### `users` — Borrowers (app users)
 - The device purchasers who use the Android app
@@ -160,20 +162,29 @@ When a borrower taps "Request Unlock" a case is created:
 
 ### Lock/Unlock Authority
 - **Automatic lock:** Triggered by a background scheduler when DPD (Days Past Due) exceeds the tenant's configured threshold after the grace period
-- **Manual lock:** Tenant staff triggers via the Partner Dashboard
-- **Automatic unlock:** Triggered when a payment webhook is received, validated, matched to the EMI schedule, and the tenant's unlock policy says unlock
-- **Manual unlock:** Tenant staff triggers via dashboard
+- **Manual lock:** Tenant staff triggers via the Partner App
+- **Automatic unlock:** Triggered when a tenant staff member approves a borrower's payment submission via the Partner App, the payment is matched to the EMI schedule, and the tenant's unlock policy says unlock
+- **Manual unlock:** Tenant staff triggers via Partner App
 - **Super admin unlock:** Only on escalated cases, always with a mandatory reason
+
+### EMI Details — When and Where They Are Entered
+Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDate`) are entered by the distributor staff **during user registration** in the **Distributor App** (`POST /distributor/users/register`). This is the correct design:
+- The loan agreement is signed at point of sale — all figures are known at that moment
+- The `emiSchedules` record is generated immediately from these details
+- QR code generation follows in the same session, with no need for a second step
 
 ### The Payment-to-Unlock Pipeline
 ```
-Payment Gateway Webhook
-  → Deduplication (unique txnRef)
+Borrower taps "I Have Paid" (POST /app/payment/submit)
+  → Payment record created (approval_pending)
+  → FCM NOTIFICATION to tenant staff
+  → Tenant verifies in bank app → approves (POST /partner/payments/:id/approve)
   → Validation Engine (match to EMI schedule)
   → Policy Engine (evaluate tenant unlock rules)
   → Device Command Queue (UNLOCK command)
-  → FCM Push to device
+  → FCM POLICY_UPDATE to device
   → Device acks → state = ACTIVE
+  → NOTIFICATION: UNLOCK_SUCCESS to borrower
   → Audit log written
 ```
 
@@ -189,9 +200,9 @@ If any step fails, the payment record is retained and surfaced for manual review
 | Database | MongoDB | 17 collections — see architecture.md |
 | Mobile App | Native Android (Java/Kotlin) | Boot receiver, FCM, background service, device admin API |
 | Push Notifications | Firebase Cloud Messaging (FCM) | Lock/unlock commands + user notifications |
-| Payments | UPI + Payment Gateway | Webhook-driven. Deep link UPI from app |
+| Payments | UPI QR (tenant-managed) | Tenant uploads QR images; borrower scans and pays externally; tenant approves via Partner App |
 | OTP / SMS | SMS provider (e.g. MSG91) | Login OTP + Aadhaar-linked consent OTP |
-| File Storage | S3-compatible | Payment proof document uploads |
+| File Storage | S3-compatible | QR code image uploads, payment proof documents |
 | Dashboard | React (Web) | Three separate web apps or one with role-based views |
 
 ---
@@ -238,7 +249,6 @@ See `architecture.md` Section 6 for all routes with request/response examples.
 | `/api/v1/distributor` | Tenant staff with `distribute` capability | `tokenType: account` |
 | `/api/v1/partner` | Tenant staff with `lend` capability | `tokenType: account` |
 | `/api/v1/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
-| `/api/v1/webhooks/payment` | Payment gateways | HMAC-SHA256 signature |
 | `/api/v1/device` | Android app (device sync) | `tokenType: user` JWT (device-bound) |
 
 ---
@@ -251,9 +261,9 @@ These rules must be enforced at the API/service layer, not just the UI:
 
 2. **Emergency calls** — The Android app must never block emergency calling (112). This is a legal requirement.
 
-3. **Payment not equal to unlock** — A successful payment callback does NOT immediately unlock the device app-side. The server must validate the payment, match it to the EMI schedule, evaluate policy, and then send an unlock command. The app waits for the server command.
+3. **Payment not equal to unlock** — A successful "I paid" submission does NOT immediately unlock the device. The server creates an `approval_pending` payment, notifies the tenant, and waits for explicit tenant approval. The app waits for the server command only after tenant approves.
 
-4. **Payment deduplication** — `payments.txnRef` has a unique index. A duplicate webhook with the same `txnRef` is silently dropped — it must never trigger a second unlock.
+4. **No duplicate approvals** — A payment in `approved` status cannot be approved again. The approval endpoint validates `approvalStatus: 'pending_approval'` before proceeding — it must never trigger a double-unlock.
 
 5. **Override requires reason** — Super admin override endpoints reject requests with no `reason` field at the route level.
 
@@ -357,7 +367,7 @@ EMI Shield/
 │   │   │   ├── auth/       ← OTP, JWT, session
 │   │   │   ├── consent/    ← Consent flow, versioning
 │   │   │   ├── device/     ← Device management, state, commands
-│   │   │   ├── payment/    ← Payment ingestion, validation, webhook
+│   │   │   ├── payment/    ← Payment QR fetch, submission, tenant approval
 │   │   │   ├── policy/     ← Tenant policy engine
 │   │   │   ├── cases/      ← Unlock requests, escalation
 │   │   │   ├── audit/      ← Audit logger
@@ -374,11 +384,10 @@ EMI Shield/
 │   └── package.json
 │
 ├── admin-dashboard/        ← React web app (Super Admin)
-├── partner-dashboard/      ← React web app (Tenant staff)
-├── distributor-dashboard/  ← React web app (Tenant distribute staff)
-│                              Note: May be part of partner-dashboard with role-based views
+├── partner-app/            ← Native Android (Tenant staff — lend operations, payment approval, QR management)
+├── distributor-app/        ← Native Android (Distributor staff — user registration, QR generation)
 │
-└── android-app/            ← Native Android (Java/Kotlin)
+└── android-app/            ← Native Android (Borrower — lock screen, EMI, payment QR scan)
 ```
 
 ---
@@ -401,7 +410,7 @@ EMI Shield/
 | **Override** | Super admin forcing an unlock on an escalated case. Always requires a reason |
 | **Risk Flag** | An automated alert to super admin (e.g. tenant has high override volume, SIM changed on device) |
 | **FCM** | Firebase Cloud Messaging — used to push lock/unlock commands and notifications to the Android app |
-| **txnRef** | Unique payment transaction reference from the gateway — used for deduplication |
+| **txnRef** | ~~Removed~~ — no longer used. Payments are identified by `_id` and matched by amount to EMI schedule |
 | **IMEI** | Device hardware identifier — the primary device binding key |
 | **Lend capability** | A tenant that can lock/unlock devices and configure policy |
 | **Distribute capability** | A tenant that can register devices and onboard users |
@@ -417,7 +426,7 @@ EMI Shield/
 | `consentRecords` are immutable | Legal requirement. A consent record is a legal artefact. If you need to re-consent, you create a new record |
 | `auditLogs` are never updated/deleted | Tamper-evident logs are a regulatory requirement for a financial enforcement platform |
 | Payment does not instantly unlock (app-side) | Prevents race conditions and fraud. The server is the single source of truth for unlock decisions |
-| Unique index on `payments.txnRef` | Payment gateways often send duplicate webhooks. This prevents double-unlock at the DB level |
+| No duplicate approvals guard on `payments.approvalStatus` | A payment can only be approved once. This prevents double-unlock at the service layer |
 | `tenantId` in JWT + middleware scope | Ensures no tenant can ever query another tenant's data, even with a crafted request |
 | FCM + polling hybrid for device sync | FCM is fast but unreliable (device offline, app killed). Polling on reconnect ensures eventual delivery |
 | `deviceCommands` queue with retry | Handles the offline device case — commands persist and are retried, never lost |
