@@ -57,32 +57,36 @@ Users  (the borrower — the person who buys the device on EMI)
   - Manage consent document versions
   - View platform-wide audit logs
 
-### 3.2 Partner App (Tenant App)
-- **Native Android app** used by `tenant_admin` accounts (NBFC managers, shop owners, authorised tenant operators)
-- **Scope:** Own tenant's data only (strict tenant isolation)
-- **Key functions:**
-  - View all devices and their current state (ACTIVE, LOCKED, GRACE_PERIOD, etc.)
-  - Manually lock or unlock a specific device
-  - Grant temporary unlock (e.g. 24 hours)
-  - Review and action borrower unlock requests within SLA
-  - Configure lock/unlock/escalation policy (days past due, grace period, SLA hours, etc.)
-  - View payment history and manually validate mismatched payments
-  - View audit logs for their own tenant
+### 3.2 Partner App
+- **Native Android app** used by `partner_admin` accounts
+- **Scope:** All tenants under the partner admin's `channelPartnerId`
+- **Key functions currently implemented:**
+  - View partner dashboard across tenants, borrowers, devices, accounts, and cases
+  - List and create tenants under the partner
+  - Create, update, activate, and deactivate `tenant_admin` accounts for partner-owned tenants
+  - Review cases escalated from tenants to partner
+  - Resolve partner escalations by full unlock, temporary unlock, or rejection
 
-### 3.3 Distributor App
-- **Native Android app** used by `tenant_admin` accounts whose tenant has the `distribute` capability
-- Note: Distribution is controlled by the tenant's capability flag, not by a separate account role
-- **Key functions:**
-  - Register a new user (borrower) with their loan details
-  - Generate and display the QR code for Android Device Owner provisioning (shown on-screen at point of sale)
-  - Bind a device (by IMEI) to a registered user
-  - View their device inventory and user list
+### 3.3 Tenant App / Distributor App
+- **Native Android app** used by `tenant_admin` accounts
+- **Scope:** Own tenant's data only (strict tenant isolation)
+- **Key functions currently implemented:**
+  - View tenant onboarding dashboard
+  - Register a borrower with loan and EMI details
+  - Generate and display Android Device Owner provisioning QR code
+  - Track enrollment status
+  - View borrower and device details
+  - Regenerate enrollment QR before device activation
 
 ### 3.4 Android App (Borrower App)
 - Native Android app installed on the financed device at point of sale
-- The borrower uses this app to pay EMIs, request unlocks, and track escalation status
-- The app also runs as a background service — it receives FCM push commands for lock/unlock and syncs state on reconnect
-- **CRITICAL:** The app must survive device restart (boot receiver), work offline (queue sync), and resist tampering/rooting
+- The borrower uses this app to complete consent, register the device, fetch policy, pay EMIs, request unlocks, and track escalation status
+- The app also runs as a background service for FCM push commands and reconnect sync
+- **CRITICAL:** The app must survive device restart, work offline, and resist tampering/rooting
+
+### 3.5 Future Tenant Lending Operations
+- Tenant-side payment approval, manual lock/unlock, QR payment management, tenant audit logs, and policy editing are planned lending operations.
+- These should be scoped to `tenant_admin` accounts and require tenant `lend` capability.
 
 ---
 
@@ -99,7 +103,7 @@ This is one of the most important decisions in the project — **two completely 
 
 ### `users` — Borrowers (app users)
 - The device purchasers who use the Android app
-- Authenticate with **mobile OTP only** (no password)
+- In the current simulation, receive a borrower JWT after mocked Cashfree Aadhaar OTP consent confirmation
 - JWT contains `tokenType: "user"`
 - No dashboard access whatsoever
 
@@ -153,9 +157,11 @@ When a borrower taps "Request Unlock" a case is created:
 | State | Meaning |
 |---|---|
 | `PENDING_TENANT` | Waiting for the tenant to action |
-| `ESCALATED` | Tenant didn't respond within SLA — auto-escalated to super admin |
+| `ESCALATED_PARTNER` | Tenant didn't respond within SLA — auto-escalated to channel partner |
+| `ESCALATED_ADMIN` | Partner didn't respond within SLA — auto-escalated to super admin |
 | `UNDER_REVIEW` | Super admin is reviewing |
 | `RESOLVED_TENANT` | Tenant approved/rejected |
+| `RESOLVED_PARTNER` | Partner approved/rejected |
 | `RESOLVED_SUPER_ADMIN` | Super admin overrode |
 | `REJECTED` | Request denied |
 | `CLOSED` | Completed |
@@ -165,7 +171,8 @@ When a borrower taps "Request Unlock" a case is created:
 - **Manual lock:** A `tenant_admin` triggers via the Partner App
 - **Automatic unlock:** Triggered when a `tenant_admin` approves a borrower's payment submission via the Partner App, the payment is matched to the EMI schedule, and the tenant's unlock policy says unlock
 - **Manual unlock:** A `tenant_admin` triggers via Partner App
-- **Super admin unlock:** Only on escalated cases, always with a mandatory reason
+- **Partner admin unlock:** Only on `ESCALATED_PARTNER` cases from tenants under the partner, always with a note
+- **Super admin unlock:** Only on `ESCALATED_ADMIN` cases, always with a mandatory reason
 
 ### EMI Details — When and Where They Are Entered
 Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDate`) are entered by a `tenant_admin` from a tenant with `distribute` capability **during user registration** in the **Distributor App** (`POST /distributor/users/register`). This is the correct design:
@@ -201,7 +208,7 @@ If any step fails, the payment record is retained and surfaced for manual review
 | Mobile App | Native Android (Java/Kotlin) | Boot receiver, FCM, background service, device admin API |
 | Push Notifications | Firebase Cloud Messaging (FCM) | Lock/unlock commands + user notifications |
 | Payments | UPI QR (tenant-managed) | Tenant uploads QR images; borrower scans and pays externally; tenant approves via Partner App |
-| OTP / SMS | SMS provider (e.g. MSG91) | Login OTP + Aadhaar-linked consent OTP |
+| OTP / Aadhaar Verification | Mocked Cashfree Aadhaar OTP in current backend | Consent OTP simulation; real provider can replace mock later |
 | File Storage | S3-compatible | QR code image uploads, payment proof documents |
 | Dashboard | React (Web) | Three separate web apps or one with role-based views |
 
@@ -247,7 +254,7 @@ See `architecture.md` Section 6 for all routes with request/response examples.
 | `/api/v1/auth` | Everyone | Public (OTP) / Credential |
 | `/api/v1/app` | Borrowers (Android app) | `tokenType: user` JWT |
 | `/api/v1/distributor` | `tenant_admin` with `distribute` capability | `tokenType: account` |
-| `/api/v1/partner` | `tenant_admin` with `lend` capability | `tokenType: account` |
+| `/api/v1/partner` | `partner_admin` for partner dashboard, tenant onboarding, tenant admin accounts, and partner escalations | `tokenType: account` + `role: partner_admin` |
 | `/api/v1/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
 | `/api/v1/device` | Android app (device sync) | `tokenType: user` JWT (device-bound) |
 
@@ -271,7 +278,7 @@ These rules must be enforced at the API/service layer, not just the UI:
 
 7. **Audit everything** — Every state change, payment event, consent action, escalation, and override writes to `auditLogs`. There are no silent operations.
 
-8. **SLA auto-escalation** — A background scheduler runs every 5 minutes querying `unlockRequests` where `status = PENDING_TENANT` and `slaDeadline < now`. These auto-escalate without any manual trigger.
+8. **SLA auto-escalation** — A background scheduler runs every 5 minutes. `PENDING_TENANT` cases past `slaDeadline` become `ESCALATED_PARTNER`; `ESCALATED_PARTNER` cases past `partnerSlaDeadline` become `ESCALATED_ADMIN`.
 
 9. **Offline command queuing** — If a device is offline when a lock/unlock command is issued, the command is stored in `deviceCommands` with `status: pending`. When the device reconnects and calls `/device/sync`, it receives pending commands and applies them locally, then acks.
 
@@ -347,9 +354,11 @@ The `consentRecord` stores: borrower ID, device ID, tenant ID, consent version, 
 | Borrower App Use Cases (UC-1 to UC-32) | ✅ Complete | `D:\use case of emi shield app.docx` |
 | System Architecture | ✅ Complete | `architecture.md` (this folder) |
 | Database Schemas (MongoDB) | ✅ Complete | `architecture.md` Section 5 |
-| API Routes | ✅ Complete | `architecture.md` Section 6 |
+| API Routes | 🟡 Partially implemented | Implemented: `/auth`, `/admin`, `/partner`, `/distributor`, core `/app`; planned: payments, device sync, FCM jobs |
 | Super Admin Flows | ✅ Complete | `super-admin-flows.md` |
-| Backend implementation | ❌ Not started | — |
+| Partner App Flows | ✅ Complete | `partner_flows.md` |
+| Tenant Onboarding Flows | ✅ Complete | `tenant_flows.md`, `onboarding.md` |
+| Backend implementation | 🟡 In progress | `backend/` |
 | Frontend dashboards | ❌ Not started | — |
 | Android app | ❌ Not started | — |
 
@@ -365,15 +374,12 @@ EMI Shield/
 ├── backend/                ← Node.js + Express API
 │   ├── src/
 │   │   ├── modules/
-│   │   │   ├── auth/       ← OTP, JWT, session
-│   │   │   ├── consent/    ← Consent flow, versioning
-│   │   │   ├── device/     ← Device management, state, commands
-│   │   │   ├── payment/    ← Payment QR fetch, submission, tenant approval
-│   │   │   ├── policy/     ← Tenant policy engine
-│   │   │   ├── cases/      ← Unlock requests, escalation
-│   │   │   ├── audit/      ← Audit logger
-│   │   │   ├── notifications/ ← FCM, SMS, email
-│   │   │   └── admin/      ← Super admin operations
+│   │   │   ├── auth/        ← Account login, refresh cookie, logout
+│   │   │   ├── admin/       ← Super admin operations
+│   │   │   ├── partner/     ← Partner admin tenant onboarding and escalations
+│   │   │   ├── distributor/ ← Tenant admin borrower/device onboarding
+│   │   │   ├── app/         ← Borrower consent and device registration
+│   │   │   └── health/      ← Health route scaffold
 │   │   ├── middleware/
 │   │   │   ├── verifyJWT.js
 │   │   │   ├── requireRole.js
@@ -385,8 +391,8 @@ EMI Shield/
 │   └── package.json
 │
 ├── admin-dashboard/        ← React web app (Super Admin)
-├── partner-app/            ← Native Android (`tenant_admin` — lend operations, payment approval, QR management)
-├── distributor-app/        ← Native Android (`tenant_admin` with distribute capability — user registration, QR generation)
+├── partner-app/            ← Native Android (`partner_admin` — tenant onboarding, partner escalations)
+├── tenant-app/             ← Native Android (`tenant_admin` — onboarding and future lend operations)
 │
 └── android-app/            ← Native Android (Borrower — lock screen, EMI, payment QR scan)
 ```
@@ -407,7 +413,7 @@ EMI Shield/
 | **Consent Record** | The immutable legal proof that the borrower agreed to device control. Aadhaar OTP backed |
 | **Device Command** | A LOCK or UNLOCK instruction queued for delivery to the device via FCM |
 | **Unlock Request / Case** | Created when a borrower taps "Request Unlock" on the lock screen |
-| **Escalation** | An unlock request that the tenant didn't action within SLA — routed to super admin |
+| **Escalation** | An unlock request that moves from tenant to partner, then to super admin if SLAs are breached |
 | **Override** | Super admin forcing an unlock on an escalated case. Always requires a reason |
 | **Risk Flag** | An automated alert to super admin (e.g. tenant has high override volume, SIM changed on device) |
 | **FCM** | Firebase Cloud Messaging — used to push lock/unlock commands and notifications to the Android app |

@@ -1,345 +1,391 @@
-# EMI Shield — Android Device Owner Onboarding Flow
+# EMI Shield - Tested Onboarding Flow
 
-## Overview
+## Purpose
 
-This document explains the complete onboarding flow for the EMI Shield ecosystem, from device purchase to the first policy enforcement.
+This document matches the onboarding flow that is currently implemented and tested in the backend. It covers the Tenant App flow used by `tenant_admin` accounts and the Shield App flow used on the borrower's financed device.
 
-### Architecture Components
+**Base URL:** `http://localhost:<PORT>/api/v1`
 
-- Shield Android App (Device Owner App — installed on borrower's device)
-- Distributor Android App (used by `tenant_admin` accounts with `distribute` capability to register users and generate QR codes)
-- Tenant Android App (used by `tenant_admin` accounts for daily lock/unlock operations)
-- Backend REST API (`/api/v1`)
-- Firebase Cloud Messaging (FCM)
-- QR-based Android Device Owner provisioning
-- Backend-proxied third-party Aadhaar OTP Verification Service
-
-> **Note:** This implementation does **not** use Android Management API (AMAPI) because EMI-based device restriction policies are not compatible with AMAPI usage policies. Instead, we use Android Device Owner provisioning via `DevicePolicyManager` APIs and a custom backend policy engine.
-
----
-
-## Core Concepts
-
-| Concept | Description |
-|---|---|
-| **Device Owner** | Highest Android device management privilege — granted via QR provisioning |
-| **DeviceAdminReceiver** | Android admin component registered in the Shield app manifest |
-| **DevicePolicyManager** | Android API for applying device restrictions (lock mode, app blocking, factory reset) |
-| **QR Provisioning** | Android enterprise-style enrollment from a factory-reset device |
-| **Enrollment Token** | Opaque one-time token embedded in the QR code — resolves to `userId` + `tenantId` server-side |
-| **FCM** | Firebase Cloud Messaging — delivers `POLICY_UPDATE` signals to the app |
-| **Policy Engine** | Backend logic that maps device state → active `devicePolicies` key per tenant |
-| **devicePolicies** | Per-tenant enforcement policies keyed by device state (`EMI_PAID`, `EMI_LOCKED`, etc.) |
-
----
-
-## Identity Model
-
-| Term | Meaning |
-|---|---|
-| `userId` | ObjectId referencing the `users` collection — the borrower |
-| `tenantId` | ObjectId referencing the `tenants` collection — the org that sold the device |
-| `enrollmentToken` | Opaque short-lived token generated when the loan enrollment is created |
-
-> **Security rule:** Never put `userId` or `tenantId` in the QR payload extras. Use only the opaque `enrollmentToken`. The backend resolves all identifiers from the token.
-
----
-
-## High-Level Architecture
+In production this becomes the deployed API host, for example:
 
 ```text
-┌──────────────────────┐
-│   Tenant Dashboard   │
-│   (Tenant Admin)     │
-└──────────┬───────────┘
-           │ POST /distributor/users/register
-           ▼
-┌──────────────────────┐
-│       Backend        │
-│  Enrollment Engine   │
-│  Consent Engine      │
-│  Policy Engine       │
-└──────────┬───────────┘
-           │ REST + FCM (POLICY_UPDATE)
-           ▼
-┌──────────────────────┐
-│     Shield App       │
-│  Device Owner App    │
-└──────────┬───────────┘
-           │
-           ▼
-  Android DevicePolicyManager
+https://api.emishield.in/api/v1
 ```
 
 ---
 
-## Onboarding Flow
+## Implemented API Summary
 
-### Step 1 — Distributor App Creates Enrollment
+| Step | API | Auth | Status |
+|---|---|---|---|
+| Tenant admin login | `POST /auth/login` | Public | Implemented |
+| Refresh tenant/admin token | `POST /auth/refresh-token` | HTTP-only refresh cookie | Implemented |
+| Tenant dashboard | `GET /distributor/dashboard` | `tenant_admin` access token | Implemented |
+| Register borrower | `POST /distributor/users/register` | `tenant_admin` access token | Implemented |
+| Generate enrollment QR | `POST /distributor/enrollment/qr` | `tenant_admin` access token | Implemented |
+| Track enrollment status | `GET /distributor/enrollments/:token/status` | `tenant_admin` access token | Implemented |
+| View borrower detail | `GET /distributor/users/:id` | `tenant_admin` access token | Implemented |
+| View device inventory | `GET /distributor/devices` | `tenant_admin` access token | Implemented |
+| View device detail | `GET /distributor/devices/:id` | `tenant_admin` access token | Implemented |
+| Regenerate enrollment QR | `POST /distributor/enrollment/:token/regenerate` | `tenant_admin` access token | Implemented |
+| Fetch consent terms | `GET /app/consent/terms` | Public | Implemented |
+| Initiate Aadhaar OTP | `POST /app/consent/initiate` | Public | Implemented with mock Cashfree flow |
+| Confirm Aadhaar OTP | `POST /app/consent/confirm` | Public | Implemented with mock Cashfree flow |
+| Register device | `POST /app/device/register` | Borrower user access token | Implemented |
+| Fetch device policy | `GET /app/device/policy` | Borrower user access token | Implemented |
 
-Tenant admin logs into the **Distributor Android App** and registers the borrower + loan details.
+Not yet implemented in the current tested backend:
 
-**API Call:**
+- `POST /app/device/ping`
+- `POST /app/device/sync`
+- `POST /app/security/event`
+- FCM push delivery
+- Automatic EMI scheduler/state transition worker
+
+---
+
+## Actors
+
+| Actor | Meaning |
+|---|---|
+| `super_admin` | Platform admin who creates partners, tenants, accounts, and consent versions |
+| `tenant_admin` | Tenant app user who registers borrowers and manages onboarding |
+| Borrower user | Financed device user created during borrower registration |
+| Shield App | Android Device Owner app installed/provisioned on the financed device |
+
+There is no `tenant_staff` role in the current flow.
+
+---
+
+## Core Rules
+
+1. The tenant admin access token is a JWT returned from `/auth/login`.
+2. The account refresh token is stored only as an HTTP-only cookie.
+3. The QR payload contains only an opaque `enrollmentToken`.
+4. The QR payload must not contain `userId`, `tenantId`, loan data, or EMI details.
+5. The borrower access token is issued only after consent OTP confirmation.
+6. The borrower access token is used for device registration and device policy fetch.
+7. Tenant and device policies are created for every tenant from centralized constants during tenant creation.
+
+---
+
+## Pre-Test Setup
+
+Before running onboarding, these records should already exist:
+
+1. One active tenant.
+2. One active `tenant_admin` account linked to that tenant.
+3. One active/current consent version.
+4. Tenant device policies created during tenant creation.
+
+The tenant must have the `distribute` capability because distributor routes require it.
+
+---
+
+## Step 1 - Tenant Admin Login
+
+```http
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "tenantadmin@example.com",
+  "password": "Welcome@123"
+}
 ```
-POST /api/v1/distributor/users/register
-Authorization: Bearer <tenantAdminToken>
 
-Body:
+Expected result:
+
+- Response contains `accessToken`.
+- Response account has `role: "tenant_admin"`.
+- Response account has `tenantId`.
+- Refresh token is set in an HTTP-only cookie.
+
+Use this access token as:
+
+```text
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+---
+
+## Step 2 - Check Tenant Dashboard
+
+```http
+GET /api/v1/distributor/dashboard
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+Expected result:
+
+- Total borrowers count.
+- Borrowers registered today count.
+- Enrollment token counts: `active`, `consumed`, `expired`, `cancelled`.
+- Device counts: `activated`, `pendingActivation`, `byState`.
+- Recent enrollments with status.
+
+This is useful before and after onboarding to confirm counts change correctly.
+
+---
+
+## Step 3 - Register Borrower And EMI Details
+
+```http
+POST /api/v1/distributor/users/register
+Authorization: Bearer <tenantAdminAccessToken>
+Content-Type: application/json
+
 {
   "name": "Ramesh Kumar",
   "mobile": "9876543210",
-  "email": "ramesh@email.com",
+  "email": "ramesh@example.com",
   "aadhaarLinkedMobile": "9876543210",
-  "loanId": "LOAN-2024-001",
+  "loanId": "LOAN-TEST-001",
   "loanAmount": 18000,
-  "emiAmount": 3500,
+  "emiAmount": 3000,
   "tenureMonths": 6,
-  "disbursementDate": "2024-01-01"
+  "disbursementDate": "2026-05-21"
 }
 ```
 
-**Backend actions:**
-1. Creates a `users` record (linked to the tenant)
-2. Creates an `emiSchedules` record for the loan
-3. Generates a one-time `enrollmentToken` linked to the `userId` + `tenantId`
+Backend actions:
 
-**Response:**
-```json
-{
-  "userId": "<ObjectId>",
-  "loanId": "LOAN-2024-001",
-  "enrollmentToken": "TEMP_TOKEN_ABC123",
-  "tokenExpiresAt": "2024-01-08T23:59:59Z"
-}
+1. Validates `tenant_admin` and tenant scope.
+2. Confirms the tenant is active and can distribute devices.
+3. Creates the borrower in `users` with `tenantId` from the JWT.
+4. Creates the EMI schedule in `emiSchedules`.
+5. Creates a short-lived enrollment token in `enrollmentTokens`.
+6. Writes an audit log.
+
+Save these response values:
+
+- `userId`
+- `tenantId`
+- `emiScheduleId`
+- `enrollmentToken`
+- `tokenExpiresAt`
+
+Initial enrollment status at this point is usually:
+
+```text
+USER_REGISTERED
 ```
 
 ---
 
-### Step 2 — Backend Generates QR Payload
+## Step 4 - Generate Enrollment QR
 
-The **Distributor Android App** calls the backend to generate the Android Device Owner provisioning QR, which is then displayed on-screen for scanning.
-
-**API Call:**
-```
+```http
 POST /api/v1/distributor/enrollment/qr
-Authorization: Bearer <tenantAdminToken>
+Authorization: Bearer <tenantAdminAccessToken>
+Content-Type: application/json
 
-Body:
-{ "enrollmentToken": "TEMP_TOKEN_ABC123" }
+{
+  "enrollmentToken": "<enrollmentToken>"
+}
 ```
 
-**QR Payload (Android provisioning format):**
+Backend actions:
+
+1. Validates tenant admin access.
+2. Confirms the token belongs to the same tenant.
+3. Rejects expired, consumed, or cancelled tokens.
+4. Builds the Android Device Owner provisioning payload.
+5. Generates a QR image data URL.
+6. Stores `lastQrGeneratedAt`.
+7. Writes an audit log.
+
+Expected response includes:
+
 ```json
 {
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME":
-    "com.emishield.app/.AdminReceiver",
-
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION":
-    "https://cdn.emishield.in/releases/shield.apk",
-
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM":
-    "<SHA256_OF_APK_SIGNING_CERT>",
-
-  "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": false,
-
-  "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
-    "enrollmentToken": "TEMP_TOKEN_ABC123"
-  }
+  "qrPayload": {
+    "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": "com.emishield.app/.AdminReceiver",
+    "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "https://cdn.emishield.in/releases/shield.apk",
+    "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "<SHA256_OF_APK_SIGNING_CERT>",
+    "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": false,
+    "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
+      "enrollmentToken": "<enrollmentToken>"
+    }
+  },
+  "qrCodeDataUrl": "data:image/png;base64,...",
+  "qrCodeMimeType": "image/png",
+  "enrollmentToken": "<enrollmentToken>",
+  "tokenExpiresAt": "2026-05-28T..."
 }
 ```
 
-> The extras bundle contains **only** the opaque `enrollmentToken`. No `userId`, `tenantId`, or loan data is embedded in the QR.
+Tenant App action:
 
----
+- Render `qrCodeDataUrl` as an image.
+- The QR image is now available directly from the API response.
 
-### Step 3 — Device Provisioning (Factory Reset Required)
+Enrollment status after QR generation:
 
-**Precondition:** Brand-new phone or factory-reset device.
-
-**Steps:**
-1. Boot device to Android setup screen
-2. Tap the setup screen 6 times to enter QR provisioning mode
-3. Connect to WiFi
-4. Scan QR code
-
-Android Device Owner provisioning begins automatically.
-
----
-
-### Step 4 — Android Downloads APK
-
-Android OS performs:
-```
-GET https://cdn.emishield.in/releases/shield.apk
-```
-Downloaded before the launcher/home screen setup completes. Android validates the APK signature, checksum, and `DeviceAdminReceiver` existence.
-
----
-
-### Step 5 — Device Owner Assignment
-
-Android locates the `DeviceAdminReceiver` declared in the app manifest:
-
-```xml
-<receiver
-    android:name=".AdminReceiver"
-    android:permission="android.permission.BIND_DEVICE_ADMIN">
-  <meta-data
-      android:name="android.app.device_admin"
-      android:resource="@xml/device_admin_policies"/>
-</receiver>
+```text
+QR_GENERATED
 ```
 
-Android grants **Device Owner** + Device Administration privileges. The Shield app is now the privileged device controller.
-
 ---
 
-### Step 6 — Shield App Initializes
+## Step 5 - Android Device Owner Provisioning
 
-The app's `DeviceAdminReceiver.onProfileProvisioningComplete()` callback fires. The app extracts the `enrollmentToken` from the QR provisioning extras:
+Precondition:
 
-```java
-@Override
-public void onProfileProvisioningComplete(Context context, Intent intent) {
-    PersistableBundle extras = intent.getParcelableExtra(
-        DevicePolicyManager.EXTRA_PROVISIONING_ADMIN_EXTRAS_BUNDLE);
-    String enrollmentToken = extras.getString("enrollmentToken");
-    // Store token locally, proceed to consent flow
+- Device is new or factory reset.
+
+Manual Android setup:
+
+1. Boot the device to the Android setup screen.
+2. Tap the setup screen 6 times to open QR provisioning mode.
+3. Connect to WiFi.
+4. Scan the QR shown by the Tenant App.
+5. Android downloads and installs the Shield APK.
+6. Android assigns Device Owner privileges to the Shield App.
+
+The QR extras bundle contains:
+
+```json
+{
+  "enrollmentToken": "<enrollmentToken>"
 }
 ```
 
+No borrower, tenant, or loan identifiers are exposed in the QR.
+
 ---
 
-### Step 7 — Consent Flow (Legally Mandatory)
+## Step 6 - Fetch Consent Terms
 
-> ⚠️ **This step is a legal requirement. Do not skip or allow bypassing.**
+The Shield App fetches the current consent version before OTP.
 
-The consent flow uses a **backend-proxied** Aadhaar OTP verification service. The app never calls the Aadhaar provider directly — all provider calls are made by the backend. This ensures API keys are never exposed on-device and that the verified identity data is trusted server-side.
-
-#### Step 7a — Fetch Consent Terms
-
-```
+```http
 GET /api/v1/app/consent/terms
-(No auth token required)
 ```
 
-**Response:**
-```json
-{
-  "version": "1.1",
-  "title": "EMI Shield Device Control Agreement",
-  "borrowerAgreementText": "...",
-  "deviceControlConsentText": "...",
-  "privacyPolicyText": "...",
-  "tripartiteAckText": "..."
-}
-```
+Expected result:
 
-**App action:** Display the full agreement. The user must scroll to the bottom and tick a checkbox. Do not allow proceeding until the checkbox is ticked.
+- Active/current consent version.
+- Borrower agreement text.
+- Device control consent text.
+- Privacy policy text.
+- Tripartite acknowledgement text.
+
+The borrower must accept the consent checkbox before OTP confirmation.
 
 ---
 
-#### Step 7b — Initiate Aadhaar OTP
+## Step 7 - Initiate Mock Cashfree Aadhaar OTP
 
-After the user ticks the checkbox, the app calls:
-
-```
+```http
 POST /api/v1/app/consent/initiate
-(No auth token required)
+Content-Type: application/json
 
-Body:
 {
-  "enrollmentToken": "TEMP_TOKEN_ABC123",
+  "enrollmentToken": "<enrollmentToken>",
   "aadhaarLinkedMobile": "9876543210"
 }
 ```
 
-**What the backend does:**
-1. Validates the `enrollmentToken` (exists, not expired, not yet consumed)
-2. Calls the third-party Aadhaar OTP provider to send an OTP to the provided mobile
-3. Stores the provider's `verificationSessionId` internally (linked to the enrollment)
+Backend actions:
 
-**Response:**
+1. Validates token exists.
+2. Rejects expired, consumed, or cancelled tokens.
+3. Loads the borrower from the token.
+4. Confirms `aadhaarLinkedMobile` matches the registered borrower.
+5. Confirms an active consent version exists.
+6. Creates an `otpRecords` document.
+7. Writes an audit log.
+
+Current simulation response includes the mock OTP:
+
 ```json
 {
-  "verificationSessionId": "VS_XYZ789",
+  "verificationSessionId": "cf_mock_...",
   "otpSent": true,
   "maskedMobile": "98****3210",
-  "expiresInSeconds": 600
+  "expiresInSeconds": 600,
+  "mockOtp": "123456"
 }
 ```
 
-**App action:** Show OTP input screen. The user enters the OTP received on their Aadhaar-linked mobile.
+For testing, use:
+
+```text
+123456
+```
 
 ---
 
-#### Step 7c — Confirm Consent + Verify Aadhaar OTP
+## Step 8 - Confirm Consent OTP
 
-```
+```http
 POST /api/v1/app/consent/confirm
-(No auth token required)
+Content-Type: application/json
 
-Body:
 {
-  "enrollmentToken": "TEMP_TOKEN_ABC123",
-  "verificationSessionId": "VS_XYZ789",
-  "otp": "482910",
+  "enrollmentToken": "<enrollmentToken>",
+  "verificationSessionId": "cf_mock_...",
+  "otp": "123456",
   "consentCheckboxAccepted": true,
-  "consentVersion": "1.1"
+  "consentVersion": "1.0"
 }
 ```
 
-**What the backend does:**
-1. Calls the Aadhaar provider to verify the OTP using `verificationSessionId`
-2. Provider returns verified identity (`name`, `dob`, `address`) — stored as `verifiedProfile` on the `users` record (not overwriting the distributor-entered fields)
-3. Creates an immutable `consentRecords` document with `aadhaarVerificationRef` from the provider
-4. Marks the `enrollmentToken` as consumed
-5. Issues a JWT (`tokenType: "user"`) for the borrower
+Backend actions:
 
-**Response:**
+1. Validates token exists.
+2. Rejects expired, consumed, or cancelled tokens.
+3. Validates OTP session.
+4. Verifies mock OTP.
+5. Builds a mock Cashfree Aadhaar profile.
+6. Compares Aadhaar profile name with borrower name.
+7. Creates a `consentRecords` document.
+8. Marks the borrower as Aadhaar verified.
+9. Saves `consentRecordId` on the user.
+10. Marks the enrollment token as consumed.
+11. Writes an audit log.
+12. Issues a borrower user access token.
+
+Expected response:
+
 ```json
 {
-  "consentRecordId": "<ObjectId>",
+  "consentRecordId": "<consentRecordId>",
   "consentAccepted": true,
-  "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
+  "accessToken": "<borrowerUserAccessToken>",
   "tokenType": "user",
   "user": {
     "id": "<userId>",
     "name": "Ramesh Kumar",
-    "tenantId": "<tenantId>"
+    "tenantId": "<tenantId>",
+    "consentRecordId": "<consentRecordId>"
   }
 }
 ```
 
-**App action:** Store `accessToken` and `refreshToken` in `EncryptedSharedPreferences`. Proceed to device registration.
+Important:
+
+- The current borrower flow returns an access token.
+- It does not return a borrower refresh token in the tested implementation.
+
+Enrollment status after consent confirmation, before device registration:
+
+```text
+CONSENT_COMPLETED
+```
 
 ---
 
-### Step 8 — Device Registration
+## Step 9 - Register Device
 
-The Shield app collects device hardware details and registers with the backend.
+Use the borrower user access token from consent confirmation.
 
-**Data collected by the app:**
-
-| Field | Source |
-|---|---|
-| `imei` | `TelephonyManager.getImei(0)` (requires Device Owner privilege) |
-| `imei2` | `TelephonyManager.getImei(1)` (SIM slot 2, if present) |
-| `deviceModel` | `Build.MODEL` |
-| `manufacturer` | `Build.MANUFACTURER` |
-| `androidVersion` | `Build.VERSION.RELEASE` |
-| `appVersion` | `PackageManager` |
-| `fcmToken` | Firebase |
-
-> IMEI access requires Device Owner privileges — satisfied by QR provisioning in Steps 3–5.
-
-**API Call:**
-```
+```http
 POST /api/v1/app/device/register
-Authorization: Bearer <accessToken>
+Authorization: Bearer <borrowerUserAccessToken>
+Content-Type: application/json
 
-Body:
 {
   "imei": "123456789012345",
   "imei2": "123456789012346",
@@ -347,239 +393,278 @@ Body:
   "manufacturer": "Samsung",
   "androidVersion": "14",
   "appVersion": "1.0.0",
-  "fcmToken": "<Firebase FCM registration token>"
+  "fcmToken": "mock-fcm-token"
 }
 ```
 
-> `userId` and `tenantId` are resolved from the JWT — do not include them in the request body.
+Backend actions:
 
-**Backend actions:**
-1. Validates JWT + confirms a `consentRecord` exists for this user
-2. Creates a `devices` record with `imei` as the primary unique identifier
-3. Sets `currentPolicyKey` to the tenant's default active policy (e.g., `EMI_PAID`)
-4. Returns the initial policy for the device
+1. Validates borrower user JWT.
+2. Confirms borrower is active.
+3. Confirms `consentRecordId` exists.
+4. Rejects duplicate IMEI.
+5. Loads the tenant's active `EMI_PAID` device policy.
+6. Creates a `devices` document.
+7. Sets device state to `ACTIVE`.
+8. Sets `currentPolicyKey` to `EMI_PAID`.
+9. Writes an audit log.
 
-**Response:**
+Expected response:
+
 ```json
 {
-  "deviceId": "<ObjectId>",
+  "deviceId": "<deviceId>",
+  "userId": "<userId>",
+  "tenantId": "<tenantId>",
   "state": "ACTIVE",
   "currentPolicyKey": "EMI_PAID",
   "policy": {
     "policyKey": "EMI_PAID",
-    "policyVersion": 1,
+    "version": 1,
     "restrictions": {
       "lockMode": false,
       "allowedApps": [],
       "blockedApps": [],
       "disableFactoryReset": true,
-      "disableStatusBar": false
+      "disableStatusBar": false,
+      "disableAdb": false
     }
   }
 }
 ```
 
----
+Enrollment status after device registration:
 
-### Step 9 — Apply Initial Policy
-
-The Shield app applies the received policy using `DevicePolicyManager`:
-
-```kotlin
-// Always prevent factory reset (regardless of policy)
-dpm.setFactoryResetProtectionPolicy(admin, frpPolicy)
-
-// Prevent Shield app from being uninstalled
-dpm.setUninstallBlocked(admin, "com.emishield.app", true)
-
-// Apply lock mode if required by policy
-if (policy.restrictions.lockMode) {
-    dpm.setLockTaskPackages(admin, policy.restrictions.allowedApps.toTypedArray())
-    activity.startLockTaskMode()
-}
+```text
+ACTIVATION_COMPLETE
 ```
 
-**App action:** Store `deviceId` and `policyVersion` locally. Start FCM listener service.
-
 ---
 
-## Policy Synchronization Flow
+## Step 10 - Fetch Current Device Policy
 
-### Policy Source of Truth
+```http
+GET /api/v1/app/device/policy
+Authorization: Bearer <borrowerUserAccessToken>
+```
 
-Policies are stored in the `devicePolicies` collection, scoped per tenant. On tenant creation, the backend copies centralized default device policies into one document per `policyKey`:
+Expected response:
 
-| `policyKey` | Device `state` | Typical Restrictions |
-|---|---|---|
-| `EMI_PAID` | `ACTIVE` | No lock — full device access |
-| `EMI_GRACE` | `GRACE_PERIOD` | No lock — warning banner shown |
-| `EMI_LOCKED` | `LOCKED` | Lock mode on — restricted app allowlist |
-| `TEMP_UNLOCKED` | `TEMP_UNLOCK` | No lock — expiry countdown shown |
-| `CONSENT_INVALID` | `CONSENT_INVALID` | Minimal UI — show error + support contact |
-
-**Example `devicePolicies` document (EMI_LOCKED):**
 ```json
 {
-  "tenantId": "<ObjectId>",
-  "policyKey": "EMI_LOCKED",
-  "version": 2,
+  "deviceState": "ACTIVE",
+  "policyKey": "EMI_PAID",
+  "policyVersion": 1,
   "restrictions": {
-    "lockMode": true,
-    "allowedApps": ["com.emishield.app", "com.android.dialer"],
+    "lockMode": false,
+    "allowedApps": [],
     "blockedApps": [],
     "disableFactoryReset": true,
-    "disableStatusBar": true
-  }
+    "disableStatusBar": false,
+    "disableAdb": false
+  },
+  "tempUnlockExpiresAt": null
 }
 ```
 
----
+Shield App action:
 
-### State Change → Policy Update Flow
-
-When an EMI event occurs (payment received, DPD threshold exceeded, manual lock by tenant):
-
-1. **Backend updates device state** in `devices.state` and sets `devices.currentPolicyKey`
-2. **Backend sends FCM** data message:
-   ```json
-   { "type": "POLICY_UPDATE", "policyVersion": 2 }
-   ```
-3. **Shield App receives FCM** → calls:
-   ```
-   GET /api/v1/app/device/policy
-   Authorization: Bearer <accessToken>
-   ```
-4. **Backend response:**
-   ```json
-   {
-     "policyKey": "EMI_LOCKED",
-     "policyVersion": 2,
-     "deviceState": "LOCKED",
-     "restrictions": {
-       "lockMode": true,
-       "allowedApps": ["com.emishield.app", "com.android.dialer"],
-       "blockedApps": [],
-       "disableFactoryReset": true,
-       "disableStatusBar": true
-     },
-     "tempUnlockExpiresAt": null
-   }
-   ```
-5. **App enforces** restrictions via `DevicePolicyManager`
+- Store the `deviceId`.
+- Store the last applied policy version.
+- Apply restrictions through Android `DevicePolicyManager`.
 
 ---
 
-### Policy Fetch Triggers
+## Step 11 - Verify From Tenant App
 
-The app must call `GET /app/device/policy` in all of the following scenarios — not just on FCM:
+### Track enrollment status
 
-| Trigger | Why |
-|---|---|
-| FCM `POLICY_UPDATE` received | Primary update path |
-| App launch / foreground resume | Catch missed FCMs |
-| `BOOT_COMPLETED` broadcast | Re-enforce after device restart |
-| `/device/sync` returns `forceApplyPolicy: true` | Missed update while offline |
-| Heartbeat (`POST /app/device/ping`) detects version drift | `desiredPolicyVersion > lastAppliedPolicyVersion` |
+```http
+GET /api/v1/distributor/enrollments/<enrollmentToken>/status
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+Expected final status:
+
+```text
+ACTIVATION_COMPLETE
+```
+
+Possible statuses:
+
+- `USER_REGISTERED`
+- `QR_GENERATED`
+- `CONSENT_COMPLETED`
+- `ACTIVATION_COMPLETE`
+- `TOKEN_EXPIRED`
+- `TOKEN_CONSUMED`
+- `TOKEN_CANCELLED`
+
+### View borrower detail
+
+```http
+GET /api/v1/distributor/users/<userId>
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+Expected response includes:
+
+- Borrower profile.
+- EMI schedule.
+- Latest enrollment token details.
+- Consent record summary.
+- Linked device.
+- `activationStatus`.
+
+### View device inventory
+
+```http
+GET /api/v1/distributor/devices
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+Expected response:
+
+- Devices scoped to the tenant admin's tenant.
+- Newest first.
+
+### View device detail
+
+```http
+GET /api/v1/distributor/devices/<deviceId>
+Authorization: Bearer <tenantAdminAccessToken>
+```
+
+Expected response includes:
+
+- Device hardware details.
+- Linked borrower.
+- Current state.
+- Current policy key/version.
+- Active current policy restrictions.
 
 ---
 
-## FCM Token Refresh
+## Regenerate QR Recovery Flow
 
-When Firebase rotates the FCM token (`FirebaseMessagingService.onNewToken()` fires):
+Use this only before the device is registered.
 
-```
-POST /api/v1/app/device/ping
-Authorization: Bearer <accessToken>
-
-Body:
-{
-  "fcmToken": "<new FCM token>",
-  "battery": 71,
-  "network": "wifi",
-  "rootDetected": false,
-  "developerMode": false,
-  "lastAppliedPolicyVersion": 1
-}
+```http
+POST /api/v1/distributor/enrollment/<oldEnrollmentToken>/regenerate
+Authorization: Bearer <tenantAdminAccessToken>
 ```
 
-**Response:** `{ "received": true, "desiredPolicyVersion": 1 }`
+Backend actions:
 
-> If `desiredPolicyVersion > lastAppliedPolicyVersion` in the response, the app must immediately fetch and apply the latest policy.
+1. Finds the old token by tenant scope.
+2. Rejects if a device is already registered.
+3. Rejects if the token is already consumed.
+4. Rejects if the token was already regenerated.
+5. Marks the old token as cancelled.
+6. Creates a new enrollment token for the same borrower.
+7. Returns a fresh QR payload and `qrCodeDataUrl`.
+8. Writes an audit log.
 
-**Recommended heartbeat interval:** Every 15–30 minutes.
+Expected response includes:
 
----
-
-## Offline Sync (Device Reconnects)
-
-When the device comes back online after an offline period:
-
-```
-POST /api/v1/device/sync
-Authorization: Bearer <accessToken>
-```
-
-**Response:**
 ```json
 {
-  "deviceState": "LOCKED",
-  "currentPolicyKey": "EMI_LOCKED",
-  "policyVersion": 2,
-  "forceApplyPolicy": true
+  "oldEnrollmentToken": "<oldEnrollmentToken>",
+  "oldEnrollmentTokenId": "<oldEnrollmentTokenId>",
+  "qrPayload": {},
+  "qrCodeDataUrl": "data:image/png;base64,...",
+  "qrCodeMimeType": "image/png",
+  "enrollmentToken": "<newEnrollmentToken>",
+  "tokenExpiresAt": "2026-05-28T..."
 }
 ```
 
-**App action:** If `forceApplyPolicy: true`, call `GET /app/device/policy` and re-apply restrictions immediately.
+The old token status becomes:
+
+```text
+TOKEN_CANCELLED
+```
+
+Use the new token for consent initiation and confirmation.
 
 ---
 
-## Security Events
+## EMI Schedule Behavior In Current Simulation
 
-Report tamper, root, or SIM change events immediately after detection:
+During borrower registration, the backend creates EMI installments from:
 
-```
-POST /api/v1/app/security/event
-Authorization: Bearer <accessToken>
+- `emiAmount`
+- `tenureMonths`
+- `disbursementDate`
 
-Body:
-{ "eventType": "ROOT_DETECTED", "details": { "method": "supersu_binary" } }
-```
+For each installment:
 
-| `eventType` | When to report |
-|---|---|
-| `ROOT_DETECTED` | Root access detected on launch |
-| `SIM_CHANGE_DETECTED` | SIM serial differs from stored value |
-| `APP_TAMPER_DETECTED` | APK signature mismatch |
-| `DEVELOPER_MODE_ENABLED` | Developer options turned on |
+- `installmentNumber` starts at 1.
+- `dueDate` is calculated monthly from `disbursementDate`.
+- `emiAmount` is copied from the request.
+- `status` starts as `pending`.
 
-After reporting, re-fetch `GET /app/device/policy` — the backend may have changed the device state in response to the security event.
+Example:
 
----
-
-## Tenant Dashboard — Policy Configuration
-
-Tenant admins configure enforcement policies for each device state via the Partner Dashboard:
-
-```
-GET  /api/v1/partner/device-policies               — list all policies for the tenant
-POST /api/v1/partner/device-policies               — create a policy for a policyKey
-PUT  /api/v1/partner/device-policies/:policyKey    — update enforcement restrictions
-```
-
-**Example — Update `EMI_LOCKED` policy:**
-```
-PUT /api/v1/partner/device-policies/EMI_LOCKED
-Authorization: Bearer <tenantAdminToken>
-
-Body:
+```json
 {
-  "restrictions": {
-    "lockMode": true,
-    "allowedApps": ["com.emishield.app", "com.android.dialer", "com.paytm.android"],
-    "blockedApps": [],
-    "disableFactoryReset": true,
-    "disableStatusBar": true
-  }
+  "emiAmount": 3000,
+  "tenureMonths": 3,
+  "disbursementDate": "2026-05-21"
 }
 ```
 
+Creates installments due around:
+
+```text
+2026-06-21
+2026-07-21
+2026-08-21
+```
+
+The automatic EMI state scheduler is not implemented yet. Device state currently becomes `ACTIVE` during device registration with `currentPolicyKey: "EMI_PAID"`.
+
+---
+
+## Access Token Expiry Flow
+
+For account tokens:
+
+1. Client calls protected API with access token.
+2. If access token is expired, `verifyJwt` returns `401`.
+3. Client calls:
+
+```http
+POST /api/v1/auth/refresh-token
+```
+
+4. The server validates the HTTP-only refresh cookie.
+5. If valid, server returns a new account access token.
+6. Client retries the original request.
+7. If refresh also returns `401`, client clears local token state and redirects to login.
+
+In this implementation:
+
+- Account access token is a JWT.
+- Account refresh token is stored as an HTTP-only cookie.
+- Borrower user access token is issued after consent confirmation.
+
+---
+
+## Final Happy Path Checklist
+
+1. Login tenant admin.
+2. Check dashboard.
+3. Register borrower.
+4. Generate QR and confirm `qrCodeDataUrl` is returned.
+5. Check enrollment status is `QR_GENERATED`.
+6. Fetch consent terms.
+7. Initiate consent OTP with Aadhaar-linked mobile.
+8. Confirm consent OTP with `123456`.
+9. Save borrower user access token.
+10. Register device.
+11. Fetch device policy.
+12. Check enrollment status is `ACTIVATION_COMPLETE`.
+13. View borrower detail.
+14. View device detail.
+15. Recheck dashboard counts.

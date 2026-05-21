@@ -16,6 +16,7 @@
 6. [Flow 6 — QR Payment + Tenant Approval + Device Unlock](#flow-6--qr-payment--tenant-approval--device-unlock)
 7. [Flow 7 — Unlock Request + Two-Tier Escalation](#flow-7--unlock-request--two-tier-escalation)
 8. [Super Admin Flows](super-admin-flows.md)
+9. [Partner App Flows](partner_flows.md)
 
 ---
 

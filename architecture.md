@@ -31,8 +31,8 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 | Interface | Users | Platform | Role |
 |---|---|---|---|
 | **Admin Dashboard** | Super Admin | Web app | Exception handling, escalation override, risk monitoring, platform governance |
-| **Partner App** | `tenant_admin` and `partner_admin` | Android app | Tenant operations, escalation handling, payment review, unlock request handling, policy config |
-| **Distributor App** | `tenant_admin` with `distribute` capability | Android app | Device sale registration, user onboarding, QR code generation, device-user binding |
+| **Partner App** | `partner_admin` | Android app | Partner dashboard, tenant onboarding, tenant admin account management, partner escalation handling |
+| **Tenant App / Distributor App** | `tenant_admin` with `distribute` capability | Android app | Device sale registration, borrower onboarding, QR code generation, device-user binding, onboarding tracking |
 | **Borrower App** | User (borrower — device purchaser) | Android app | Pay EMI, request unlock, view escalation status, consent acceptance |
 
 ### Identity Model
@@ -101,6 +101,26 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 | **Firebase Cloud Messaging (FCM)** | Push notifications to Android devices |
 | **OTP / SMS Service** | OTP delivery for auth and consent |
 | **File Storage (S3 / compatible)** | QR code image uploads + payment proof document uploads |
+
+---
+
+### Current Backend Implementation Snapshot
+
+The backend currently implements the core account auth, super admin setup, partner tenant onboarding, tenant onboarding, mocked Aadhaar consent, and borrower device registration flows.
+
+Implemented route groups:
+- `/auth` account login, refresh-token cookie flow, logout
+- `/admin` super admin channel partner, tenant, account, consent, escalation, device, risk, and audit oversight
+- `/partner` partner admin dashboard, tenant creation, tenant admin account management, and partner escalation resolution
+- `/distributor` tenant admin onboarding dashboard, borrower registration, QR generation, enrollment status/detail, device inventory/detail, QR regeneration
+- `/app` consent terms, mocked Cashfree Aadhaar OTP, consent confirmation, device registration, device policy fetch
+
+Not implemented yet:
+- Borrower payments, payment approval, and QR payment APIs
+- Tenant manual lock/unlock APIs outside onboarding
+- Borrower unlock request creation APIs
+- Device ping/sync/command ack/security event APIs
+- FCM delivery workers and scheduled jobs
 
 ---
 
@@ -993,39 +1013,20 @@ Risk monitoring signals surfaced to super admin.
 
 | Method | Route | Description | Access |
 |---|---|---|---|
-| POST | `/auth/send-otp` | Send OTP to mobile number | Public |
-| POST | `/auth/verify-otp` | Verify OTP, return session token | Public |
 | POST | `/auth/login` | Password login for dashboard users | Public |
-| POST | `/auth/refresh-token` | Refresh JWT access token | Authenticated |
-| POST | `/auth/logout` | Invalidate session | Authenticated |
+| POST | `/auth/refresh-token` | Refresh account JWT using HTTP-only cookie | Refresh cookie |
+| POST | `/auth/logout` | Clear refresh cookie | Public |
 
-**Request — POST `/auth/send-otp`**
-```json
-{ "mobile": "9876543210", "purpose": "login" }
-```
-
-**Request — POST `/auth/verify-otp`**
-```json
-{ "mobile": "9876543210", "otp": "123456", "purpose": "login" }
-```
-**Response (app user):**
+**Response — POST `/auth/login`**
 ```json
 {
   "accessToken": "...",
-  "refreshToken": "...",
-  "tokenType": "user",
-  "user": { "id": "...", "name": "Ramesh Kumar", "mobile": "..." }
-}
-```
-**Response (dashboard account):**
-```json
-{
-  "accessToken": "...",
-  "refreshToken": "...",
   "tokenType": "account",
   "account": { "id": "...", "role": "tenant_admin", "tenantId": "...", "name": "..." }
 }
 ```
+
+The account refresh token is set as an HTTP-only cookie. It is not returned in the JSON body.
 
 ---
 
@@ -1053,10 +1054,11 @@ Risk monitoring signals surfaced to super admin.
 **Response:**
 ```json
 {
-  "verificationSessionId": "VS_XYZ789",
+  "verificationSessionId": "cf_mock_...",
   "otpSent": true,
   "maskedMobile": "98****3210",
-  "expiresInSeconds": 600
+  "expiresInSeconds": 600,
+  "mockOtp": "123456"
 }
 ```
 
@@ -1064,10 +1066,10 @@ Risk monitoring signals surfaced to super admin.
 ```json
 {
   "enrollmentToken": "TEMP_TOKEN_ABC123",
-  "verificationSessionId": "VS_XYZ789",
-  "otp": "482910",
+  "verificationSessionId": "cf_mock_...",
+  "otp": "123456",
   "consentCheckboxAccepted": true,
-  "consentVersion": "1.1"
+  "consentVersion": "1.0"
 }
 ```
 **Response:**
@@ -1076,11 +1078,12 @@ Risk monitoring signals surfaced to super admin.
   "consentRecordId": "...",
   "consentAccepted": true,
   "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
   "tokenType": "user",
   "user": { "id": "...", "name": "Ramesh Kumar", "tenantId": "..." }
 }
 ```
+
+The current borrower simulation returns only a borrower access token after consent confirmation.
 
 **Request — POST `/app/device/register`**
 ```json
@@ -1327,14 +1330,37 @@ Risk monitoring signals surfaced to super admin.
 
 ---
 
-### 6.4 Partner (Tenant) Dashboard Routes (`/partner`)
+### 6.4 Partner Admin Routes (`/partner`)
 
-> Requires `tokenType: account` + `role: tenant_admin`  
-> Lock/unlock routes additionally require tenant has `lend` capability
+> Requires `tokenType: account` + `role: partner_admin`.
+> Partner scope is always derived from `req.auth.channelPartnerId`.
 
-> Tenant admins do not create subordinate accounts. Additional `tenant_admin` accounts are created, updated, activated, or deactivated by Super Admin through `/admin/accounts`.
+#### Implemented Partner App Routes
 
-#### Device Management
+| Method | Route | Description |
+|---|---|---|
+| GET | `/partner/dashboard` | Partner-wide tenant, account, borrower, device, and case summary |
+| GET | `/partner/tenants` | List tenants under the authenticated partner |
+| POST | `/partner/tenants` | Create tenant under the authenticated partner and copy centralized default policies |
+| GET | `/partner/accounts` | List `tenant_admin` accounts under partner-owned tenants |
+| POST | `/partner/accounts` | Create `tenant_admin` account for a partner-owned tenant |
+| PATCH | `/partner/accounts/:accountId` | Update tenant admin profile/scope within partner-owned tenants |
+| PATCH | `/partner/accounts/:accountId/status` | Activate/deactivate tenant admin account |
+| GET | `/partner/escalations` | List cases escalated to partner |
+| GET | `/partner/escalations/:caseId` | Escalation detail with borrower, device, tenant, commands, and audit trail |
+| POST | `/partner/escalations/:caseId/unlock` | Resolve partner escalation with full unlock |
+| POST | `/partner/escalations/:caseId/temp-unlock` | Resolve partner escalation with temporary unlock |
+| POST | `/partner/escalations/:caseId/reject` | Reject partner escalation with note |
+
+**Partner tenant creation rule:** request body must not include `channelPartnerId`, `tenantPolicy`, or `devicePolicies`. The backend derives partner scope from JWT and copies defaults from `DEFAULT_TENANT_POLICY` and `DEFAULT_DEVICE_POLICIES`.
+
+**Partner escalation rule:** partner can act only on `ESCALATED_PARTNER` cases scoped to their channel partner.
+
+#### Planned Tenant Lend Routes
+
+These routes are still planned for tenant-side lending/payment operations and are not part of the current implemented Partner Admin module.
+
+> Requires `tokenType: account` + `role: tenant_admin` and tenant `lend` capability.
 
 #### Device Management
 
@@ -1546,47 +1572,42 @@ Risk monitoring signals surfaced to super admin.
 
 ---
 
-### 6.5 Channel Partner Routes (`/cp`)
+### 6.5 Partner Escalation Routes (`/partner/escalations`)
 
 > Requires `tokenType: account` + `role: partner_admin`  
 > `channelPartnerId` is resolved from the requesting account's JWT. All cases shown are scoped to tenants under this channel partner.
+> These APIs are implemented under `/partner/escalations`, not `/cp`.
 
 #### Escalation Queue
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/cp/escalations` | All `ESCALATED_PARTNER` cases from this CP's tenants |
-| GET | `/cp/escalations/:caseId` | Escalation detail — device, borrower, tenant, history, evidence image |
-| POST | `/cp/escalations/:caseId/approve` | Full unlock — optionally waive overdue installment |
-| POST | `/cp/escalations/:caseId/temp-unlock` | Grant temporary unlock for N hours |
-| POST | `/cp/escalations/:caseId/reject` | Reject with mandatory reason |
+| GET | `/partner/escalations` | All `ESCALATED_PARTNER` cases from this partner's tenants |
+| GET | `/partner/escalations/:caseId` | Escalation detail: device, borrower, tenant, commands, audit history |
+| POST | `/partner/escalations/:caseId/unlock` | Full unlock |
+| POST | `/partner/escalations/:caseId/temp-unlock` | Grant temporary unlock for N hours |
+| POST | `/partner/escalations/:caseId/reject` | Reject with mandatory note |
 
-**Request — POST `/cp/escalations/:caseId/approve`**
+**Request — POST `/partner/escalations/:caseId/unlock`**
 ```json
-{
-  "reason": "Borrower confirmed payment. Tenant failed to respond.",
-  "emiAction": "waive"
-}
+{ "note": "Borrower confirmed payment. Tenant failed to respond." }
 ```
 
-**Backend actions — POST `/cp/escalations/:caseId/approve`:**
+**Backend actions — POST `/partner/escalations/:caseId/unlock`:**
 1. Validate case is `ESCALATED_PARTNER` and belongs to a tenant under this `channelPartnerId`
-2. If `emiAction === 'waive'`: mark overdue installment as `waived` in `emiSchedules`
-3. Update `devices.state → UNLOCK_PENDING`, `policyKey → EMI_PAID`
-4. Create `deviceCommands`: `{ commandType: 'UNLOCK', triggeredBy: 'manual_tenant' }`
-5. Send FCM `POLICY_UPDATE` to device
-6. Update `unlockRequests`: `{ status: 'RESOLVED_PARTNER', resolutionAction: 'waived' | 'unlocked', resolvedBy, resolvedAt }`
-7. Send FCM `NOTIFICATION` to borrower: `UNLOCK_SUCCESS`
-8. Write `auditLogs`: `CASE_RESOLVED`, `UNLOCK_TRIGGERED` (+ `CASE_WAIVED` if waive)
+2. Update `devices.state -> UNLOCK_PENDING`, `currentPolicyKey -> EMI_PAID`
+3. Create `deviceCommands`: `{ commandType: 'UNLOCK', triggeredBy: 'partner_admin' }`
+4. Update `unlockRequests`: `{ status: 'RESOLVED_PARTNER', resolutionAction: 'unlocked', resolvedBy, resolvedAt }`
+5. Write `auditLogs`: `UNLOCK_TRIGGERED`
 
-**Request — POST `/cp/escalations/:caseId/temp-unlock`**
+**Request — POST `/partner/escalations/:caseId/temp-unlock`**
 ```json
-{ "durationHours": 48, "reason": "Case under investigation, granting interim access" }
+{ "durationHours": 48, "note": "Case under investigation, granting interim access" }
 ```
 
-**Request — POST `/cp/escalations/:caseId/reject`**
+**Request — POST `/partner/escalations/:caseId/reject`**
 ```json
-{ "reason": "No evidence provided. Escalating back to tenant." }
+{ "note": "No evidence provided. Rejecting partner escalation." }
 ```
 
 ---
@@ -1869,11 +1890,11 @@ FCM NOTIFICATION (ESCALATION_UPDATE) → borrower
         │
         ▼
 [Partner App — Partner Admin]
-  GET /cp/escalations → see cases from all their tenants
+  GET /partner/escalations → see cases from all their tenants
   Channel partner chooses one of three actions (same as tenant):
-    - POST /cp/escalations/:id/approve (full unlock, optional waive)
-    - POST /cp/escalations/:id/temp-unlock
-    - POST /cp/escalations/:id/reject
+    - POST /partner/escalations/:id/unlock (full unlock)
+    - POST /partner/escalations/:id/temp-unlock
+    - POST /partner/escalations/:id/reject
   → case status → RESOLVED_PARTNER
         │ (if channel partner does NOT act before partnerSlaDeadline)
         ▼
@@ -2030,10 +2051,10 @@ Write auditLogs (LOCK_TRIGGERED)
 
 | Actor | Collection | Method |
 |---|---|---|
-| Borrower (Android app) | `users` | OTP → JWT (`tokenType: user`) |
-| Tenant admin | `accounts` | Email+Password or OTP → JWT (`tokenType: account`) |
+| Borrower (Android app) | `users` | Mock Cashfree Aadhaar OTP consent confirmation -> JWT (`tokenType: user`) |
+| Tenant admin | `accounts` | Email+Password -> JWT (`tokenType: account`) + HTTP-only refresh cookie |
 | Partner admin | `accounts` | Email+Password → JWT (`tokenType: account`) |
-| Super admin | `accounts` | Email+Password + 2FA → JWT (`tokenType: account`) |
+| Super admin | `accounts` | Email+Password -> JWT (`tokenType: account`) + HTTP-only refresh cookie |
 | Payment Webhooks | — | Webhook HMAC-SHA256 signature |
 | Device Sync | `users` | Device-bound JWT tied to IMEI + user session |
 
@@ -2052,7 +2073,7 @@ Write auditLogs (LOCK_TRIGGERED)
 | Submit unlock request | No | No | No | No | Yes |
 | Make payment | No | No | No | No | Yes |
 | View own EMI/case status | No | No | No | No | Yes |
-| Manage tenants | Yes | No | No | No | No |
+| Manage tenants | Yes | Own channel partner only | No | No | No |
 | Manage channel partners | Yes | No | No | No | No |
 
 ### Key Security Rules

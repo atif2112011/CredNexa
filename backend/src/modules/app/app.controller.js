@@ -81,6 +81,7 @@ export const initiateConsentOtp = async (req, res) => {
     const enrollmentToken = await EnrollmentToken.findOne({
       token: req.body.enrollmentToken,
       consumedAt: null,
+      cancelledAt: null,
       expiresAt: { $gt: new Date() }
     });
 
@@ -173,6 +174,7 @@ export const confirmConsentOtp = async (req, res) => {
     const enrollmentToken = await EnrollmentToken.findOne({
       token: req.body.enrollmentToken,
       consumedAt: null,
+      cancelledAt: null,
       expiresAt: { $gt: new Date() }
     });
 

@@ -9,6 +9,7 @@ import {
   createChannelPartner,
   createConsentVersion,
   createTenant,
+  getAdminDashboard,
   getAdminEscalationByCaseId,
   getAdminAccountById,
   getAdminRiskFlags,
@@ -41,6 +42,8 @@ export const adminRoutes = Router();
 
 adminRoutes.use(verifyJwt);
 adminRoutes.use(requireRole(ACCOUNT_ROLES.SUPER_ADMIN));
+
+adminRoutes.get("/dashboard", getAdminDashboard);
 
 adminRoutes.get("/channel-partners", listChannelPartners);
 adminRoutes.post("/channel-partners", createChannelPartner);

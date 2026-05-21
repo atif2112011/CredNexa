@@ -121,6 +121,91 @@ const applyEscalationDeviceCommand = async ({
 };
 
 /**
+ * Super Admin dashboard overview.
+ * Sample request: /admin/dashboard
+ */
+export const getAdminDashboard = async (req, res) => {
+  try {
+    const openCaseStatuses = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
+
+    const [
+      channelPartners,
+      tenants,
+      accounts,
+      users,
+      devices,
+      devicesByState,
+      escalationsByStatus,
+      openEscalations,
+      riskFlagsByStatus,
+      riskFlagsBySeverity,
+      recentEscalations,
+      recentRiskFlags,
+      recentAuditLogs
+    ] = await Promise.all([
+      ChannelPartner.countDocuments(),
+      Tenant.countDocuments(),
+      Account.countDocuments(),
+      User.countDocuments(),
+      Device.countDocuments(),
+      Device.aggregate([
+        { $group: { _id: "$state", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      UnlockRequest.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      UnlockRequest.countDocuments({ status: { $in: openCaseStatuses } }),
+      RiskFlag.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      RiskFlag.aggregate([
+        { $group: { _id: "$severity", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      UnlockRequest.find({ status: { $in: openCaseStatuses } })
+        .populate("tenantId", "name")
+        .populate("channelPartnerId", "name")
+        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("userId", "name mobile loanId")
+        .sort({ updatedAt: -1 })
+        .limit(8)
+        .lean(),
+      RiskFlag.find({ status: { $ne: "resolved" } }).sort({ createdAt: -1 }).limit(8).lean(),
+      AuditLog.find({}).sort({ timestamp: -1 }).limit(10).lean()
+    ]);
+
+    const toCountMap = (items) =>
+      items.reduce((result, item) => {
+        result[item._id || "unknown"] = item.count;
+        return result;
+      }, {});
+
+    return sendSuccess(res, 200, "Admin dashboard fetched successfully", {
+      totals: {
+        channelPartners,
+        tenants,
+        accounts,
+        users,
+        devices,
+        openEscalations
+      },
+      devicesByState: toCountMap(devicesByState),
+      escalationsByStatus: toCountMap(escalationsByStatus),
+      riskFlagsByStatus: toCountMap(riskFlagsByStatus),
+      riskFlagsBySeverity: toCountMap(riskFlagsBySeverity),
+      recentEscalations,
+      recentRiskFlags,
+      recentAuditLogs
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * List channel partners.
  * Sample query: /admin/channel-partners?status=active&type=nbfc_group&search=bharat&page=1&limit=20
  */

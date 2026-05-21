@@ -25,6 +25,20 @@ const enrollmentTokenSchema = new mongoose.Schema(
     consumedAt: {
       type: Date
     },
+    cancelledAt: {
+      type: Date
+    },
+    lastQrGeneratedAt: {
+      type: Date
+    },
+    regeneratedFrom: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "EnrollmentToken"
+    },
+    regeneratedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "EnrollmentToken"
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account",
