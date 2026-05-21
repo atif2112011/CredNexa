@@ -58,7 +58,7 @@ Users  (the borrower — the person who buys the device on EMI)
   - View platform-wide audit logs
 
 ### 3.2 Partner App (Tenant App)
-- **Native Android app** used by tenant staff (NBFC managers, shop owners, agents)
+- **Native Android app** used by `tenant_admin` accounts (NBFC managers, shop owners, authorised tenant operators)
 - **Scope:** Own tenant's data only (strict tenant isolation)
 - **Key functions:**
   - View all devices and their current state (ACTIVE, LOCKED, GRACE_PERIOD, etc.)
@@ -70,8 +70,8 @@ Users  (the borrower — the person who buys the device on EMI)
   - View audit logs for their own tenant
 
 ### 3.3 Distributor App
-- **Native Android app** used by tenant staff who have the `distribute` capability
-- Note: This may be the same staff on the same tenant — it's a capability flag, not a separate role
+- **Native Android app** used by `tenant_admin` accounts whose tenant has the `distribute` capability
+- Note: Distribution is controlled by the tenant's capability flag, not by a separate account role
 - **Key functions:**
   - Register a new user (borrower) with their loan details
   - Generate and display the QR code for Android Device Owner provisioning (shown on-screen at point of sale)
@@ -90,11 +90,11 @@ Users  (the borrower — the person who buys the device on EMI)
 
 This is one of the most important decisions in the project — **two completely separate identity collections**:
 
-### `accounts` — App users (tenant & distributor staff)
-- Super admins, channel partner staff, tenant admins, tenant staff
+### `accounts` — Admin/operator users
+- Super admins, partner admins, and tenant admins
 - Authenticate with **email + password** (or OTP for some flows)
 - JWT contains `tokenType: "account"` and the account's `role` + `tenantId` / `channelPartnerId`
-- Roles: `super_admin` | `channel_partner_admin` | `channel_partner_staff` | `tenant_admin` | `tenant_staff`
+- Roles: `super_admin` | `partner_admin` | `tenant_admin`
 - Access the **Admin Dashboard** (web), **Partner App** (Android), or **Distributor App** (Android) depending on role and capabilities
 
 ### `users` — Borrowers (app users)
@@ -162,13 +162,13 @@ When a borrower taps "Request Unlock" a case is created:
 
 ### Lock/Unlock Authority
 - **Automatic lock:** Triggered by a background scheduler when DPD (Days Past Due) exceeds the tenant's configured threshold after the grace period
-- **Manual lock:** Tenant staff triggers via the Partner App
-- **Automatic unlock:** Triggered when a tenant staff member approves a borrower's payment submission via the Partner App, the payment is matched to the EMI schedule, and the tenant's unlock policy says unlock
-- **Manual unlock:** Tenant staff triggers via Partner App
+- **Manual lock:** A `tenant_admin` triggers via the Partner App
+- **Automatic unlock:** Triggered when a `tenant_admin` approves a borrower's payment submission via the Partner App, the payment is matched to the EMI schedule, and the tenant's unlock policy says unlock
+- **Manual unlock:** A `tenant_admin` triggers via Partner App
 - **Super admin unlock:** Only on escalated cases, always with a mandatory reason
 
 ### EMI Details — When and Where They Are Entered
-Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDate`) are entered by the distributor staff **during user registration** in the **Distributor App** (`POST /distributor/users/register`). This is the correct design:
+Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDate`) are entered by a `tenant_admin` from a tenant with `distribute` capability **during user registration** in the **Distributor App** (`POST /distributor/users/register`). This is the correct design:
 - The loan agreement is signed at point of sale — all figures are known at that moment
 - The `emiSchedules` record is generated immediately from these details
 - QR code generation follows in the same session, with no need for a second step
@@ -177,7 +177,7 @@ Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDa
 ```
 Borrower taps "I Have Paid" (POST /app/payment/submit)
   → Payment record created (approval_pending)
-  → FCM NOTIFICATION to tenant staff
+  → FCM NOTIFICATION to tenant admins
   → Tenant verifies in bank app → approves (POST /partner/payments/:id/approve)
   → Validation Engine (match to EMI schedule)
   → Policy Engine (evaluate tenant unlock rules)
@@ -213,7 +213,7 @@ See `architecture.md` Section 5 for full schemas. Here is a quick reference:
 
 | # | Collection | Purpose |
 |---|---|---|
-| 1 | `accounts` | Dashboard logins (super admin, CP staff, tenant staff) |
+| 1 | `accounts` | Admin/operator logins (`super_admin`, `partner_admin`, `tenant_admin`) |
 | 2 | `users` | Borrowers — device purchasers using the Android app |
 | 3 | `channelPartners` | B2B entities reselling EMI Shield |
 | 4 | `tenants` | Orgs using the product (NBFCs, shops, outlets) — replaces old `lenders` + `distributors` |
@@ -246,8 +246,8 @@ See `architecture.md` Section 6 for all routes with request/response examples.
 |---|---|---|
 | `/api/v1/auth` | Everyone | Public (OTP) / Credential |
 | `/api/v1/app` | Borrowers (Android app) | `tokenType: user` JWT |
-| `/api/v1/distributor` | Tenant staff with `distribute` capability | `tokenType: account` |
-| `/api/v1/partner` | Tenant staff with `lend` capability | `tokenType: account` |
+| `/api/v1/distributor` | `tenant_admin` with `distribute` capability | `tokenType: account` |
+| `/api/v1/partner` | `tenant_admin` with `lend` capability | `tokenType: account` |
 | `/api/v1/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
 | `/api/v1/device` | Android app (device sync) | `tokenType: user` JWT (device-bound) |
 
@@ -324,7 +324,7 @@ CONSENT_INVALID → Show error, contact support
 
 The consent flow happens once — at the time of device purchase/activation:
 
-1. Distributor staff registers the user (`POST /distributor/users/register`)
+1. A `tenant_admin` registers the user (`POST /distributor/users/register`)
 2. User launches the app for the first time
 3. App displays consent terms (fetched from `consentVersions.current`)
 4. User reads terms, ticks checkbox
@@ -348,6 +348,7 @@ The `consentRecord` stores: borrower ID, device ID, tenant ID, consent version, 
 | System Architecture | ✅ Complete | `architecture.md` (this folder) |
 | Database Schemas (MongoDB) | ✅ Complete | `architecture.md` Section 5 |
 | API Routes | ✅ Complete | `architecture.md` Section 6 |
+| Super Admin Flows | ✅ Complete | `super-admin-flows.md` |
 | Backend implementation | ❌ Not started | — |
 | Frontend dashboards | ❌ Not started | — |
 | Android app | ❌ Not started | — |
@@ -384,8 +385,8 @@ EMI Shield/
 │   └── package.json
 │
 ├── admin-dashboard/        ← React web app (Super Admin)
-├── partner-app/            ← Native Android (Tenant staff — lend operations, payment approval, QR management)
-├── distributor-app/        ← Native Android (Distributor staff — user registration, QR generation)
+├── partner-app/            ← Native Android (`tenant_admin` — lend operations, payment approval, QR management)
+├── distributor-app/        ← Native Android (`tenant_admin` with distribute capability — user registration, QR generation)
 │
 └── android-app/            ← Native Android (Borrower — lock screen, EMI, payment QR scan)
 ```
@@ -397,10 +398,10 @@ EMI Shield/
 | Term | Meaning in This Project |
 |---|---|
 | **User** | The borrower — the person who bought the device on EMI. Uses only the Android app |
-| **Account** | A dashboard login — tenant staff, channel partner staff, or super admin |
+| **Account** | An admin/operator login — `tenant_admin`, `partner_admin`, or `super_admin` |
 | **Tenant** | An organisation using EMI Shield (NBFC, shop, outlet). Has `capabilities: ['lend', 'distribute']` |
 | **Channel Partner** | A B2B reseller of EMI Shield who manages multiple tenants |
-| **Super Admin** | EMI Shield's own operations staff. Platform-wide access, exception-only authority |
+| **Super Admin** | EMI Shield's own operations admin. Platform-wide access, exception-only authority |
 | **DPD** | Days Past Due — how many days overdue the EMI is |
 | **SLA** | The time window a tenant has to action a borrower's unlock request before auto-escalation |
 | **Consent Record** | The immutable legal proof that the borrower agreed to device control. Aadhaar OTP backed |

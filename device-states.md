@@ -32,7 +32,7 @@
 | `ACTIVE` | `EMI_PAID` | None — full access | Payment validated / registration complete |
 | `GRACE_PERIOD` | `EMI_GRACE` | Warning only | Scheduler: EMI overdue within grace window |
 | `LOCKED` | `EMI_LOCKED` | Full lock — restricted app set | Scheduler: Grace expired / SLA policy |
-| `TEMP_UNLOCK` | `TEMP_UNLOCKED` | Temporary full access | Manual: Tenant staff grants temp unlock |
+| `TEMP_UNLOCK` | `TEMP_UNLOCKED` | Temporary full access | Manual: Tenant admin grants temp unlock |
 | `UNLOCK_PENDING` | *(unchanged)* | Same as LOCKED until delivered | Event: Tenant approves payment, unlock command queued |
 | `OFFLINE_PENDING` | *(unchanged)* | Last applied policy enforced locally | Event: Any command when device offline |
 | `CONSENT_INVALID` | `CONSENT_INVALID` | Lock **blocked** — enforcement error | System: No valid `consentRecord` on lock attempt |
@@ -144,7 +144,7 @@
 
 ### 2.4 TEMP_UNLOCK
 
-> Tenant staff has granted a temporary unlock (e.g. while the borrower arranges payment). Full access restored until the timer expires.
+> Tenant admin has granted a temporary unlock (e.g. while the borrower arranges payment). Full access restored until the timer expires.
 
 | Field | Value |
 |---|---|
@@ -153,7 +153,7 @@
 | `devices.tempUnlockExpiresAt` | Expiry timestamp set at grant time |
 
 **Triggered into TEMP_UNLOCK from:**
-- `LOCKED`: Tenant admin or staff approves temp unlock from Partner App
+- `LOCKED`: Tenant admin approves temp unlock from Partner App
 - `LOCKED` (case path): Case escalated to Super Admin and resolved as temp unlock
 
 **Triggered out of TEMP_UNLOCK:**
@@ -185,7 +185,7 @@
 | `devices.policyKey` | *(unchanged — still `EMI_LOCKED`)* |
 
 **Triggered into UNLOCK_PENDING from:**
-- `LOCKED`: Tenant staff approves payment via `POST /partner/payments/:paymentId/approve` → EMI matched → unlock command created and FCM `POLICY_UPDATE` sent
+- `LOCKED`: Tenant admin approves payment via `POST /partner/payments/:paymentId/approve` → EMI matched → unlock command created and FCM `POLICY_UPDATE` sent
 
 **Triggered out of UNLOCK_PENDING:**
 - Device receives FCM, fetches policy, calls ack → `ACTIVE`
@@ -271,7 +271,7 @@
 | `GRACE_PERIOD` | `ACTIVE` | Tenant approves payment before grace closes | System (tenant approval) |
 | `GRACE_PERIOD` | `LOCKED` | Grace window closes, EMI unpaid | Scheduler (daily midnight) |
 | `LOCKED` | `UNLOCK_PENDING` | Tenant approves payment, instant unlock policy | System (tenant approval via Partner App) |
-| `LOCKED` | `TEMP_UNLOCK` | Tenant staff grants temp unlock | Manual (Partner App) |
+| `LOCKED` | `TEMP_UNLOCK` | Tenant admin grants temp unlock | Manual (Partner App) |
 | `LOCKED` | `ACTIVE` | Super Admin override (with reason) | Manual (Admin Panel) |
 | `UNLOCK_PENDING` | `ACTIVE` | App acks POLICY_UPDATE FCM | System (app ack) |
 | `UNLOCK_PENDING` | `LOCKED` | All retries exhausted | Scheduler (Command Retry) |
@@ -329,13 +329,13 @@
 
 ## 5. Manual Transitions
 
-### 5.1 Temp Unlock (Partner App — Tenant Staff)
+### 5.1 Temp Unlock (Partner App — Tenant Admin)
 
 **Route:** `POST /partner/devices/:deviceId/temp-unlock`
 
 **Trigger flow:**
-1. Tenant staff opens unlock request in Partner App
-2. Staff sets unlock duration (hours) — within tenant-configured max
+1. Tenant admin opens unlock request in Partner App
+2. Tenant admin sets unlock duration (hours) — within tenant-configured max
 3. Backend validates request:
    - Device is currently `LOCKED`
    - Duration ≤ `tenantPolicies.maxTempUnlockHours`
@@ -354,7 +354,7 @@
 1. Tenant admin provides reason
 2. Backend validates:
    - Device is `LOCKED`
-   - Requesting account has `tenant_admin` role or higher
+   - Requesting account has `tenant_admin` role
    - Valid `consentRecord` exists
 3. Updates `devices.state` → `UNLOCK_PENDING`, `devices.policyKey` → `EMI_PAID`
 4. Creates `deviceCommands` record (`commandType: UNLOCK`, `triggeredBy: manual_tenant`)

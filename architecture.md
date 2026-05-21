@@ -31,15 +31,15 @@ EMI Shield is a **lender-authorized, consent-backed device control and complianc
 | Interface | Users | Platform | Role |
 |---|---|---|---|
 | **Admin Dashboard** | Super Admin | Web app | Exception handling, escalation override, risk monitoring, platform governance |
-| **Partner App** | Tenant staff (NBFCs, Retail Chains, Standalone Outlets) | Android app | Daily lock/unlock operations, payment review, unlock request handling, policy config |
-| **Distributor App** | Tenant staff with distributor capability | Android app | Device sale registration, user onboarding, QR code generation, device-user binding |
+| **Partner App** | `tenant_admin` and `partner_admin` | Android app | Tenant operations, escalation handling, payment review, unlock request handling, policy config |
+| **Distributor App** | `tenant_admin` with `distribute` capability | Android app | Device sale registration, user onboarding, QR code generation, device-user binding |
 | **Borrower App** | User (borrower — device purchaser) | Android app | Pay EMI, request unlock, view escalation status, consent acceptance |
 
 ### Identity Model
 
 | Collection | Who it represents |
 |---|---|
-| `accounts` | All app logins for staff — super admin, channel partner staff, tenant staff (Partner App + Distributor App + Admin Dashboard) |
+| `accounts` | Admin/operator logins — `super_admin`, `partner_admin`, `tenant_admin` |
 | `users` | Device purchasers (borrowers) only — people who install the app |
 | `channelPartners` | B2B entities that resell the EMI Shield product |
 | `tenants` | Organisations under a channel partner — NBFCs, shops, retail chains, outlets |
@@ -124,14 +124,14 @@ EMI Shield Super Admin (platform)
 ```
 
 **Key distinctions:**
-- `accounts` → login credentials for all dashboard actors (super admin, channel partner staff, tenant staff)
+- `accounts` → login credentials for all admin/operator actors (`super_admin`, `partner_admin`, `tenant_admin`)
 - `users` → device purchasers only. No dashboard access. Authenticate via OTP on the Android app
 - `tenants` → the organisation entity. A tenant's `capabilities` array determines whether it can lend (lock/unlock authority), distribute (register devices/users), or both
 - A parent tenant (e.g. Retail Chain) can have child tenants (outlets) — `parentTenantId` field
 
 **Isolation Rules:**
-- Tenant staff can only view/manage resources where `tenantId` matches their own
-- Channel partner accounts see aggregated data across all their tenants
+- Tenant admins can only view/manage resources where `tenantId` matches their own
+- Partner admins see aggregated data across all tenants under their channel partner
 - Super admin has platform-wide read and exception-only write access
 - Device and user records always carry `tenantId` for scoped queries
 
@@ -201,7 +201,7 @@ EMI Shield Super Admin (platform)
 ## 5. Database Schemas
 
 ### 5.1 `accounts` Collection
-Dashboard login credentials for all non-borrower actors: super admins, channel partner staff, and tenant staff.
+Dashboard login credentials for all non-borrower actors: super admins, partner admins, and tenant admins.
 
 ```js
 {
@@ -215,16 +215,14 @@ Dashboard login credentials for all non-borrower actors: super admins, channel p
     type: String,
     enum: [
       'super_admin',
-      'channel_partner_admin',
-      'channel_partner_staff',
-      'tenant_admin',
-      'tenant_staff'
+      'partner_admin',
+      'tenant_admin'
     ],
     required: true
   },
 
   // Scoping — only one of these is populated depending on role
-  channelPartnerId: { type: ObjectId, ref: 'channelPartners' }, // for CP roles
+  channelPartnerId: { type: ObjectId, ref: 'channelPartners' }, // for partner_admin
   tenantId: { type: ObjectId, ref: 'tenants' },                 // for tenant roles
 
   isActive: { type: Boolean, default: true },
@@ -263,7 +261,7 @@ Device purchasers (borrowers) only. These are the people who install the Android
   consentRecordId: { type: ObjectId, ref: 'consentRecords' },
 
   isActive: { type: Boolean, default: true },
-  registeredBy: { type: ObjectId, ref: 'accounts' }, // tenant staff who onboarded them
+  registeredBy: { type: ObjectId, ref: 'accounts' }, // tenant_admin who onboarded them
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 }
@@ -498,7 +496,8 @@ Per-tenant enforcement policies defining Android restrictions for each device/EM
     allowedApps: [{ type: String }],   // Android package names permitted (empty = all allowed)
     blockedApps:  [{ type: String }],  // Android package names to block
     disableFactoryReset: { type: Boolean, default: true },
-    disableStatusBar: { type: Boolean, default: false }
+    disableStatusBar: { type: Boolean, default: false },
+    disableAdb: { type: Boolean, default: false }
   },
 
   version: { type: Number, default: 1 },
@@ -522,7 +521,7 @@ Per-tenant enforcement policies defining Android restrictions for each device/EM
 ```
 
 ### 5.8 `tenantPolicies` Collection
-Per-tenant configurable policy for lock, unlock, and escalation behavior. Only tenants with the `lend` capability have a policy document.
+Per-tenant configurable policy for lock, unlock, and escalation behavior. Only tenants with the `lend` capability have a policy document. Super Admin supplies these fields during `POST /admin/tenants`; platform defaults are used only for omitted optional fields.
 
 ```js
 {
@@ -645,7 +644,7 @@ All payment records for QR-based EMI payments pending or completed.
     enum: ['pending_approval', 'approved'],
     default: 'pending_approval'
   },
-  approvedBy: { type: ObjectId, ref: 'accounts' },   // tenant staff who approved
+  approvedBy: { type: ObjectId, ref: 'accounts' },   // tenant_admin who approved
   approvedAt: { type: Date },
 
   // EMI matching (done at approval time)
@@ -889,8 +888,8 @@ Notification records sent to borrowers and lender dashboard users.
       'TEMP_UNLOCK_EXPIRING',
       'CASE_RESOLVED',
       'PAYMENT_CONFIRMED',
-      'PAYMENT_APPROVAL_REQUIRED',    // sent to tenant staff when borrower taps "Payment Sent"
-      'CASE_ESCALATED_TO_PARTNER',    // sent to channel partner staff when tenant SLA breaches
+      'PAYMENT_APPROVAL_REQUIRED',    // sent to tenant admins when borrower taps "Payment Sent"
+      'CASE_ESCALATED_TO_PARTNER',    // sent to partner admins when tenant SLA breaches
       'CASE_ESCALATED_TO_ADMIN'       // sent to super admin when channel partner SLA breaches
     ],
     required: true
@@ -1205,7 +1204,7 @@ Risk monitoring signals surfaced to super admin.
 1. Validates JWT — device belongs to this tenant
 2. Checks no `approval_pending` payment already exists for this device (prevents duplicates)
 3. Creates `payments` document: `{ status: 'approval_pending', paymentMethod: 'qr', qrCodeId, amount, submittedAt }`
-4. Sends FCM `NOTIFICATION` to tenant staff (`notificationType: PAYMENT_APPROVAL_REQUIRED`) — alerts them in Partner App
+4. Sends FCM `NOTIFICATION` to tenant admins (`notificationType: PAYMENT_APPROVAL_REQUIRED`) — alerts them in Partner App
 5. Writes `auditLogs` entry
 
 **Response:**
@@ -1249,7 +1248,7 @@ Risk monitoring signals surfaced to super admin.
      slaDeadline: now + slaHours,
      details, imageUrl, reasonCategory }
    ```
-6. Send FCM `NOTIFICATION` to tenant staff: `UNLOCK_REQUEST_RECEIVED`, deepLink to case
+6. Send FCM `NOTIFICATION` to tenant admins: `UNLOCK_REQUEST_RECEIVED`, deepLink to case
 7. Write `auditLogs`: `UNLOCK_REQUEST_CREATED`
 
 **Response:**
@@ -1289,7 +1288,7 @@ Risk monitoring signals surfaced to super admin.
 
 ### 6.3 Distributor Dashboard Routes (`/distributor`)
 
-> Requires `tokenType: account` + `role: tenant_admin | tenant_staff` + tenant has `distribute` capability
+> Requires `tokenType: account` + `role: tenant_admin` + tenant has `distribute` capability
 
 | Method | Route | Description |
 |---|---|---|
@@ -1331,29 +1330,12 @@ Risk monitoring signals surfaced to super admin.
 
 ### 6.4 Partner (Tenant) Dashboard Routes (`/partner`)
 
-> Requires `tokenType: account` + `role: tenant_admin | tenant_staff`  
+> Requires `tokenType: account` + `role: tenant_admin`  
 > Lock/unlock routes additionally require tenant has `lend` capability
 
-#### Staff Account Management
+> Tenant admins do not create subordinate accounts. Additional `tenant_admin` accounts are created, updated, activated, or deactivated by Super Admin through `/admin/accounts`.
 
-| Method | Route | Description |
-|---|---|---|
-| GET | `/partner/accounts` | List all staff accounts under this tenant |
-| POST | `/partner/accounts` | Create a new `tenant_staff` account (tenant_admin only) |
-| PATCH | `/partner/accounts/:accountId` | Update staff account details |
-| PATCH | `/partner/accounts/:accountId/status` | Activate / deactivate a staff account |
-
-**Request — POST `/partner/accounts`**
-```json
-{
-  "name": "Suresh Patil",
-  "email": "suresh@bharatpune.in",
-  "mobile": "9800000004",
-  "role": "tenant_staff",
-  "temporaryPassword": "Staff@456"
-}
-```
-> `tenantId` is resolved from the requesting account's JWT. Only `tenant_admin` can call this route. Only `tenant_staff` role can be created here (to prevent privilege escalation).
+#### Device Management
 
 #### Device Management
 
@@ -1567,7 +1549,7 @@ Risk monitoring signals surfaced to super admin.
 
 ### 6.5 Channel Partner Routes (`/cp`)
 
-> Requires `tokenType: account` + `role: channel_partner_admin | channel_partner_staff`  
+> Requires `tokenType: account` + `role: partner_admin`  
 > `channelPartnerId` is resolved from the requesting account's JWT. All cases shown are scoped to tenants under this channel partner.
 
 #### Escalation Queue
@@ -1645,17 +1627,130 @@ Risk monitoring signals surfaced to super admin.
 | POST | `/admin/channel-partners` | Create new channel partner |
 | GET | `/admin/channel-partners/:id` | Channel partner details |
 | PATCH | `/admin/channel-partners/:id` | Update channel partner |
+| PATCH | `/admin/channel-partners/:id/status` | Activate / deactivate channel partner |
 | GET | `/admin/tenants` | List all tenants |
-| POST | `/admin/tenants` | Create new tenant (auto-seeds `tenantPolicies` + 5 default `devicePolicies`) |
+| POST | `/admin/tenants` | Create new tenant with submitted `tenantPolicy` + `devicePolicies` |
 | GET | `/admin/tenants/:id` | Tenant detail |
+| PATCH | `/admin/tenants/:id` | Update tenant profile/support details |
 | PATCH | `/admin/tenants/:id/status` | Activate / deactivate tenant |
-| GET | `/admin/tenants/:id/accounts` | List staff accounts under a tenant |
-| POST | `/admin/accounts` | Create a staff account (tenant_admin or tenant_staff) under a tenant |
+| GET | `/admin/accounts` | List `partner_admin` and `tenant_admin` accounts |
+| POST | `/admin/accounts` | Create `partner_admin` or `tenant_admin` account |
+| GET | `/admin/accounts/:accountId` | Account detail |
+| PATCH | `/admin/accounts/:accountId` | Update account profile/scope |
+| PATCH | `/admin/accounts/:accountId/status` | Activate / deactivate account |
 
-**Auto-seed on `POST /admin/tenants`:**  
-When a tenant with `lend` capability is created, the backend automatically creates:
-1. One `tenantPolicies` document with default lock/unlock/escalation config
-2. Five `devicePolicies` documents (one per `policyKey`: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`) with default restrictions
+**Policy creation on `POST /admin/tenants`:**  
+The Super Admin create-tenant form includes `tenantPolicy` and `devicePolicies`. The backend creates all related records in one MongoDB transaction:
+1. One `tenants` document
+2. One `tenantPolicies` document when `capabilities` includes `lend`
+3. Five `devicePolicies` documents, one per `policyKey`: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`
+4. `auditLogs` entries for tenant and policy creation
+
+Required validation:
+- `lend` tenants must include `tenantPolicy`
+- `lend` tenants must include all five `devicePolicies`
+- `EMI_LOCKED` must keep emergency dialer and borrower app accessible
+- Platform defaults may fill omitted optional fields, but must not silently omit a required policy key
+
+**Request — POST `/admin/tenants`**
+```json
+{
+  "name": "Bharat Finance - Pune Branch",
+  "type": "nbfc",
+  "capabilities": ["lend", "distribute"],
+  "channelPartnerId": "<channelPartnerId>",
+  "parentTenantId": null,
+  "supportPhone": "9800000002",
+  "supportEmail": "support@bharatpune.in",
+  "supportWhatsapp": "9800000002",
+  "address": {
+    "street": "12, MG Road",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "pincode": "411001"
+  },
+  "tenantPolicy": {
+    "lockRules": {
+      "dpd": 30,
+      "gracePeriodDays": 7,
+      "lockOnGraceExpiry": true
+    },
+    "unlockRules": {
+      "unlockType": "instant",
+      "delayMinutes": 0,
+      "requireFullPayment": true,
+      "partialUnlockOnPartialPayment": false,
+      "requireReasonOnManualUnlock": true
+    },
+    "tempUnlockRules": {
+      "defaultDurationHours": 24,
+      "maxDurationHours": 72
+    },
+    "escalationRules": {
+      "slaHours": 24,
+      "partnerEscalationSlaHours": 48,
+      "autoEscalateOnSLABreach": true
+    }
+  },
+  "devicePolicies": [
+    {
+      "policyKey": "EMI_PAID",
+      "restrictions": {
+        "lockMode": false,
+        "allowedApps": [],
+        "blockedApps": [],
+        "disableFactoryReset": true,
+        "disableStatusBar": false,
+        "disableAdb": false
+      }
+    },
+    {
+      "policyKey": "EMI_GRACE",
+      "restrictions": {
+        "lockMode": false,
+        "allowedApps": [],
+        "blockedApps": [],
+        "disableFactoryReset": true,
+        "disableStatusBar": false,
+        "disableAdb": false
+      }
+    },
+    {
+      "policyKey": "EMI_LOCKED",
+      "restrictions": {
+        "lockMode": true,
+        "allowedApps": ["com.emishield.app", "com.android.dialer"],
+        "blockedApps": [],
+        "disableFactoryReset": true,
+        "disableStatusBar": true,
+        "disableAdb": true
+      }
+    },
+    {
+      "policyKey": "TEMP_UNLOCKED",
+      "restrictions": {
+        "lockMode": false,
+        "allowedApps": [],
+        "blockedApps": [],
+        "disableFactoryReset": true,
+        "disableStatusBar": false,
+        "disableAdb": false
+      }
+    },
+    {
+      "policyKey": "CONSENT_INVALID",
+      "restrictions": {
+        "lockMode": false,
+        "allowedApps": [],
+        "blockedApps": [],
+        "disableFactoryReset": true,
+        "disableStatusBar": false,
+        "disableAdb": false
+      }
+    }
+  ]
+}
+```
 
 **Request — POST `/admin/accounts`**
 ```json
@@ -1668,7 +1763,19 @@ When a tenant with `lend` capability is created, the backend automatically creat
   "temporaryPassword": "Welcome@123"
 }
 ```
-> Valid roles for this route: `tenant_admin`, `tenant_staff`. Use `channelPartnerId` instead of `tenantId` for `channel_partner_admin` / `channel_partner_staff` roles.
+> Valid roles for this route: `partner_admin` and `tenant_admin`. Use `channelPartnerId` for `partner_admin` and `tenantId` for `tenant_admin`. No other operational account roles exist.
+
+**Request — POST `/admin/accounts` for partner admin**
+```json
+{
+  "name": "Anita Rao",
+  "email": "anita@bharatfinance.in",
+  "mobile": "9800000005",
+  "role": "partner_admin",
+  "channelPartnerId": "<channelPartnerId>",
+  "temporaryPassword": "Welcome@123"
+}
+```
 
 #### Consent Versions
 
@@ -1676,7 +1783,21 @@ When a tenant with `lend` capability is created, the backend automatically creat
 |---|---|---|
 | GET | `/admin/consent-versions` | List consent document versions |
 | POST | `/admin/consent-versions` | Create new consent version |
-| PATCH | `/admin/consent-versions/:id/activate` | Mark as current active version |
+| GET | `/admin/consent-versions/:id` | Consent version detail |
+| PATCH | `/admin/consent-versions/:id/publish` | Mark as current active version |
+
+**Publish rule:** publishing a version sets every other `consentVersions.isCurrent` to `false` and sets the selected version to `isCurrent: true`. Existing `consentRecords` are never updated.
+
+#### Device Oversight
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/admin/devices` | Search devices by IMEI, borrower mobile, tenant, channel partner, or state |
+| GET | `/admin/devices/:deviceId` | Device detail with borrower, tenant, consent, policy, risk, and EMI summary |
+| GET | `/admin/devices/:deviceId/commands` | Device command history |
+| GET | `/admin/devices/:deviceId/audit-logs` | Device-specific audit trail |
+
+> Super Admin device oversight is read-heavy. Lock/unlock actions must happen through escalation override routes, not casual device detail actions.
 
 #### Audit & Compliance
 
@@ -1733,11 +1854,11 @@ POST /app/payment/submit → creates payments record
 { status: 'approval_pending', paymentMethod: 'qr', submittedAt }
         │
         ▼
-FCM NOTIFICATION → Tenant staff Partner App
+FCM NOTIFICATION → Tenant Admin Partner App
 { notificationType: 'PAYMENT_APPROVAL_REQUIRED' }
         │
         ▼
-[Tenant staff opens Partner App]
+[Tenant admin opens Partner App]
 GET /partner/payments/pending-approval → sees pending payment
         │
         ▼
@@ -1788,10 +1909,10 @@ Borrower taps "Request Unlock" → fills form (reason, details, optional JPEG)
 POST /app/unlock-request (multipart/form-data)
   → image uploaded to S3 → imageUrl stored
   → unlockRequests created: { status: 'PENDING_TENANT', caseId, slaDeadline }
-  → FCM NOTIFICATION (UNLOCK_REQUEST_RECEIVED) → tenant staff devices
+  → FCM NOTIFICATION (UNLOCK_REQUEST_RECEIVED) → tenant admin devices
         │
         ▼
-[Partner App — Tenant Staff]
+[Partner App — Tenant Admin]
   GET /partner/unlock-requests → see case + image
   Tenant chooses one of three actions:
     ┌─────────────────────────────────────────────────────────┐
@@ -1824,11 +1945,11 @@ escalatedToPartnerAt = now
 partnerSlaDeadline = now + policy.escalationRules.partnerEscalationSlaHours
 Write auditLogs (ESCALATION_RAISED, SLA_BREACHED)
 Create riskFlag if tenant has repeated SLA breaches
-FCM NOTIFICATION (CASE_ESCALATED_TO_PARTNER) → channel partner staff
+FCM NOTIFICATION (CASE_ESCALATED_TO_PARTNER) → partner admins
 FCM NOTIFICATION (ESCALATION_UPDATE) → borrower
         │
         ▼
-[Partner App — Channel Partner Staff]
+[Partner App — Partner Admin]
   GET /cp/escalations → see cases from all their tenants
   Channel partner chooses one of three actions (same as tenant):
     - POST /cp/escalations/:id/approve (full unlock, optional waive)
@@ -1976,8 +2097,8 @@ Write auditLogs (LOCK_TRIGGERED)
 | `ESCALATED_PARTNER` | Scheduler | Tenant `slaDeadline` exceeded |
 | `ESCALATED_ADMIN` | Scheduler | Channel partner `partnerSlaDeadline` exceeded |
 | `UNDER_REVIEW` | Super admin | Super admin opens case for investigation |
-| `RESOLVED_TENANT` | Tenant staff | Any of: approve, temp-unlock, reject |
-| `RESOLVED_PARTNER` | CP staff | Any of: approve, temp-unlock, reject |
+| `RESOLVED_TENANT` | Tenant admin | Any of: approve, temp-unlock, reject |
+| `RESOLVED_PARTNER` | Partner admin | Any of: approve, temp-unlock, reject |
 | `RESOLVED_SUPER_ADMIN` | Super admin | Override unlock / temp-unlock / reject |
 | `REJECTED` | Tenant / CP / Admin | Request denied |
 | `CLOSED` | System | Case acknowledged as complete |
@@ -1991,29 +2112,29 @@ Write auditLogs (LOCK_TRIGGERED)
 | Actor | Collection | Method |
 |---|---|---|
 | Borrower (Android app) | `users` | OTP → JWT (`tokenType: user`) |
-| Tenant staff / admin | `accounts` | Email+Password or OTP → JWT (`tokenType: account`) |
-| Channel partner staff | `accounts` | Email+Password → JWT (`tokenType: account`) |
+| Tenant admin | `accounts` | Email+Password or OTP → JWT (`tokenType: account`) |
+| Partner admin | `accounts` | Email+Password → JWT (`tokenType: account`) |
 | Super admin | `accounts` | Email+Password + 2FA → JWT (`tokenType: account`) |
 | Payment Webhooks | — | Webhook HMAC-SHA256 signature |
 | Device Sync | `users` | Device-bound JWT tied to IMEI + user session |
 
 ### RBAC Permission Matrix
 
-| Permission | super_admin | tenant_admin (lend) | tenant_staff (lend) | tenant (distribute only) | user (borrower) |
+| Permission | super_admin | partner_admin | tenant_admin (lend) | tenant_admin (distribute) | user (borrower) |
 |---|---|---|---|---|---|
-| Lock device | Escalation only | ✅ | ✅ | ❌ | ❌ |
-| Unlock device | Escalation only | ✅ | ✅ | ❌ | ❌ |
-| Temp unlock | Escalation only | ✅ Within policy | ✅ Within policy | ❌ | ❌ |
-| Override (with reason) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Configure policy | ❌ (platform-level only) | ✅ Own tenant | ❌ | ❌ | ❌ |
-| View audit logs | ✅ All | ✅ Own tenant | ✅ Own tenant | ❌ | ❌ |
-| Handle escalation | ✅ | ✅ Own cases | ✅ Own cases | ❌ | ❌ |
-| Register users/devices | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Submit unlock request | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Make payment | ❌ | ❌ | ❌ | ❌ | ✅ |
-| View own EMI/case status | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Manage tenants | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Manage channel partners | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Lock device | Escalation only | Escalated cases only | Yes | No | No |
+| Unlock device | Escalation only | Escalated cases only | Yes | No | No |
+| Temp unlock | Escalation only | Escalated cases only | Within policy | No | No |
+| Override (with reason) | Yes | No | No | No | No |
+| Configure policy | Platform setup only | No | Own tenant | No | No |
+| View audit logs | All | Channel partner scope | Own tenant | Own tenant | No |
+| Handle escalation | Admin escalation queue | Partner escalation queue | Own cases | No | No |
+| Register users/devices | No | No | No | Yes | No |
+| Submit unlock request | No | No | No | No | Yes |
+| Make payment | No | No | No | No | Yes |
+| View own EMI/case status | No | No | No | No | Yes |
+| Manage tenants | Yes | No | No | No | No |
+| Manage channel partners | Yes | No | No | No | No |
 
 ### Key Security Rules
 
@@ -2070,6 +2191,9 @@ db.deviceCommands.createIndex({ deviceId: 1, status: 1 })
 
 // tenantPolicies
 db.tenantPolicies.createIndex({ tenantId: 1 }, { unique: true })
+
+// devicePolicies
+db.devicePolicies.createIndex({ tenantId: 1, policyKey: 1 }, { unique: true })
 
 // TTL index
 db.otpRecords.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })

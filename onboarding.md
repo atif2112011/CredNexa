@@ -7,8 +7,8 @@ This document explains the complete onboarding flow for the EMI Shield ecosystem
 ### Architecture Components
 
 - Shield Android App (Device Owner App — installed on borrower's device)
-- Distributor Android App (used by distributor staff to register users and generate QR codes)
-- Tenant Android App (used by tenant staff for daily lock/unlock operations)
+- Distributor Android App (used by `tenant_admin` accounts with `distribute` capability to register users and generate QR codes)
+- Tenant Android App (used by `tenant_admin` accounts for daily lock/unlock operations)
 - Backend REST API (`/api/v1`)
 - Firebase Cloud Messaging (FCM)
 - QR-based Android Device Owner provisioning
@@ -50,7 +50,7 @@ This document explains the complete onboarding flow for the EMI Shield ecosystem
 ```text
 ┌──────────────────────┐
 │   Tenant Dashboard   │
-│ (Distributor Staff)  │
+│   (Tenant Admin)     │
 └──────────┬───────────┘
            │ POST /distributor/users/register
            ▼
@@ -77,12 +77,12 @@ This document explains the complete onboarding flow for the EMI Shield ecosystem
 
 ### Step 1 — Distributor App Creates Enrollment
 
-Distributor staff logs into the **Distributor Android App** and registers the borrower + loan details.
+Tenant admin logs into the **Distributor Android App** and registers the borrower + loan details.
 
 **API Call:**
 ```
 POST /api/v1/distributor/users/register
-Authorization: Bearer <tenantStaffToken>
+Authorization: Bearer <tenantAdminToken>
 
 Body:
 {
@@ -122,7 +122,7 @@ The **Distributor Android App** calls the backend to generate the Android Device
 **API Call:**
 ```
 POST /api/v1/distributor/enrollment/qr
-Authorization: Bearer <tenantStaffToken>
+Authorization: Bearer <tenantAdminToken>
 
 Body:
 { "enrollmentToken": "TEMP_TOKEN_ABC123" }
@@ -558,7 +558,7 @@ After reporting, re-fetch `GET /app/device/policy` — the backend may have chan
 
 ## Tenant Dashboard — Policy Configuration
 
-Tenant staff configure enforcement policies for each device state via the Partner Dashboard:
+Tenant admins configure enforcement policies for each device state via the Partner Dashboard:
 
 ```
 GET  /api/v1/partner/device-policies               — list all policies for the tenant
@@ -582,4 +582,4 @@ Body:
   }
 }
 ```
-
+

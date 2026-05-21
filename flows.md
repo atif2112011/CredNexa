@@ -9,12 +9,13 @@
 ## Table of Contents
 
 1. [Flow 1 — Partner Creation (Admin Panel)](#flow-1--partner-creation-admin-panel)
-2. [Flow 2 — Distributor Staff Creation (Partner App)](#flow-2--distributor-staff-creation-partner-app)
+2. [Flow 2 — Tenant Admin Operational Login](#flow-2--tenant-admin-operational-login)
 3. [Flow 3 — User Registration + QR Generation (Distributor App)](#flow-3--user-registration--qr-generation-distributor-app)
 4. [Flow 4 — Device Onboarding (Target Device / Borrower App)](#flow-4--device-onboarding-target-device--borrower-app)
 5. [Flow 5 — FCM Policy Update Flow (Server → Device)](#flow-5--fcm-policy-update-flow-server--device)
 6. [Flow 6 — QR Payment + Tenant Approval + Device Unlock](#flow-6--qr-payment--tenant-approval--device-unlock)
 7. [Flow 7 — Unlock Request + Two-Tier Escalation](#flow-7--unlock-request--two-tier-escalation)
+8. [Super Admin Flows](super-admin-flows.md)
 
 ---
 
@@ -23,8 +24,8 @@
 | Actor | App/Interface | Auth |
 |---|---|---|
 | Super Admin | Admin Panel (Web) | Email + password → `tokenType: account`, `role: super_admin` |
-| Tenant Admin | Partner App (Android) | Email + password → `tokenType: account`, `role: tenant_admin` |
-| Tenant Staff (Distributor) | Distributor App (Android) | Email + password → `tokenType: account`, `role: tenant_staff` |
+| Partner Admin | Partner App (Android) | Email + password → `tokenType: account`, `role: partner_admin` |
+| Tenant Admin | Partner App / Distributor App (Android) | Email + password → `tokenType: account`, `role: tenant_admin` |
 | Borrower | Borrower App (Android) | Mobile OTP → `tokenType: user` |
 
 ---
@@ -32,7 +33,7 @@
 ## Flow 1 — Partner Creation (Admin Panel)
 
 > **Actor:** Super Admin on the Admin Panel (web)
-> **Outcome:** A Channel Partner is registered, a Tenant is created under them, their admin staff account is created, and default policies are seeded — ready for the Partner App and Distributor App to be used.
+> **Outcome:** A Channel Partner is registered, a Tenant is created under them, tenant policies and device policies are configured, a `tenant_admin` account is created, and the tenant is ready for the Partner App and Distributor App.
 
 ### Step 1.1 — Super Admin Logs In
 
@@ -50,13 +51,12 @@ Body:
 ```json
 {
   "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
   "tokenType": "account",
   "account": { "id": "...", "role": "super_admin", "name": "Admin" }
 }
 ```
 
-> Store `accessToken` in the Admin Panel session. All subsequent requests use `Authorization: Bearer <accessToken>`.
+> Store `accessToken` in the Admin Panel session. The backend sets the refresh token as an HTTP-only cookie. All subsequent requests use `Authorization: Bearer <accessToken>`.
 
 ---
 
@@ -117,9 +117,9 @@ Body:
 
 **Collection written:** `tenants`
 
-**Backend auto-seeds on tenant creation (important):**
-1. `tenantPolicies` — default lock/unlock/escalation config (dpd: 30, gracePeriodDays: 7, slaHours: 24, etc.)
-2. `devicePolicies` — one document per policyKey with default restrictions:
+**Backend creates on tenant creation (important):**
+1. `tenantPolicies` — from the Super Admin create-tenant form when the tenant has `lend` capability
+2. `devicePolicies` — one document per policyKey from the create-tenant form, using platform defaults only for omitted optional fields:
 
 | policyKey | lockMode | disableFactoryReset | disableStatusBar |
 |---|---|---|---|
@@ -143,7 +143,7 @@ Body:
 
 ### Step 1.4 — Create Tenant Admin Account
 
-Creates the login account for the tenant's admin — the person who will use the **Partner App** to manage operations and create distributor staff.
+Creates the login account for the tenant's admin — the person who will use the **Partner App** and, when the tenant has `distribute`, the **Distributor App**.
 
 ```
 POST /admin/accounts
@@ -165,7 +165,7 @@ Body:
 **Backend actions:**
 1. Creates the `accounts` record scoped to `tenantId`
 2. Hashes the `temporaryPassword`
-3. Sends a welcome email to the staff member with login instructions
+3. Sends a welcome email with login instructions
 
 **Response:**
 ```json
@@ -189,8 +189,8 @@ Super Admin (Admin Panel)
         ├── POST /admin/channel-partners  →  channelPartners record created
         │
         ├── POST /admin/tenants           →  tenants record created
-        │                                    + tenantPolicies auto-seeded
-        │                                    + devicePolicies (x5) auto-seeded
+        │                                    + tenantPolicies created from form
+        │                                    + devicePolicies (x5) created from form/defaults
         │
         └── POST /admin/accounts          →  accounts record (tenant_admin) created
                                               welcome email sent
@@ -198,12 +198,77 @@ Super Admin (Admin Panel)
 
 ---
 
-## Flow 2 — Distributor Staff Creation (Partner App)
+## Flow 2 — Tenant Admin Operational Login
 
 > **Actor:** Tenant Admin on the Partner App (Android)
-> **Outcome:** A `tenant_staff` account is created. That staff member can now log into the **Distributor App** and register users at point of sale.
+> **Outcome:** The same `tenant_admin` account can operate the Partner App for `lend` workflows and the Distributor App for `distribute` workflows. No subordinate tenant accounts are used.
 
 ### Step 2.1 — Tenant Admin Logs In (Partner App)
+
+```
+POST /auth/login
+
+Body:
+{
+  "email": "priya@bharatpune.in",
+  "password": "Welcome@123"
+}
+```
+
+**Response:**
+```json
+{
+  "accessToken": "eyJ...",
+  "tokenType": "account",
+  "account": {
+    "id": "...",
+    "role": "tenant_admin",
+    "tenantId": "<tenantId>",
+    "name": "Priya Sharma"
+  }
+}
+```
+
+> Store the access token securely on device. The refresh token is held in an HTTP-only cookie. `tenantId` is embedded in the JWT, so all subsequent API calls are automatically scoped to this tenant.
+
+---
+
+### Step 2.2 — Capability-Based App Access
+
+The backend checks the authenticated account and tenant capabilities:
+
+| App | Required role | Required tenant capability |
+|---|---|---|
+| Partner App | `tenant_admin` | `lend` |
+| Distributor App | `tenant_admin` | `distribute` |
+
+No account is created in this flow. If another admin is needed, the Super Admin creates another `tenant_admin` from the Admin Dashboard.
+
+---
+
+### Flow 2 Summary
+
+```
+Tenant Admin (Partner App)
+        │
+        └── Uses Partner App if tenant has lend capability
+        └── Uses Distributor App if tenant has distribute capability
+```
+
+---
+
+## Flow 3 — User Registration + QR Generation (Distributor App)
+
+> **Actor:** Tenant Admin on the Distributor App (Android), for a tenant with `distribute` capability
+> **Outcome:** A borrower user is registered with their loan + EMI details, an enrollment token is generated, and the QR code is displayed on-screen for scanning during device provisioning.
+
+### About EMI Details
+
+EMI details (loan amount, per-EMI amount, tenure, disbursement date) are entered by the `tenant_admin` **during user registration**, at the time the device is sold. This is the correct moment — the loan agreement is being signed, all figures are known, and the QR code generation follows immediately in the same session.
+
+---
+
+### Step 3.1 — Tenant Admin Logs In (Distributor App)
 
 ```
 POST /auth/login
@@ -230,104 +295,11 @@ Body:
 }
 ```
 
-> Store tokens securely on device. `tenantId` is embedded in the JWT — all subsequent API calls are automatically scoped to this tenant.
-
----
-
-### Step 2.2 — Create Distributor Staff Account
-
-The tenant admin creates a staff account for the person who will operate the **Distributor App** at point of sale.
-
-```
-POST /partner/accounts
-Authorization: Bearer <tenantAdminToken>
-
-Body:
-{
-  "name": "Suresh Patil",
-  "email": "suresh@bharatpune.in",
-  "mobile": "9800000004",
-  "role": "tenant_staff",
-  "temporaryPassword": "Staff@456"
-}
-```
-
-**Collection written:** `accounts` (with `tenantId` from JWT)
-
-**Backend actions:**
-1. Creates `accounts` record with `tenantId` inherited from the requesting account's JWT
-2. Validates that the requesting account's tenant has `distribute` capability before allowing creation
-3. Hashes the `temporaryPassword`
-4. Sends welcome / credential SMS or email to the new staff member
-
-**Response:**
-```json
-{
-  "accountId": "<ObjectId>",
-  "email": "suresh@bharatpune.in",
-  "role": "tenant_staff",
-  "tenantId": "<tenantId>"
-}
-```
-
-> Suresh can now log into the **Distributor App** using `email: suresh@bharatpune.in` and `password: Staff@456`.
-
----
-
-### Flow 2 Summary
-
-```
-Tenant Admin (Partner App)
-        │
-        └── POST /partner/accounts   →  accounts record (tenant_staff) created
-                                         welcome credentials sent
-```
-
----
-
-## Flow 3 — User Registration + QR Generation (Distributor App)
-
-> **Actor:** Distributor staff (tenant_staff) on the Distributor App (Android)
-> **Outcome:** A borrower user is registered with their loan + EMI details, an enrollment token is generated, and the QR code is displayed on-screen for scanning during device provisioning.
-
-### About EMI Details
-
-EMI details (loan amount, per-EMI amount, tenure, disbursement date) are entered by the distributor **during user registration**, at the time the device is sold. This is the correct moment — the loan agreement is being signed, all figures are known, and the QR code generation follows immediately in the same session.
-
----
-
-### Step 3.1 — Distributor Staff Logs In (Distributor App)
-
-```
-POST /auth/login
-
-Body:
-{
-  "email": "suresh@bharatpune.in",
-  "password": "Staff@456"
-}
-```
-
-**Response:**
-```json
-{
-  "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
-  "tokenType": "account",
-  "account": {
-    "id": "...",
-    "role": "tenant_staff",
-    "tenantId": "<tenantId>",
-    "name": "Suresh Patil"
-  }
-}
-```
-
 ---
 
 ### Step 3.2 — Register New User (Borrower) with Loan + EMI Details
 
-The distributor fills in a form with the borrower's personal details and the loan/EMI details from the loan agreement.
+The tenant admin fills in a form with the borrower's personal details and the loan/EMI details from the loan agreement.
 
 ```
 POST /distributor/users/register
@@ -414,7 +386,7 @@ Body:
 ### Flow 3 Summary
 
 ```
-Distributor Staff (Distributor App)
+Tenant Admin (Distributor App)
         │
         ├── POST /distributor/users/register   →  users record created
         │       (name, mobile, EMI details)        emiSchedules created
@@ -700,18 +672,18 @@ Borrower (new device)
 Super Admin
   1.1  POST /auth/login
   1.2  POST /admin/channel-partners     →  channelPartners
-  1.3  POST /admin/tenants              →  tenants + tenantPolicies + devicePolicies (x5)
+  1.3  POST /admin/tenants              →  tenants + submitted tenantPolicies + devicePolicies (x5)
   1.4  POST /admin/accounts             →  accounts (tenant_admin)
           │
           ▼
 [Partner App — Android]
 Tenant Admin
   2.1  POST /auth/login
-  2.2  POST /partner/accounts           →  accounts (tenant_staff)
+  2.2  [Capability check]               →  lend/distribute app access
           │
           ▼
 [Distributor App — Android]
-Distributor Staff
+Tenant Admin
   3.1  POST /auth/login
   3.2  POST /distributor/users/register →  users + emiSchedules + enrollmentToken
   3.3  POST /distributor/enrollment/qr  →  QR displayed on screen
@@ -736,15 +708,14 @@ Borrower
 | 1.2 | POST | `/admin/channel-partners` | super_admin |
 | 1.3 | POST | `/admin/tenants` | super_admin |
 | 1.4 | POST | `/admin/accounts` | super_admin |
-| 2.2 | POST | `/partner/accounts` | tenant_admin |
-| 3.2 | POST | `/distributor/users/register` | tenant_staff + distribute |
-| 3.3 | POST | `/distributor/enrollment/qr` | tenant_staff + distribute |
+| 3.2 | POST | `/distributor/users/register` | tenant_admin + distribute |
+| 3.3 | POST | `/distributor/enrollment/qr` | tenant_admin + distribute |
 | 4.3 | GET | `/app/consent/terms` | Public |
 | 4.4 | POST | `/app/consent/initiate` | Public (uses enrollmentToken) |
 | 4.5 | POST | `/app/consent/confirm` | Public (uses enrollmentToken) |
 | 4.6 | POST | `/app/device/register` | tokenType: user |
 
-> **Note:** `/admin/accounts` and `/partner/accounts` are new routes — see architecture.md for their full specifications.
+> **Note:** `/admin/accounts` is used by Super Admin to create `partner_admin` and `tenant_admin` accounts. There are no subordinate account routes in Partner App.
 
 ---
 
@@ -778,7 +749,7 @@ A device state change can be triggered by:
 | Scheduler (auto) | EMI DPD Calculator detects unpaid EMI → lock device | `auto_policy` |
 | Scheduler (auto) | Temp Unlock Expiry — `tempUnlockExpiresAt` passed | `temp_unlock_expiry` |
 | Payment webhook | Payment validated → unlock device | `payment_unlock` |
-| Tenant staff (manual) | Partner App: Grant temp unlock | `manual_tenant` |
+| Tenant admin (manual) | Partner App: Grant temp unlock | `manual_tenant` |
 | Super Admin (override) | Admin Panel: Force unlock with reason | `super_admin` |
 
 For this example we trace: **EMI DPD Calculator fires at midnight — a device transitions GRACE_PERIOD → LOCKED.**
@@ -1115,7 +1086,7 @@ After ack, `devices.state` is confirmed as the target state (`LOCKED` or `ACTIVE
 
 ## Flow 6 — QR Payment + Tenant Approval + Device Unlock
 
-> **Actors:** Borrower (Borrower App), Tenant Staff (Partner App), Backend Server
+> **Actors:** Borrower (Borrower App), Tenant Admin (Partner App), Backend Server
 > **Precondition:** Device is in LOCKED state. Tenant has at least one active QR code configured.
 > **Outcome:** Borrower pays via the tenant's UPI QR, tenant approves, device unlocks.
 
@@ -1195,7 +1166,7 @@ Body:
      submittedAt: <now>
    }
    `
-4. Sends FCM NOTIFICATION to tenant staff devices (all ccounts with this 	enantId):
+4. Sends FCM NOTIFICATION to tenant admin devices (all accounts with this tenantId):
    `
    notificationType: 'PAYMENT_APPROVAL_REQUIRED'
    deepLink: 'emishield://partner/payments/pending'
@@ -1218,13 +1189,13 @@ otifications
 
 ---
 
-### Step 6.4 — Tenant Staff Reviews Pending Payment
+### Step 6.4 — Tenant Admin Reviews Pending Payment
 
-Tenant staff receives FCM notification on their Partner App. They open the pending payments list.
+Tenant admin receives FCM notification on their Partner App. They open the pending payments list.
 
 ```
 GET /partner/payments/pending-approval
-Authorization: Bearer <tenantStaffJwt>
+Authorization: Bearer <tenantAdminJwt>
 ```
 
 **Response:**
@@ -1243,7 +1214,7 @@ Authorization: Bearer <tenantStaffJwt>
 }
 `
 
-The staff member verifies the payment in their own bank/UPI app (checks inward credit).
+The tenant admin verifies the payment in their own bank/UPI app (checks inward credit).
 
 ---
 
@@ -1251,7 +1222,7 @@ The staff member verifies the payment in their own bank/UPI app (checks inward c
 
 ```
 POST /partner/payments/:paymentId/approve
-Authorization: Bearer <tenantStaffJwt>
+Authorization: Bearer <tenantAdminJwt>
 ```
 
 **Backend actions:**
@@ -1261,7 +1232,7 @@ Authorization: Bearer <tenantStaffJwt>
    {
      status: 'success',
      approvalStatus: 'approved',
-     approvedBy: <tenantStaffAccountId>,
+     approvedBy: <tenantAdminAccountId>,
      approvedAt: <now>,
      completedAt: <now>
    }
@@ -1383,12 +1354,12 @@ Authorization: Bearer <tenantAdminJwt>
   6.2  [Display QR image full-screen]
        [User pays with their own UPI app externally]
   6.3  POST /app/payment/submit          → payments (status: approval_pending)
-                                         → FCM NOTIFICATION to tenant staff
+                                         → FCM NOTIFICATION to tenant admins
          │
          ▼
-[Partner App — Tenant Staff]
+[Partner App — Tenant Admin]
   6.4  GET  /partner/payments/pending-approval
-       [Staff verifies payment in bank/UPI app]
+       [Tenant admin verifies payment in bank/UPI app]
   6.5  POST /partner/payments/:id/approve
          → payments (status: success, approvalStatus: approved)
          → emiSchedules (installments marked paid)
@@ -1426,7 +1397,7 @@ Authorization: Bearer <tenantAdminJwt>
 
 ## Flow 7 -- Unlock Request + Two-Tier Escalation
 
-> **Actors:** Borrower (Borrower App), Tenant Staff (Partner App), Channel Partner Staff (Partner App), Super Admin (Admin Dashboard), Backend Server
+> **Actors:** Borrower (Borrower App), Tenant Admin (Partner App), Partner Admin (Partner App), Super Admin (Admin Dashboard), Backend Server
 > **Precondition:** Device is in LOCKED state. Borrower has not paid or needs temporary access.
 > **Outcome:** Device is unlocked (full or temp) OR request is rejected. If tenant/CP do not respond in time, the case automatically escalates up the chain.
 
@@ -1452,7 +1423,7 @@ Request -- POST /app/unlock-request
 2. Uploads image to S3 if provided, stores imageUrl
 3. Resolves slaHours from tenantPolicies.escalationRules.slaHours
 4. Creates unlockRequests: { caseId: "CASE-2024-00123", status: "PENDING_TENANT", slaDeadline: now + slaHours, details, imageUrl, reasonCategory }
-5. Sends FCM NOTIFICATION to all tenant staff devices: UNLOCK_REQUEST_RECEIVED
+5. Sends FCM NOTIFICATION to all tenant admin devices: UNLOCK_REQUEST_RECEIVED
 6. Writes auditLogs: UNLOCK_REQUEST_CREATED
 
 **Response:**
@@ -1471,10 +1442,10 @@ Request -- POST /app/unlock-request
 
 ### Step 7.2 -- Tenant Reviews the Request (Partner App)
 
-Tenant staff receives a push notification and opens the case in the Partner App.
+Tenant admin receives a push notification and opens the case in the Partner App.
 
     GET /partner/unlock-requests/:requestId
-    Authorization: Bearer <tenantStaffJwt>
+    Authorization: Bearer <tenantAdminJwt>
 
 **Response includes:**
 - Borrower name, phone, device model/IMEI
@@ -1490,7 +1461,7 @@ Tenant staff receives a push notification and opens the case in the Partner App.
 Tenant verifies the borrower's claim and chooses to unlock the device.
 
     POST /partner/unlock-requests/:requestId/approve
-    Authorization: Bearer <tenantStaffJwt>
+    Authorization: Bearer <tenantAdminJwt>
 
     Body:
     {
@@ -1518,7 +1489,7 @@ Tenant verifies the borrower's claim and chooses to unlock the device.
 Tenant gives the borrower a time-limited window.
 
     POST /partner/unlock-requests/:requestId/temp-unlock
-    Authorization: Bearer <tenantStaffJwt>
+    Authorization: Bearer <tenantAdminJwt>
 
     Body:
     { "durationHours": 24, "note": "Borrower travelling, will pay on return" }
@@ -1537,7 +1508,7 @@ Tenant gives the borrower a time-limited window.
 ### Step 7.3C -- Tenant Rejects the Request
 
     POST /partner/unlock-requests/:requestId/reject
-    Authorization: Bearer <tenantStaffJwt>
+    Authorization: Bearer <tenantAdminJwt>
 
     Body: { "note": "No payment received per bank records. Please use Pay Now." }
 
@@ -1563,7 +1534,7 @@ For each matched case:
   3. partnerSlaDeadline = now + policy.escalationRules.partnerEscalationSlaHours
   4. Write auditLogs: ESCALATION_RAISED, SLA_BREACHED
   5. Create riskFlag if tenant has >= 3 SLA breaches this month
-  6. FCM NOTIFICATION (CASE_ESCALATED_TO_PARTNER) -> channel partner staff
+  6. FCM NOTIFICATION (CASE_ESCALATED_TO_PARTNER) -> partner admins
   7. FCM NOTIFICATION (ESCALATION_UPDATE) -> borrower: "Your request has been escalated"
 ```
 
@@ -1571,10 +1542,10 @@ For each matched case:
 
 ### Step 7.5 -- Channel Partner Reviews and Acts
 
-Channel partner staff receives the FCM notification and opens their escalation queue.
+Partner admin receives the FCM notification and opens their escalation queue.
 
     GET /cp/escalations
-    Authorization: Bearer <cpStaffJwt>
+    Authorization: Bearer <partnerAdminJwt>
 
 Response shows all ESCALATED_PARTNER cases from tenants under this channel partner, including:
 - Full case history (why the borrower submitted, what the tenant did or didn't do)
@@ -1633,10 +1604,10 @@ All super admin actions require a mandatory reason field. The action is recorded
 [Borrower App -- LOCKED state]
   7.1  POST /app/unlock-request (reason + details + optional JPEG image)
        -> unlockRequests created (PENDING_TENANT)
-       -> FCM NOTIFICATION to tenant staff
+       -> FCM NOTIFICATION to tenant admins
          |
          v
-[Partner App -- Tenant Staff]   (SLA: configurable, default 24h)
+[Partner App -- Tenant Admin]   (SLA: configurable, default 24h)
   7.2  GET  /partner/unlock-requests/:id    <- review case + image
          |
     +----+-----------------------------------+
@@ -1651,10 +1622,10 @@ All super admin actions require a mandatory reason field. The action is recorded
          | (if tenant doesn't act before SLA)
          v
 [Scheduler -- Tier 1 SLA Checker]   -> ESCALATED_PARTNER
-  FCM CASE_ESCALATED_TO_PARTNER -> channel partner staff
+  FCM CASE_ESCALATED_TO_PARTNER -> partner admins
          |
          v
-[Partner App -- Channel Partner Staff]   (SLA: configurable, default 48h)
+[Partner App -- Partner Admin]   (SLA: configurable, default 48h)
   7.5  GET  /cp/escalations
          | (same 3 options: approve / temp-unlock / reject)
          | (if CP doesn't act before SLA)
@@ -1684,11 +1655,11 @@ All super admin actions require a mandatory reason field. The action is recorded
 | 7.3A | POST | /partner/unlock-requests/:id/approve | tokenType: account, tenant |
 | 7.3B | POST | /partner/unlock-requests/:id/temp-unlock | tokenType: account, tenant |
 | 7.3C | POST | /partner/unlock-requests/:id/reject | tokenType: account, tenant |
-| 7.5 | GET | /cp/escalations | tokenType: account, channel_partner_* |
-| 7.5 | GET | /cp/escalations/:caseId | tokenType: account, channel_partner_* |
-| 7.5 | POST | /cp/escalations/:caseId/approve | tokenType: account, channel_partner_* |
-| 7.5 | POST | /cp/escalations/:caseId/temp-unlock | tokenType: account, channel_partner_* |
-| 7.5 | POST | /cp/escalations/:caseId/reject | tokenType: account, channel_partner_* |
+| 7.5 | GET | /cp/escalations | tokenType: account, partner_admin |
+| 7.5 | GET | /cp/escalations/:caseId | tokenType: account, partner_admin |
+| 7.5 | POST | /cp/escalations/:caseId/approve | tokenType: account, partner_admin |
+| 7.5 | POST | /cp/escalations/:caseId/temp-unlock | tokenType: account, partner_admin |
+| 7.5 | POST | /cp/escalations/:caseId/reject | tokenType: account, partner_admin |
 | 7.7 | GET | /admin/escalations | tokenType: account, super_admin |
 | 7.7 | POST | /admin/escalations/:caseId/unlock | tokenType: account, super_admin |
 | 7.7 | POST | /admin/escalations/:caseId/temp-unlock | tokenType: account, super_admin |
