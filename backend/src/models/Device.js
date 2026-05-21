@@ -85,8 +85,4 @@ const deviceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-deviceSchema.index({ userId: 1, tenantId: 1 });
-deviceSchema.index({ imei: 1 }, { unique: true });
-deviceSchema.index({ state: 1, tenantId: 1 });
-
 export const Device = mongoose.model("Device", deviceSchema);

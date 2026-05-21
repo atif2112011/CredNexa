@@ -118,8 +118,8 @@ Body:
 **Collection written:** `tenants`
 
 **Backend creates on tenant creation (important):**
-1. `tenantPolicies` — from the Super Admin create-tenant form when the tenant has `lend` capability
-2. `devicePolicies` — one document per policyKey from the create-tenant form, using platform defaults only for omitted optional fields:
+1. `tenantPolicies` — copied from centralized `DEFAULT_TENANT_POLICY`
+2. `devicePolicies` — one document per policyKey copied from centralized `DEFAULT_DEVICE_POLICIES`:
 
 | policyKey | lockMode | disableFactoryReset | disableStatusBar |
 |---|---|---|---|
@@ -189,8 +189,8 @@ Super Admin (Admin Panel)
         ├── POST /admin/channel-partners  →  channelPartners record created
         │
         ├── POST /admin/tenants           →  tenants record created
-        │                                    + tenantPolicies created from form
-        │                                    + devicePolicies (x5) created from form/defaults
+        │                                    + tenantPolicies copied from centralized defaults
+        │                                    + devicePolicies (x5) copied from centralized defaults
         │
         └── POST /admin/accounts          →  accounts record (tenant_admin) created
                                               welcome email sent
@@ -672,7 +672,7 @@ Borrower (new device)
 Super Admin
   1.1  POST /auth/login
   1.2  POST /admin/channel-partners     →  channelPartners
-  1.3  POST /admin/tenants              →  tenants + submitted tenantPolicies + devicePolicies (x5)
+  1.3  POST /admin/tenants              →  tenants + default tenantPolicies + devicePolicies (x5)
   1.4  POST /admin/accounts             →  accounts (tenant_admin)
           │
           ▼

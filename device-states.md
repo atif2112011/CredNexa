@@ -377,7 +377,7 @@
 
 ## 6. Policy Enforcement Matrix
 
-Each `policyKey` maps to a `devicePolicies` document in MongoDB, scoped per tenant. Below are the **default values** (tenants can customise from Partner App).
+Each `policyKey` maps to a `devicePolicies` document in MongoDB, scoped per tenant. These records are copied from centralized platform defaults when a tenant is created. Below are the **default values**.
 
 | `policyKey` | `lockMode` | `allowedApps` | `disableFactoryReset` | `disableStatusBar` | `disableAdb` |
 |---|---|---|---|---|---|

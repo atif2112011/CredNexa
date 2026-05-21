@@ -407,7 +407,7 @@ if (policy.restrictions.lockMode) {
 
 ### Policy Source of Truth
 
-Policies are stored in the `devicePolicies` collection, scoped per tenant. Each tenant defines one document per `policyKey`:
+Policies are stored in the `devicePolicies` collection, scoped per tenant. On tenant creation, the backend copies centralized default device policies into one document per `policyKey`:
 
 | `policyKey` | Device `state` | Typical Restrictions |
 |---|---|---|

@@ -89,7 +89,4 @@ const tenantSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-tenantSchema.index({ channelPartnerId: 1 });
-tenantSchema.index({ parentTenantId: 1 });
-
 export const Tenant = mongoose.model("Tenant", tenantSchema);

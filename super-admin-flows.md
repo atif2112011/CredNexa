@@ -79,7 +79,7 @@ Body:
 ## Flow SA-3 — Tenant Management
 
 > **Actor:** Super Admin
-> **Outcome:** A tenant is created under a channel partner with its operational policy configuration in the same form.
+> **Outcome:** A tenant is created under a channel partner. Centralized default tenant and device policies are copied automatically for every tenant.
 
 ### Step SA-3.1 — List Tenants
 
@@ -90,15 +90,11 @@ Authorization: Bearer <superAdminToken>
 
 **Response includes:** tenant profile summary, channel partner name, capabilities, active device count, locked device count, pending escalation count, and risk flag count.
 
-### Step SA-3.2 — Create Tenant With Policies
+### Step SA-3.2 — Create Tenant
 
-The create tenant form contains three sections:
+The create tenant form contains tenant profile fields only. Policy JSON is not accepted in this request.
 
-| Section | Writes |
-|---|---|
-| Tenant profile | `tenants` |
-| Lock / unlock / escalation rules | `tenantPolicies` when tenant has `lend` |
-| Device enforcement policies | `devicePolicies` for each required `policyKey` |
+Default policies live centrally in the backend constants folder, for example `backend/src/constants/defaultPolicies.js`. On tenant creation, the backend copies those defaults into tenant-scoped `tenantPolicies` and `devicePolicies` records.
 
 ```
 POST /admin/tenants
@@ -119,87 +115,7 @@ Body:
     "city": "Pune",
     "state": "Maharashtra",
     "pincode": "411001"
-  },
-  "tenantPolicy": {
-    "lockRules": {
-      "dpd": 30,
-      "gracePeriodDays": 7,
-      "lockOnGraceExpiry": true
-    },
-    "unlockRules": {
-      "unlockType": "instant",
-      "delayMinutes": 0,
-      "requireFullPayment": true,
-      "partialUnlockOnPartialPayment": false,
-      "requireReasonOnManualUnlock": true
-    },
-    "tempUnlockRules": {
-      "defaultDurationHours": 24,
-      "maxDurationHours": 72
-    },
-    "escalationRules": {
-      "slaHours": 24,
-      "partnerEscalationSlaHours": 48,
-      "autoEscalateOnSLABreach": true
-    }
-  },
-  "devicePolicies": [
-    {
-      "policyKey": "EMI_PAID",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "EMI_GRACE",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "EMI_LOCKED",
-      "restrictions": {
-        "lockMode": true,
-        "allowedApps": ["com.emishield.app", "com.android.dialer"],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": true,
-        "disableAdb": true
-      }
-    },
-    {
-      "policyKey": "TEMP_UNLOCKED",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "CONSENT_INVALID",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    }
-  ]
+  }
 }
 ```
 
@@ -208,17 +124,17 @@ Body:
 2. Validates tenant `type`, `capabilities`, and `parentTenantId` rules
 3. Starts a MongoDB transaction
 4. Creates `tenants`
-5. If `capabilities` includes `lend`, creates one `tenantPolicies` document from `tenantPolicy`
-6. Creates one `devicePolicies` document for each required policy key
-7. Uses platform defaults only for omitted optional policy fields
+5. Copies centralized `DEFAULT_TENANT_POLICY` into one `tenantPolicies` document
+6. Copies centralized `DEFAULT_DEVICE_POLICIES` into five `devicePolicies` documents
+7. Uses the same default policy templates for every tenant, regardless of tenant capabilities
 8. Writes `auditLogs`: `TENANT_CREATED`, `TENANT_POLICY_CREATED`, `DEVICE_POLICIES_CREATED`
 9. Commits the transaction
 
 **Validation rules:**
-- A `lend` tenant must have `tenantPolicy`
-- A `lend` tenant must have all five device policies: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`
-- `EMI_LOCKED` must always allow the borrower app and emergency dialer
-- `distribute`-only tenants may omit `tenantPolicy`, but still need basic non-locking device policies if they enroll devices directly
+- Request body must not provide `tenantPolicy` or `devicePolicies`
+- Every tenant receives one tenant policy and all five device policies: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`
+- The centralized `EMI_LOCKED` default must always allow the borrower app and emergency dialer
+- Tenant capability affects which APIs the tenant can use, not whether policy records are created
 
 ### Step SA-3.3 — View Tenant Detail
 

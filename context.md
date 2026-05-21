@@ -220,9 +220,9 @@ See `architecture.md` Section 5 for full schemas. Here is a quick reference:
 | 5 | `devices` | Device registrations + real-time state |
 | 6 | `consentVersions` | Versioned legal consent documents (managed by super admin) |
 | 7 | `consentRecords` | Immutable per-user consent artefacts (Aadhaar OTP backed) — never updated |
-| 8 | `tenantPolicies` | Per-tenant lock/unlock/escalation config (only for `lend` tenants) |
+| 8 | `tenantPolicies` | Per-tenant lock/unlock/escalation config copied from centralized platform defaults |
 | 9 | `emiSchedules` | EMI installment schedules per user/loan |
-| 10 | `payments` | All payment transactions — unique index on `txnRef` for deduplication |
+| 10 | `payments` | All payment transactions and approval workflow records |
 | 11 | `deviceCommands` | Lock/unlock command queue with FCM delivery tracking and retry logic |
 | 12 | `unlockRequests` | Borrower-initiated cases with SLA tracking |
 | 13 | `auditLogs` | Immutable tamper-evident event log — **never updated or deleted** |

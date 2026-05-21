@@ -57,8 +57,4 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-userSchema.index({ mobile: 1 }, { unique: true });
-userSchema.index({ loanId: 1 }, { unique: true });
-userSchema.index({ tenantId: 1 });
-
 export const User = mongoose.model("User", userSchema);

@@ -53,8 +53,4 @@ const accountSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// accountSchema.index({ email: 1 }, { unique: true });
-accountSchema.index({ tenantId: 1, role: 1 });
-accountSchema.index({ channelPartnerId: 1, role: 1 });
-
 export const Account = mongoose.model("Account", accountSchema);

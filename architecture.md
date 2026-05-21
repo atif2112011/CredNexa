@@ -506,7 +506,7 @@ Per-tenant enforcement policies defining Android restrictions for each device/EM
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 }
-// Compound unique index: { tenantId: 1, policyKey: 1 }
+// Atlas manages the uniqueness/indexing strategy for { tenantId, policyKey }
 ```
 
 **`policyKey` → Device State Mapping:**
@@ -521,7 +521,7 @@ Per-tenant enforcement policies defining Android restrictions for each device/EM
 ```
 
 ### 5.8 `tenantPolicies` Collection
-Per-tenant configurable policy for lock, unlock, and escalation behavior. Only tenants with the `lend` capability have a policy document. Super Admin supplies these fields during `POST /admin/tenants`; platform defaults are used only for omitted optional fields.
+Per-tenant configurable policy for lock, unlock, and escalation behavior. Every tenant receives a tenant policy copied from centralized platform defaults during `POST /admin/tenants`, regardless of tenant capabilities.
 
 ```js
 {
@@ -932,10 +932,9 @@ OTP lifecycle tracking (auto-expire old records).
   verified: { type: Boolean, default: false },
   attempts: { type: Number, default: 0 },
   maxAttempts: { type: Number, default: 3 },
-  expiresAt: { type: Date, required: true },   // TTL index — 10 min default
+  expiresAt: { type: Date, required: true },   // expires after 10 min by Atlas-managed TTL configuration
   createdAt: { type: Date, default: Date.now }
 }
-// TTL Index: db.otpRecords.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
 ```
 
 ### 5.16 `riskFlags` Collection
@@ -1629,7 +1628,7 @@ Risk monitoring signals surfaced to super admin.
 | PATCH | `/admin/channel-partners/:id` | Update channel partner |
 | PATCH | `/admin/channel-partners/:id/status` | Activate / deactivate channel partner |
 | GET | `/admin/tenants` | List all tenants |
-| POST | `/admin/tenants` | Create new tenant with submitted `tenantPolicy` + `devicePolicies` |
+| POST | `/admin/tenants` | Create new tenant and copy centralized default policies |
 | GET | `/admin/tenants/:id` | Tenant detail |
 | PATCH | `/admin/tenants/:id` | Update tenant profile/support details |
 | PATCH | `/admin/tenants/:id/status` | Activate / deactivate tenant |
@@ -1640,17 +1639,17 @@ Risk monitoring signals surfaced to super admin.
 | PATCH | `/admin/accounts/:accountId/status` | Activate / deactivate account |
 
 **Policy creation on `POST /admin/tenants`:**  
-The Super Admin create-tenant form includes `tenantPolicy` and `devicePolicies`. The backend creates all related records in one MongoDB transaction:
+The Super Admin create-tenant form does not include policy JSON. Default policies live centrally in the backend constants folder, for example `backend/src/constants/defaultPolicies.js`. The backend creates all related records in one MongoDB transaction:
 1. One `tenants` document
-2. One `tenantPolicies` document when `capabilities` includes `lend`
-3. Five `devicePolicies` documents, one per `policyKey`: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`
+2. One `tenantPolicies` document copied from `DEFAULT_TENANT_POLICY`
+3. Five `devicePolicies` documents copied from `DEFAULT_DEVICE_POLICIES`, one per `policyKey`: `EMI_PAID`, `EMI_GRACE`, `EMI_LOCKED`, `TEMP_UNLOCKED`, `CONSENT_INVALID`
 4. `auditLogs` entries for tenant and policy creation
 
 Required validation:
-- `lend` tenants must include `tenantPolicy`
-- `lend` tenants must include all five `devicePolicies`
-- `EMI_LOCKED` must keep emergency dialer and borrower app accessible
-- Platform defaults may fill omitted optional fields, but must not silently omit a required policy key
+- Request body must not include `tenantPolicy` or `devicePolicies`
+- Every tenant receives one tenant policy and all five device policies
+- The centralized `EMI_LOCKED` default must keep emergency dialer and borrower app accessible
+- Tenant capability controls available APIs only; it does not control policy record creation
 
 **Request — POST `/admin/tenants`**
 ```json
@@ -1668,87 +1667,7 @@ Required validation:
     "city": "Pune",
     "state": "Maharashtra",
     "pincode": "411001"
-  },
-  "tenantPolicy": {
-    "lockRules": {
-      "dpd": 30,
-      "gracePeriodDays": 7,
-      "lockOnGraceExpiry": true
-    },
-    "unlockRules": {
-      "unlockType": "instant",
-      "delayMinutes": 0,
-      "requireFullPayment": true,
-      "partialUnlockOnPartialPayment": false,
-      "requireReasonOnManualUnlock": true
-    },
-    "tempUnlockRules": {
-      "defaultDurationHours": 24,
-      "maxDurationHours": 72
-    },
-    "escalationRules": {
-      "slaHours": 24,
-      "partnerEscalationSlaHours": 48,
-      "autoEscalateOnSLABreach": true
-    }
-  },
-  "devicePolicies": [
-    {
-      "policyKey": "EMI_PAID",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "EMI_GRACE",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "EMI_LOCKED",
-      "restrictions": {
-        "lockMode": true,
-        "allowedApps": ["com.emishield.app", "com.android.dialer"],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": true,
-        "disableAdb": true
-      }
-    },
-    {
-      "policyKey": "TEMP_UNLOCKED",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    },
-    {
-      "policyKey": "CONSENT_INVALID",
-      "restrictions": {
-        "lockMode": false,
-        "allowedApps": [],
-        "blockedApps": [],
-        "disableFactoryReset": true,
-        "disableStatusBar": false,
-        "disableAdb": false
-      }
-    }
-  ]
+  }
 }
 ```
 
@@ -2141,63 +2060,15 @@ Write auditLogs (LOCK_TRIGGERED)
 1. **Consent Gate** — No lock command is dispatched unless `consentRecords` has a valid, verified record for the device
 2. **Tenant Isolation** — All DB queries are scoped by `tenantId` / `channelPartnerId` via middleware
 3. **Audit Immutability** — `auditLogs` and `consentRecords` collections have no UPDATE/DELETE routes
-4. **Payment Deduplication** — Unique index on `payments.txnRef` prevents duplicate unlock triggers
+4. **Payment Deduplication** — Approval workflow prevents duplicate unlock triggers for the same pending payment
 5. **Override Mandatory Reason** — Super admin override API validates `reason` field at route level
 6. **Device Integrity** — Root/tamper detection events generate risk flags and may block enforcement
-7. **OTP Expiry** — MongoDB TTL index on `otpRecords.expiresAt` (10 min) with attempt throttling
+7. **OTP Expiry** — OTP records expire after 10 minutes through Atlas-managed TTL configuration, with attempt throttling
 8. **Offline Token Security** — Offline unlock tokens (Phase 2) require cryptographic signing
 
-### MongoDB Indexes
+### MongoDB Atlas Indexing
 
-```js
-// accounts
-db.accounts.createIndex({ email: 1 }, { unique: true })
-db.accounts.createIndex({ tenantId: 1, role: 1 })
-db.accounts.createIndex({ channelPartnerId: 1, role: 1 })
-
-// users
-db.users.createIndex({ mobile: 1 }, { unique: true })
-db.users.createIndex({ loanId: 1 }, { unique: true })
-db.users.createIndex({ tenantId: 1 })
-
-// tenants
-db.tenants.createIndex({ channelPartnerId: 1 })
-db.tenants.createIndex({ parentTenantId: 1 })
-
-// devices
-db.devices.createIndex({ userId: 1, tenantId: 1 })
-db.devices.createIndex({ imei: 1 }, { unique: true })
-db.devices.createIndex({ state: 1, tenantId: 1 })
-
-// payments
-db.payments.createIndex({ userId: 1, status: 1 })
-db.payments.createIndex({ tenantId: 1, approvalStatus: 1 })  // for pending-approval list
-
-// unlockRequests
-db.unlockRequests.createIndex({ tenantId: 1, status: 1 })
-db.unlockRequests.createIndex({ channelPartnerId: 1, status: 1 })  // for CP escalation queue
-db.unlockRequests.createIndex({ slaDeadline: 1, status: 1 })  // for SLA scheduler (tier 1)
-db.unlockRequests.createIndex({ partnerSlaDeadline: 1, status: 1 })  // for SLA scheduler (tier 2)
-
-// auditLogs
-db.auditLogs.createIndex({ deviceId: 1, timestamp: -1 })
-db.auditLogs.createIndex({ tenantId: 1, eventType: 1, timestamp: -1 })
-
-// notifications
-db.notifications.createIndex({ recipientId: 1, createdAt: -1 })
-
-// deviceCommands
-db.deviceCommands.createIndex({ deviceId: 1, status: 1 })
-
-// tenantPolicies
-db.tenantPolicies.createIndex({ tenantId: 1 }, { unique: true })
-
-// devicePolicies
-db.devicePolicies.createIndex({ tenantId: 1, policyKey: 1 }, { unique: true })
-
-// TTL index
-db.otpRecords.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
-```
+MongoDB Atlas manages indexes and TTL configuration for this project. The backend does not issue manual `createIndex` commands, and Mongoose models should avoid explicit `schema.index(...)` declarations.
 
 ---
 
