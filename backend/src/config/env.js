@@ -20,5 +20,6 @@ export const env = {
   jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || "30d",
   refreshCookieName: process.env.REFRESH_COOKIE_NAME || "refreshToken",
   cookieSecure: process.env.COOKIE_SECURE === "true",
-  corsOrigin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : ["http://localhost:3000"]
+  corsOrigin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : ["http://localhost:3000"],
+  vercelDeploy: process.env.VERCEL === "true" || "false"
 };
