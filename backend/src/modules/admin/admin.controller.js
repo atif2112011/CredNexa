@@ -1448,6 +1448,47 @@ export const getDeviceCommands = async (req, res) => {
 };
 
 /**
+ * List triggered device commands across the platform.
+ * Sample query: /admin/commands?status=pending&commandType=LOCK&triggeredBy=manual_tenant&tenantId=665f...&deviceId=665f...&from=2026-05-01&to=2026-05-22&page=1&limit=20
+ */
+export const listDeviceCommands = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.status && req.query.status !== "all") filter.status = req.query.status;
+    if (req.query.commandType && req.query.commandType !== "all") filter.commandType = req.query.commandType;
+    if (req.query.triggeredBy && req.query.triggeredBy !== "all") filter.triggeredBy = req.query.triggeredBy;
+    if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+    if (req.query.deviceId) filter.deviceId = req.query.deviceId;
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {};
+      if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
+    }
+
+    const [items, total] = await Promise.all([
+      DeviceCommand.find(filter)
+        .populate("deviceId", "imei deviceModel manufacturer state userId")
+        .populate("tenantId", "name")
+        .populate("triggeredByAccountId", "name email role")
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .lean(),
+      DeviceCommand.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Device commands fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Get device audit trail.
  * Sample params: /admin/devices/665f.../audit-logs
  */

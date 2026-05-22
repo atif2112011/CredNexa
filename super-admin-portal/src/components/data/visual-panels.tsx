@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, FileText, LockKeyhole, ShieldCheck, Smartphone } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileText, Image, LockKeyhole, ShieldCheck, Smartphone } from "lucide-react";
 
 import { StatusBadge } from "@/components/data/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -272,6 +272,86 @@ export function RiskFlagMetricsPanel({ flags }: { flags?: unknown }) {
             </div>
           ))}
           {!items.length ? <p className="text-sm text-muted-foreground">No open risk flags.</p> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function CasePayloadPanel({ item }: { item: RecordItem }) {
+  const evidenceUrl = String(item.imageUrl || "");
+  const resolved = Boolean(item.resolvedAt);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Case Information</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-5">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <RuleCard
+            title="Request"
+            items={[
+              { label: "Case ID", value: item.caseId },
+              { label: "Category", value: humanize(item.reasonCategory) },
+              { label: "Status", value: humanize(item.status) }
+            ]}
+          />
+          <RuleCard
+            title="SLA"
+            items={[
+              { label: "Tenant deadline", value: formatDate(item.slaDeadline as string) },
+              { label: "Partner deadline", value: formatDate(item.partnerSlaDeadline as string) },
+              { label: "Admin escalated", value: formatDate(item.escalatedToAdminAt as string) }
+            ]}
+          />
+          <RuleCard
+            title="Resolution"
+            items={[
+              { label: "Resolved", value: resolved ? "Yes" : "No" },
+              { label: "Action", value: humanize(item.resolutionAction) },
+              { label: "Resolved at", value: formatDate(item.resolvedAt as string) }
+            ]}
+          />
+          <RuleCard
+            title="Timeline"
+            items={[
+              { label: "Created", value: formatDate(item.createdAt as string) },
+              { label: "Updated", value: formatDate(item.updatedAt as string) },
+              { label: "Temp duration", value: item.tempUnlockDurationHours ? `${item.tempUnlockDurationHours}h` : "-" }
+            ]}
+          />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
+          <section className="rounded-xl border bg-muted/20 p-4">
+            <h3 className="font-semibold">Borrower Reason</h3>
+            <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{String(item.reason || "-")}</p>
+            {item.details ? (
+              <>
+                <h4 className="mt-4 text-sm font-semibold">Details</h4>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{String(item.details)}</p>
+              </>
+            ) : null}
+            {item.resolutionNote ? (
+              <>
+                <h4 className="mt-4 text-sm font-semibold">Resolution Note</h4>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{String(item.resolutionNote)}</p>
+              </>
+            ) : null}
+          </section>
+          <section className="rounded-xl border bg-muted/20 p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <Image className="size-4 text-primary" aria-hidden="true" />
+              <h3 className="font-semibold">Evidence</h3>
+            </div>
+            {evidenceUrl ? (
+              <a href={evidenceUrl} target="_blank" rel="noreferrer" className="text-sm font-medium text-primary underline-offset-4 hover:underline">
+                Open evidence image
+              </a>
+            ) : (
+              <p className="text-sm text-muted-foreground">No evidence image attached.</p>
+            )}
+          </section>
         </div>
       </CardContent>
     </Card>

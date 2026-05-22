@@ -12,8 +12,8 @@ import {
   Landmark,
   LogOut,
   ScrollText,
-  ShieldAlert,
   Smartphone,
+  TerminalSquare,
   Users
 } from "lucide-react";
 
@@ -27,8 +27,8 @@ const navItems = [
   { href: "/accounts", label: "Accounts", icon: Users },
   { href: "/consent-versions", label: "Consent", icon: ScrollText },
   { href: "/cases", label: "Cases", icon: Gavel },
-  { href: "/escalations", label: "Escalations", icon: ShieldAlert },
   { href: "/devices", label: "Devices", icon: Smartphone },
+  { href: "/commands", label: "Commands", icon: TerminalSquare },
   { href: "/risk-flags", label: "Risk Flags", icon: AlertTriangle },
   { href: "/audit-logs", label: "Audit Logs", icon: FileClock }
 ];

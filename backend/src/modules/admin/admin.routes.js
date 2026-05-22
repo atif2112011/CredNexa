@@ -19,6 +19,7 @@ import {
   getDeviceAuditLogs,
   getDeviceById,
   getDeviceCommands,
+  listDeviceCommands,
   getTenantById,
   listAdminAccounts,
   listAdminEscalations,
@@ -75,6 +76,7 @@ adminRoutes.post("/escalations/:caseId/temp-unlock", tempUnlockAdminEscalation);
 adminRoutes.post("/escalations/:caseId/reject", rejectAdminEscalation);
 
 adminRoutes.get("/devices", listDevices);
+adminRoutes.get("/commands", listDeviceCommands);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
