@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { BACKEND_API_URL, SUPER_ADMIN_COOKIE } from "@/lib/constants";
+import { refreshAccessToken } from "@/lib/session";
 import type { ApiResponse } from "@/types/api";
 
 type FetchOptions = RequestInit & {
@@ -18,11 +19,18 @@ function buildUrl(path: string, query?: FetchOptions["query"]) {
 
 export async function backendFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const cookieStore = await cookies();
-  const token = cookieStore.get(SUPER_ADMIN_COOKIE)?.value;
+  let token = cookieStore.get(SUPER_ADMIN_COOKIE)?.value;
 
-  if (!token) redirect("/login");
+  if (!token) {
+    const refreshedToken = await refreshAccessToken(cookieStore.toString());
+    token = refreshedToken || undefined;
+  }
 
-  const response = await fetch(buildUrl(path, options.query), {
+  if (!token) {
+    redirect("/login");
+  }
+
+  let response = await fetch(buildUrl(path, options.query), {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -32,7 +40,27 @@ export async function backendFetch<T>(path: string, options: FetchOptions = {}):
     cache: "no-store"
   });
 
-  if (response.status === 401) redirect("/login");
+  if (response.status === 401) {
+    const refreshedToken = await refreshAccessToken(cookieStore.toString());
+
+    if (!refreshedToken) {
+      redirect("/login");
+    }
+
+    response = await fetch(buildUrl(path, options.query), {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${refreshedToken}`,
+        ...options.headers
+      },
+      cache: "no-store"
+    });
+  }
+
+  if (response.status === 401) {
+    redirect("/login");
+  }
 
   const payload = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !payload.success) {

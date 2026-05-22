@@ -115,6 +115,33 @@ export const refreshAccessToken = async (req, res) => {
   }
 };
 
+export const getCurrentAccount = async (req, res) => {
+  try {
+    const account = await Account.findById(req.auth.id)
+      .select("-passwordHash")
+      .populate("tenantId", "name type")
+      .populate("channelPartnerId", "name type")
+      .lean();
+
+    if (!account || !account.isActive || req.auth.tokenType !== "account") {
+      return sendError(res, 401, "Current account not found");
+    }
+
+    return sendSuccess(res, 200, "Current account fetched successfully", {
+      account: {
+        id: account._id,
+        name: account.name,
+        email: account.email,
+        role: account.role,
+        tenantId: account.tenantId,
+        channelPartnerId: account.channelPartnerId
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, "Internal server error");
+  }
+};
+
 export const logoutAccount = async (req, res) => {
   try {
     res.clearCookie(env.refreshCookieName, getRefreshCookieOptions());

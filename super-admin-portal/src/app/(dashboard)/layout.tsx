@@ -1,8 +1,11 @@
 import { Sidebar } from "@/components/shell/sidebar";
+import { getCurrentUser } from "@/lib/session";
 import { KeyRound } from "lucide-react";
 import type { ReactNode } from "react";
 
-export default function DashboardLayout({ children }: { children: ReactNode }) {
+export default async function DashboardLayout({ children }: { children: ReactNode }) {
+  const account = await getCurrentUser();
+
   return (
     <div className="min-h-screen bg-background lg:grid lg:grid-cols-[280px_1fr]">
       <div className="hidden lg:block">
@@ -15,7 +18,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
           <div>
             <p className="text-sm font-semibold">CredNexa</p>
-            <p className="text-xs text-muted-foreground">Super Admin</p>
+            <p className="text-xs text-muted-foreground">{String(account?.email || "Super Admin")}</p>
           </div>
         </header>
         <main className="mx-auto w-full max-w-[1560px] px-4 py-6 md:px-6 lg:px-10 lg:py-8">{children}</main>

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { BACKEND_API_URL, SUPER_ADMIN_COOKIE } from "@/lib/constants";
+import { BACKEND_API_URL, SUPER_ADMIN_COOKIE, SUPER_ADMIN_EMAIL_COOKIE } from "@/lib/constants";
 import type { ApiResponse } from "@/types/api";
 
 const loginSchema = z.object({
@@ -49,6 +49,17 @@ export async function POST(request: Request) {
     secure: process.env.NODE_ENV === "production",
     path: "/"
   });
+  response.cookies.set(SUPER_ADMIN_EMAIL_COOKIE, payload.data.account.email, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/"
+  });
+
+  const setCookie = backendResponse.headers.get("set-cookie");
+  if (setCookie) {
+    response.headers.append("set-cookie", setCookie.replace(/Path=[^;]+/i, "Path=/"));
+  }
 
   return response;
 }
