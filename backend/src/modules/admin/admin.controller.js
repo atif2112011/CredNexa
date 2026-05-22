@@ -13,6 +13,7 @@ import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
+import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
@@ -1054,9 +1055,11 @@ export const publishConsentVersion = async (req, res) => {
 export const listAdminEscalations = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
-    const filter = {
-      status: req.query.status || "ESCALATED_ADMIN"
-    };
+    const filter = {};
+
+    if (req.query.status && req.query.status !== "all") {
+      filter.status = req.query.status;
+    }
 
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
     if (req.query.channelPartnerId) filter.channelPartnerId = req.query.channelPartnerId;
@@ -1069,7 +1072,7 @@ export const listAdminEscalations = async (req, res) => {
         .populate("channelPartnerId", "name")
         .skip(skip)
         .limit(limit)
-        .sort({ escalatedToAdminAt: -1, createdAt: -1 })
+        .sort({ escalatedToAdminAt: -1, escalatedToPartnerAt: -1, createdAt: -1 })
         .lean(),
       UnlockRequest.countDocuments(filter)
     ]);
@@ -1133,8 +1136,8 @@ export const unlockAdminEscalation = async (req, res) => {
       return sendError(res, 400, "Escalation not found");
     }
 
-    if (!["ESCALATED_ADMIN", "UNDER_REVIEW"].includes(unlockRequest.status)) {
-      return sendError(res, 400, "Only admin-escalated cases can be overridden");
+    if (!["ESCALATED_ADMIN", "ESCALATED_PARTNER", "UNDER_REVIEW"].includes(unlockRequest.status)) {
+      return sendError(res, 400, "Only open escalated cases can be overridden");
     }
 
     session.startTransaction();
@@ -1149,8 +1152,29 @@ export const unlockAdminEscalation = async (req, res) => {
       session
     });
 
+    if (req.body.emiAction === "waive") {
+      const schedule = await EmiSchedule.findOne({
+        userId: unlockRequest.userId,
+        tenantId: unlockRequest.tenantId
+      }).session(session);
+      const installment = schedule?.installments?.find((item) => ["overdue", "partial", "pending"].includes(item.status));
+
+      if (installment) {
+        installment.status = "waived";
+        installment.waivedBy = req.auth.id;
+        installment.waivedAt = new Date();
+        installment.waiveReason = unlockRequest.caseId;
+        schedule.overdueInstallments = schedule.installments.filter((item) => ["overdue", "partial"].includes(item.status)).length;
+        schedule.overdueAmount = schedule.installments.reduce((sum, item) => {
+          if (!["overdue", "partial"].includes(item.status)) return sum;
+          return sum + Math.max(Number(item.emiAmount || 0) + Number(item.penaltyAmount || 0) - Number(item.paidAmount || 0), 0);
+        }, 0);
+        await schedule.save({ session });
+      }
+    }
+
     unlockRequest.status = "RESOLVED_SUPER_ADMIN";
-    unlockRequest.resolutionAction = "override";
+    unlockRequest.resolutionAction = req.body.emiAction === "waive" ? "waived" : "override";
     unlockRequest.resolutionNote = req.body.reason;
     unlockRequest.resolvedBy = req.auth.id;
     unlockRequest.resolvedAt = new Date();
@@ -1166,7 +1190,7 @@ export const unlockAdminEscalation = async (req, res) => {
         deviceId: unlockRequest.deviceId,
         caseId: unlockRequest.caseId,
         reason: req.body.reason,
-        metadata: { action: "unlock", commandId: command._id }
+        metadata: { action: "unlock", commandId: command._id, emiAction: req.body.emiAction || "none" }
       },
       { session }
     );
@@ -1226,8 +1250,8 @@ export const tempUnlockAdminEscalation = async (req, res) => {
       return sendError(res, 400, "Escalation not found");
     }
 
-    if (!["ESCALATED_ADMIN", "UNDER_REVIEW"].includes(unlockRequest.status)) {
-      return sendError(res, 400, "Only admin-escalated cases can be overridden");
+    if (!["ESCALATED_ADMIN", "ESCALATED_PARTNER", "UNDER_REVIEW"].includes(unlockRequest.status)) {
+      return sendError(res, 400, "Only open escalated cases can be overridden");
     }
 
     session.startTransaction();
@@ -1299,8 +1323,8 @@ export const rejectAdminEscalation = async (req, res) => {
       return sendError(res, 400, "Escalation not found");
     }
 
-    if (!["ESCALATED_ADMIN", "UNDER_REVIEW"].includes(unlockRequest.status)) {
-      return sendError(res, 400, "Only admin-escalated cases can be rejected");
+    if (!["ESCALATED_ADMIN", "ESCALATED_PARTNER", "UNDER_REVIEW"].includes(unlockRequest.status)) {
+      return sendError(res, 400, "Only open escalated cases can be rejected");
     }
 
     unlockRequest.status = "REJECTED";

@@ -153,7 +153,6 @@ export default async function DashboardPage() {
           </div>
           <ResourceTable
             rows={(dashboard.recentRiskFlags as RecordItem[]) || []}
-            detailBasePath="/risk-flags"
             columns={[
               { key: "type", header: "Type" },
               { key: "severity", header: "Severity", type: "status" },
