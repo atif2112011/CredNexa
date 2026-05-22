@@ -18,7 +18,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
     <html lang="en" className={cn("font-sans", geist.variable)}>
       <body>
         {children}
-        <Toaster richColors position="top-right" />
+        <Toaster position="bottom-right" />
       </body>
     </html>
   );
