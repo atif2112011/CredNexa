@@ -35,6 +35,24 @@ function RuleCard({ title, items }: { title: string; items: { label: string; val
   );
 }
 
+function RuleStatusCard({ title, items }: { title: string; items: { label: string; value: unknown; badge?: boolean }[] }) {
+  return (
+    <div className="rounded-xl border bg-muted/20 p-4">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      <dl className="mt-3 flex flex-col gap-2">
+        {items.map((item) => (
+          <div key={item.label} className="flex items-center justify-between gap-3 text-sm">
+            <dt className="text-muted-foreground">{item.label}</dt>
+            <dd className="font-medium capitalize text-foreground">
+              {item.badge ? <StatusBadge value={item.value} /> : String(item.value ?? "-")}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 export function TenantPolicyPanel({ policy }: { policy?: unknown }) {
   const item = (policy || {}) as RecordItem;
   const lockRules = (item.lockRules || {}) as RecordItem;
@@ -289,12 +307,12 @@ export function CasePayloadPanel({ item }: { item: RecordItem }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <RuleCard
+          <RuleStatusCard
             title="Request"
             items={[
               { label: "Case ID", value: item.caseId },
               { label: "Category", value: humanize(item.reasonCategory) },
-              { label: "Status", value: humanize(item.status) }
+              { label: "Status", value: item.status, badge: true }
             ]}
           />
           <RuleCard
@@ -305,11 +323,11 @@ export function CasePayloadPanel({ item }: { item: RecordItem }) {
               { label: "Admin escalated", value: formatDate(item.escalatedToAdminAt as string) }
             ]}
           />
-          <RuleCard
+          <RuleStatusCard
             title="Resolution"
             items={[
-              { label: "Resolved", value: resolved ? "Yes" : "No" },
-              { label: "Action", value: humanize(item.resolutionAction) },
+              { label: "Resolved", value: resolved ? "yes" : "no", badge: true },
+              { label: "Action", value: item.resolutionAction || "pending", badge: true },
               { label: "Resolved at", value: formatDate(item.resolvedAt as string) }
             ]}
           />
