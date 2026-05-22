@@ -107,33 +107,6 @@ export const buildAccountFields = (partners: RecordItem[], tenants: RecordItem[]
     return field;
   });
 
-export const prepareAccountPayload = (values: Record<string, string | undefined>) => {
-  const payload: Record<string, unknown> = {
-    name: values.name || "",
-    email: values.email || "",
-    mobile: values.mobile || "",
-    role: values.role || "",
-    temporaryPassword: values.temporaryPassword || ""
-  };
-
-  if (values.role === "partner_admin") {
-    if (values.channelPartnerId && values.channelPartnerId !== "none") {
-      payload.channelPartnerId = values.channelPartnerId;
-    }
-    return payload;
-  }
-
-  if (values.role === "tenant_admin") {
-    if (values.tenantId && values.tenantId !== "none") {
-      payload.tenantId = values.tenantId;
-    }
-    if (values.channelPartnerId && values.channelPartnerId !== "none") {
-      payload.channelPartnerId = values.channelPartnerId;
-    }
-  }
-
-  return payload;
-};
 
 export const accountUpdateFields: FieldConfig[] = [
   { name: "name", label: "Name" },

@@ -32,8 +32,36 @@ type FormDialogProps = {
   fields: FieldConfig[];
   defaultValues?: Record<string, unknown>;
   variant?: "default" | "outline" | "secondary" | "destructive";
-  preparePayload?: (values: Record<string, string | undefined>) => Record<string, unknown>;
+  payloadMode?: "default" | "account";
 };
+
+function prepareAccountPayload(values: Record<string, string | undefined>) {
+  const payload: Record<string, unknown> = {
+    name: values.name || "",
+    email: values.email || "",
+    mobile: values.mobile || "",
+    role: values.role || "",
+    temporaryPassword: values.temporaryPassword || ""
+  };
+
+  if (values.role === "partner_admin") {
+    if (values.channelPartnerId && values.channelPartnerId !== "none") {
+      payload.channelPartnerId = values.channelPartnerId;
+    }
+    return payload;
+  }
+
+  if (values.role === "tenant_admin") {
+    if (values.tenantId && values.tenantId !== "none") {
+      payload.tenantId = values.tenantId;
+    }
+    if (values.channelPartnerId && values.channelPartnerId !== "none") {
+      payload.channelPartnerId = values.channelPartnerId;
+    }
+  }
+
+  return payload;
+}
 
 function buildSchema(fields: FieldConfig[]) {
   return z.object(
@@ -55,7 +83,7 @@ export function FormDialog({
   fields,
   defaultValues,
   variant = "default",
-  preparePayload
+  payloadMode = "default"
 }: FormDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -93,7 +121,7 @@ export function FormDialog({
         return [key, normalizedValue];
       })
     );
-    const payload = preparePayload ? preparePayload(values) : normalizedPayload;
+    const payload = payloadMode === "account" ? prepareAccountPayload(values) : normalizedPayload;
 
     const response = await fetch(endpoint, {
       method,

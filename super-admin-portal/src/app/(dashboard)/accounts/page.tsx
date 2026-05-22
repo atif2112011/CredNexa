@@ -1,7 +1,7 @@
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
-import { buildAccountFields, prepareAccountPayload } from "@/lib/forms";
+import { buildAccountFields } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
 export default async function AccountsPage() {
@@ -14,7 +14,7 @@ export default async function AccountsPage() {
 
   return (
     <>
-      <PageHeader title="Admin Accounts" description="Create and manage partner_admin and tenant_admin accounts." actions={<FormDialog title="Create admin account" triggerLabel="Create account" endpoint="/api/admin/accounts" fields={accountFields} preparePayload={prepareAccountPayload} />} />
+      <PageHeader title="Admin Accounts" description="Create and manage partner_admin and tenant_admin accounts." actions={<FormDialog title="Create admin account" triggerLabel="Create account" endpoint="/api/admin/accounts" fields={accountFields} payloadMode="account" />} />
       <ResourceTable
         rows={data.items}
         detailBasePath="/accounts"
