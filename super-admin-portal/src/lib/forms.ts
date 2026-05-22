@@ -1,4 +1,12 @@
 import type { FieldConfig } from "@/components/data/form-dialog";
+import type { RecordItem } from "@/types/api";
+
+const noneOption = { label: "None", value: "none" };
+
+const optionFromRecord = (item: RecordItem) => ({
+  label: String(item.name || item.email || item._id || item.id || "Unnamed"),
+  value: String(item._id || item.id || "")
+});
 
 export const partnerFields: FieldConfig[] = [
   { name: "name", label: "Name", required: true },
@@ -38,6 +46,18 @@ export const tenantFields: FieldConfig[] = [
   { name: "supportWhatsapp", label: "Support WhatsApp" }
 ];
 
+export const buildTenantFields = (partners: RecordItem[]): FieldConfig[] =>
+  tenantFields.map((field) =>
+    field.name === "channelPartnerId"
+      ? {
+          ...field,
+          label: "Channel partner",
+          type: "select",
+          options: partners.map(optionFromRecord)
+        }
+      : field
+  );
+
 export const tenantUpdateFields: FieldConfig[] = [
   { name: "name", label: "Name" },
   { name: "supportPhone", label: "Support phone" },
@@ -63,6 +83,57 @@ export const accountFields: FieldConfig[] = [
   { name: "channelPartnerId", label: "Channel partner ID" },
   { name: "temporaryPassword", label: "Temporary password", type: "password", required: true }
 ];
+
+export const buildAccountFields = (partners: RecordItem[], tenants: RecordItem[]): FieldConfig[] =>
+  accountFields.map((field) => {
+    if (field.name === "tenantId") {
+      return {
+        ...field,
+        label: "Tenant",
+        type: "select",
+        options: [noneOption, ...tenants.map(optionFromRecord)]
+      };
+    }
+
+    if (field.name === "channelPartnerId") {
+      return {
+        ...field,
+        label: "Channel partner",
+        type: "select",
+        options: [noneOption, ...partners.map(optionFromRecord)]
+      };
+    }
+
+    return field;
+  });
+
+export const prepareAccountPayload = (values: Record<string, string | undefined>) => {
+  const payload: Record<string, unknown> = {
+    name: values.name || "",
+    email: values.email || "",
+    mobile: values.mobile || "",
+    role: values.role || "",
+    temporaryPassword: values.temporaryPassword || ""
+  };
+
+  if (values.role === "partner_admin") {
+    if (values.channelPartnerId && values.channelPartnerId !== "none") {
+      payload.channelPartnerId = values.channelPartnerId;
+    }
+    return payload;
+  }
+
+  if (values.role === "tenant_admin") {
+    if (values.tenantId && values.tenantId !== "none") {
+      payload.tenantId = values.tenantId;
+    }
+    if (values.channelPartnerId && values.channelPartnerId !== "none") {
+      payload.channelPartnerId = values.channelPartnerId;
+    }
+  }
+
+  return payload;
+};
 
 export const accountUpdateFields: FieldConfig[] = [
   { name: "name", label: "Name" },

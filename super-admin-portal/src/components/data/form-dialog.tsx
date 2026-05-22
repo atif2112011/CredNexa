@@ -32,6 +32,7 @@ type FormDialogProps = {
   fields: FieldConfig[];
   defaultValues?: Record<string, unknown>;
   variant?: "default" | "outline" | "secondary" | "destructive";
+  preparePayload?: (values: Record<string, string | undefined>) => Record<string, unknown>;
 };
 
 function buildSchema(fields: FieldConfig[]) {
@@ -53,7 +54,8 @@ export function FormDialog({
   method = "POST",
   fields,
   defaultValues,
-  variant = "default"
+  variant = "default",
+  preparePayload
 }: FormDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -63,10 +65,25 @@ export function FormDialog({
     resolver: zodResolver(schema),
     defaultValues: Object.fromEntries(fields.map((field) => [field.name, String(defaultValues?.[field.name] ?? "")]))
   });
+  const role = form.watch("role");
+  const visibleFields = fields.filter((field) => {
+    if (field.name === "tenantId" && role === "partner_admin") return false;
+    return true;
+  });
 
   async function onSubmit(values: Record<string, string | undefined>) {
+    if (values.role === "partner_admin" && (!values.channelPartnerId || values.channelPartnerId === "none")) {
+      toast.error("Channel partner is required for partner admin");
+      return;
+    }
+
+    if (values.role === "tenant_admin" && (!values.tenantId || values.tenantId === "none")) {
+      toast.error("Tenant is required for tenant admin");
+      return;
+    }
+
     setIsSubmitting(true);
-    const payload = Object.fromEntries(
+    const normalizedPayload = Object.fromEntries(
       Object.entries(values).map(([key, value]) => {
         const field = fields.find((item) => item.name === key);
         const normalizedValue = String(value ?? "");
@@ -76,6 +93,7 @@ export function FormDialog({
         return [key, normalizedValue];
       })
     );
+    const payload = preparePayload ? preparePayload(values) : normalizedPayload;
 
     const response = await fetch(endpoint, {
       method,
@@ -105,9 +123,9 @@ export function FormDialog({
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
-        <form className="space-y-4" onSubmit={form.handleSubmit(onSubmit)}>
-          {fields.map((field) => (
-            <div key={field.name} className="space-y-2">
+        <form className="flex flex-col gap-4" onSubmit={form.handleSubmit(onSubmit)}>
+          {visibleFields.map((field) => (
+            <div key={field.name} className="flex flex-col gap-2">
               <Label htmlFor={field.name}>{field.label}</Label>
               {field.type === "textarea" ? (
                 <Textarea id={field.name} placeholder={field.placeholder} {...form.register(field.name)} />

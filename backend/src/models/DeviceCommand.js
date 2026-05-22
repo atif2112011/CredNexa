@@ -38,6 +38,11 @@ const deviceCommandSchema = new mongoose.Schema(
     fcmMessageId: String,
     sentAt: Date,
     acknowledgedAt: Date,
+    ackPayload: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
+    },
+    failureReason: String,
     retryCount: {
       type: Number,
       default: 0

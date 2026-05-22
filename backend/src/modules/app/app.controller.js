@@ -10,8 +10,15 @@ import { AuditLog } from "../../models/AuditLog.js";
 import { ConsentRecord } from "../../models/ConsentRecord.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
+import { DeviceCommand } from "../../models/DeviceCommand.js";
+import { DeviceEvent } from "../../models/DeviceEvent.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EnrollmentToken } from "../../models/EnrollmentToken.js";
+import { Payment } from "../../models/Payment.js";
+import { RiskFlag } from "../../models/RiskFlag.js";
+import { Tenant } from "../../models/Tenant.js";
+import { TenantPolicy } from "../../models/TenantPolicy.js";
+import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { OtpRecord } from "../../models/OtpRecord.js";
 import { User } from "../../models/User.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
@@ -42,6 +49,8 @@ const hashPayload = (payload) => {
 const normalizeName = (name = "") => {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 };
+
+const createCaseId = () => `CASE-${new Date().getFullYear()}-${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
 
 const buildMockCashfreeProfile = (user) => ({
   name: user.name,
@@ -433,6 +442,431 @@ export const getDevicePolicy = async (req, res) => {
       policyVersion: policy.version,
       restrictions: policy.restrictions,
       tempUnlockExpiresAt: device.tempUnlockExpiresAt
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch active tenant QR code for borrower payment.
+ * Sample request: GET /app/payment/qr
+ */
+export const getPaymentQr = async (req, res) => {
+  try {
+    const device = await Device.findOne({ userId: req.auth.id }).lean();
+
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const tenant = await Tenant.findById(device.tenantId).lean();
+    const activeQrCode = tenant?.qrCodes?.find((qrCode) => qrCode.isActive);
+
+    if (!activeQrCode) {
+      return sendError(res, 404, "Payment QR is not available for this tenant");
+    }
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.PAYMENT_QR_FETCHED,
+      actorId: req.auth.id,
+      actorCollection: "users",
+      tenantId: device.tenantId,
+      userId: req.auth.id,
+      deviceId: device._id,
+      metadata: { qrCodeId: activeQrCode._id, label: activeQrCode.label }
+    });
+
+    return sendSuccess(res, 200, "Payment QR fetched successfully", {
+      qrCodeId: activeQrCode._id,
+      label: activeQrCode.label,
+      imageUrl: activeQrCode.imageUrl
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Submit QR payment for tenant approval.
+ * Sample body: { "qrCodeId": "665f6f0b6f0f6f0b6f0f6f0b", "amount": 3500, "reference": "UPI123456" }
+ */
+export const submitPayment = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["qrCodeId", "amount"])) {
+      return sendError(res, 400, "QR code ID and amount are required");
+    }
+
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return sendError(res, 400, "Valid payment amount is required");
+    }
+
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const tenant = await Tenant.findById(device.tenantId).lean();
+    const activeQrCode = tenant?.qrCodes?.find((qrCode) => qrCode._id.toString() === req.body.qrCodeId && qrCode.isActive);
+    if (!activeQrCode) {
+      return sendError(res, 400, "Active payment QR code not found");
+    }
+
+    const existingPendingPayment = await Payment.findOne({
+      userId: req.auth.id,
+      deviceId: device._id,
+      approvalStatus: "pending_approval"
+    }).lean();
+
+    if (existingPendingPayment) {
+      return sendError(res, 409, "A payment is already pending approval for this device");
+    }
+
+    const payment = await Payment.create({
+      userId: req.auth.id,
+      tenantId: device.tenantId,
+      deviceId: device._id,
+      amount,
+      qrCodeId: activeQrCode._id,
+      metadata: {
+        reference: req.body.reference,
+        note: req.body.note
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.PAYMENT_SUBMITTED,
+      actorId: req.auth.id,
+      actorCollection: "users",
+      tenantId: device.tenantId,
+      userId: req.auth.id,
+      deviceId: device._id,
+      metadata: { paymentId: payment._id, amount }
+    });
+
+    return sendSuccess(res, 201, "Payment submitted for tenant approval", {
+      paymentId: payment._id,
+      status: payment.status,
+      approvalStatus: payment.approvalStatus
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List borrower payment history.
+ * Sample request: GET /app/payment/history
+ */
+export const getPaymentHistory = async (req, res) => {
+  try {
+    const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1 }).lean();
+    return sendSuccess(res, 200, "Payment history fetched successfully", payments);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch one borrower payment.
+ * Sample request: GET /app/payment/665f6f0b6f0f6f0b6f0f6f0b
+ */
+export const getPaymentDetail = async (req, res) => {
+  try {
+    const payment = await Payment.findOne({ _id: req.params.paymentId, userId: req.auth.id }).lean();
+
+    if (!payment) {
+      return sendError(res, 404, "Payment not found");
+    }
+
+    return sendSuccess(res, 200, "Payment fetched successfully", payment);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Create borrower unlock request.
+ * Sample body: { "reason": "Payment made but device is still locked", "reasonCategory": "payment_made", "details": "UPI ref UPI123456", "imageUrl": "https://..." }
+ */
+export const createUnlockRequest = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["reason"])) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const device = await Device.findOne({ userId: req.auth.id }).lean();
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const openCase = await UnlockRequest.findOne({
+      userId: req.auth.id,
+      deviceId: device._id,
+      status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
+    }).lean();
+
+    if (openCase) {
+      return sendError(res, 409, "An unlock request is already open for this device");
+    }
+
+    const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId }).lean();
+    const slaHours = tenantPolicy?.escalationRules?.tenantSlaHours || tenantPolicy?.escalationRules?.slaHours || 24;
+    const slaDeadline = new Date(Date.now() + slaHours * 60 * 60 * 1000);
+
+    const unlockRequest = await UnlockRequest.create({
+      caseId: createCaseId(),
+      userId: req.auth.id,
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      channelPartnerId: tenantPolicy?.channelPartnerId || (await Tenant.findById(device.tenantId).lean())?.channelPartnerId,
+      reason: req.body.reason,
+      reasonCategory: req.body.reasonCategory || "other",
+      details: req.body.details,
+      imageUrl: req.body.imageUrl,
+      slaDeadline
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.UNLOCK_REQUEST_CREATED,
+      actorId: req.auth.id,
+      actorCollection: "users",
+      tenantId: device.tenantId,
+      userId: req.auth.id,
+      deviceId: device._id,
+      caseId: unlockRequest.caseId,
+      reason: req.body.reason,
+      metadata: { reasonCategory: unlockRequest.reasonCategory, slaDeadline }
+    });
+
+    return sendSuccess(res, 201, "Unlock request created successfully", {
+      caseId: unlockRequest.caseId,
+      status: unlockRequest.status,
+      slaDeadline: unlockRequest.slaDeadline
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch active borrower unlock request.
+ * Sample request: GET /app/unlock-request/active
+ */
+export const getActiveUnlockRequest = async (req, res) => {
+  try {
+    const unlockRequest = await UnlockRequest.findOne({
+      userId: req.auth.id,
+      status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return sendSuccess(res, 200, "Active unlock request fetched successfully", unlockRequest);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Receive device heartbeat.
+ * Sample body: { "batteryLevel": 79, "networkType": "wifi", "appVersion": "1.0.1", "fcmToken": "new-token" }
+ */
+export const pingDevice = async (req, res) => {
+  try {
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    device.lastSeenAt = new Date();
+    device.isOnline = true;
+    device.batteryLevel = req.body.batteryLevel ?? device.batteryLevel;
+    device.networkType = req.body.networkType ?? device.networkType;
+    device.appVersion = req.body.appVersion ?? device.appVersion;
+    if (req.body.fcmToken && req.body.fcmToken !== device.fcmToken) {
+      device.fcmToken = req.body.fcmToken;
+      device.fcmTokenUpdatedAt = new Date();
+    }
+    await device.save();
+
+    await DeviceEvent.create({
+      deviceId: device._id,
+      userId: req.auth.id,
+      tenantId: device.tenantId,
+      eventType: "ping",
+      payload: req.body
+    });
+
+    return sendSuccess(res, 200, "Device ping received", {
+      deviceId: device._id,
+      serverTime: new Date(),
+      desiredPolicyVersion: device.desiredPolicyVersion,
+      lastAppliedPolicyVersion: device.lastAppliedPolicyVersion
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Sync device state and fetch pending commands.
+ * Sample body: { "lastAppliedPolicyVersion": 3, "state": "ACTIVE", "isRooted": false, "isTampered": false }
+ */
+export const syncDevice = async (req, res) => {
+  try {
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    device.lastSeenAt = new Date();
+    device.lastSyncAt = new Date();
+    device.isOnline = true;
+    device.lastAppliedPolicyVersion = req.body.lastAppliedPolicyVersion ?? device.lastAppliedPolicyVersion;
+    device.isRooted = req.body.isRooted ?? device.isRooted;
+    device.isTampered = req.body.isTampered ?? device.isTampered;
+    await device.save();
+
+    await DeviceEvent.create({
+      deviceId: device._id,
+      userId: req.auth.id,
+      tenantId: device.tenantId,
+      eventType: "sync",
+      payload: req.body
+    });
+
+    const [policy, pendingCommands] = await Promise.all([
+      DevicePolicy.findOne({ tenantId: device.tenantId, policyKey: device.currentPolicyKey, isActive: true }).lean(),
+      DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
+    ]);
+
+    return sendSuccess(res, 200, "Device sync completed", {
+      deviceState: device.state,
+      currentPolicyKey: device.currentPolicyKey,
+      desiredPolicyVersion: device.desiredPolicyVersion,
+      policy,
+      pendingCommands
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Acknowledge a device command after local policy application.
+ * Sample body: { "commandId": "665f6f0b6f0f6f0b6f0f6f0b", "status": "acknowledged", "appliedPolicyVersion": 4 }
+ */
+export const acknowledgeDeviceCommand = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["commandId", "status"])) {
+      return sendError(res, 400, "Command ID and status are required");
+    }
+
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const command = await DeviceCommand.findOne({ _id: req.body.commandId, deviceId: device._id });
+    if (!command) {
+      return sendError(res, 404, "Device command not found");
+    }
+
+    if (!["acknowledged", "failed"].includes(req.body.status)) {
+      return sendError(res, 400, "Status must be acknowledged or failed");
+    }
+
+    command.status = req.body.status;
+    command.ackPayload = req.body;
+    command.failureReason = req.body.failureReason;
+    if (req.body.status === "acknowledged") {
+      command.acknowledgedAt = new Date();
+      device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
+      if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
+      if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
+      if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
+      device.lastPolicyAppliedAt = new Date();
+      device.stateUpdatedAt = new Date();
+      await device.save();
+    }
+    await command.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+      actorId: req.auth.id,
+      actorCollection: "users",
+      tenantId: device.tenantId,
+      userId: req.auth.id,
+      deviceId: device._id,
+      metadata: { commandId: command._id, status: command.status }
+    });
+
+    return sendSuccess(res, 200, "Device command acknowledgement saved", {
+      commandId: command._id,
+      status: command.status,
+      deviceState: device.state
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Report device security event.
+ * Sample body: { "type": "ROOT_DETECTED", "severity": "high", "message": "su binary found", "metadata": { "path": "/system/xbin/su" } }
+ */
+export const reportSecurityEvent = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["type", "message"])) {
+      return sendError(res, 400, "Security event type and message are required");
+    }
+
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const severity = req.body.severity || "medium";
+    if (["ROOT_DETECTED", "TAMPER_DETECTED"].includes(req.body.type)) {
+      device.isRooted = req.body.type === "ROOT_DETECTED" ? true : device.isRooted;
+      device.isTampered = req.body.type === "TAMPER_DETECTED" ? true : device.isTampered;
+      await device.save();
+    }
+
+    await DeviceEvent.create({
+      deviceId: device._id,
+      userId: req.auth.id,
+      tenantId: device.tenantId,
+      eventType: "security",
+      severity,
+      payload: req.body
+    });
+
+    const riskFlag = await RiskFlag.create({
+      type: req.body.type,
+      severity,
+      tenantId: device.tenantId,
+      deviceId: device._id,
+      userId: req.auth.id,
+      message: req.body.message,
+      metadata: req.body.metadata || {}
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_SECURITY_EVENT_RECEIVED,
+      actorId: req.auth.id,
+      actorCollection: "users",
+      tenantId: device.tenantId,
+      userId: req.auth.id,
+      deviceId: device._id,
+      metadata: { riskFlagId: riskFlag._id, type: req.body.type, severity }
+    });
+
+    return sendSuccess(res, 201, "Security event recorded", {
+      riskFlagId: riskFlag._id,
+      status: riskFlag.status
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

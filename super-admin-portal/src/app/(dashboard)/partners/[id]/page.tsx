@@ -19,8 +19,8 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
         description="Partner profile, mapped tenants, and scoped admin accounts."
         actions={
           <>
-            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerFields} defaultValues={partner} variant="outline" />
-            <FormDialog title="Change status" triggerLabel="Activate / Deactivate" endpoint={`/api/admin/channel-partners/${id}/status`} method="PATCH" fields={statusFields} defaultValues={{ isActive: partner.isActive ? "true" : "false" }} variant="secondary" />
+            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerFields} defaultValues={partner} />
+            <FormDialog title="Change status" triggerLabel="Activate / Deactivate" endpoint={`/api/admin/channel-partners/${id}/status`} method="PATCH" fields={statusFields} defaultValues={{ isActive: partner.isActive ? "true" : "false" }} />
           </>
         }
       />

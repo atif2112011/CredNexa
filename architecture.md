@@ -1386,13 +1386,13 @@ These routes are still planned for tenant-side lending/payment operations and ar
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/partner/unlock-requests` | List requests (filter: status, SLA breached, date range) |
-| GET | `/partner/unlock-requests/:requestId` | Request detail with borrower info, image, history |
-| POST | `/partner/unlock-requests/:requestId/approve` | Full unlock — optionally waive overdue installment |
-| POST | `/partner/unlock-requests/:requestId/temp-unlock` | Grant temporary unlock for N hours |
-| POST | `/partner/unlock-requests/:requestId/reject` | Reject request with mandatory reason |
+| GET | `/distributor/unlock-requests` | List requests (filter: status, SLA breached, date range) |
+| GET | `/distributor/unlock-requests/:caseId` | Request detail with borrower info, image, history |
+| POST | `/distributor/unlock-requests/:caseId/approve` | Full unlock, optionally waive overdue installment |
+| POST | `/distributor/unlock-requests/:caseId/temp-unlock` | Grant temporary unlock for N hours |
+| POST | `/distributor/unlock-requests/:caseId/reject` | Reject request with mandatory reason |
 
-**Request — POST `/partner/unlock-requests/:requestId/approve`**
+**Request — POST `/distributor/unlock-requests/:caseId/approve`**
 ```json
 {
   "note": "Verified borrower's payment receipt via call",
@@ -1404,7 +1404,7 @@ These routes are still planned for tenant-side lending/payment operations and ar
 - `"waive"` — marks the current overdue installment as `waived` in `emiSchedules`; device gets `EMI_PAID` policy and won't be auto-relocked by the DPD scheduler
 - `"none"` (default) — unlocks device to `ACTIVE`/`EMI_PAID` policy for the current cycle only; EMI installment remains `overdue` (use with caution — DPD scheduler may re-lock)
 
-**Backend actions — POST `/partner/unlock-requests/:requestId/approve`:**
+**Backend actions — POST `/distributor/unlock-requests/:caseId/approve`:**
 1. Validate case belongs to this tenant, is `PENDING_TENANT` status
 2. If `emiAction === 'waive'`:
    - Find current overdue installment in `emiSchedules`
@@ -1417,7 +1417,7 @@ These routes are still planned for tenant-side lending/payment operations and ar
 7. Send FCM `NOTIFICATION` to borrower: `UNLOCK_SUCCESS`
 8. Write `auditLogs`: `CASE_RESOLVED` (+ `CASE_WAIVED` if emiAction = waive), `UNLOCK_TRIGGERED`
 
-**Request — POST `/partner/unlock-requests/:requestId/temp-unlock`**
+**Request — POST `/distributor/unlock-requests/:caseId/temp-unlock`**
 ```json
 {
   "durationHours": 24,
@@ -1434,7 +1434,7 @@ These routes are still planned for tenant-side lending/payment operations and ar
 6. Send FCM `NOTIFICATION` to borrower: `TEMP_UNLOCK_APPROVED` (includes expiry time)
 7. Write `auditLogs`: `TEMP_UNLOCK_TRIGGERED`, `CASE_RESOLVED`
 
-**Request — POST `/partner/unlock-requests/:requestId/reject`**
+**Request — POST `/distributor/unlock-requests/:caseId/reject`**
 ```json
 { "note": "Payment not received per bank records. Please use the Pay Now option." }
 ```
@@ -1455,12 +1455,12 @@ These routes are still planned for tenant-side lending/payment operations and ar
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/partner/payments` | Payment list (filter by approvalStatus, date range) |
-| GET | `/partner/payments/:paymentId` | Payment detail |
-| GET | `/partner/payments/pending-approval` | List payments awaiting tenant approval |
-| POST | `/partner/payments/:paymentId/approve` | Approve payment → triggers EMI match + unlock |
+| GET | `/distributor/payments/pending-approval` | List payments awaiting tenant approval |
+| GET | `/distributor/payments/:paymentId` | Payment detail |
+| POST | `/distributor/payments/:paymentId/approve` | Approve payment, triggers EMI match + unlock |
+| POST | `/distributor/payments/:paymentId/reject` | Reject payment with mandatory reason |
 
-**Backend actions — POST `/partner/payments/:paymentId/approve`:**
+**Backend actions — POST `/distributor/payments/:paymentId/approve`:**
 1. Validates payment belongs to this tenant and is in `approvalStatus: 'pending_approval'`
 2. Updates `payments`: `{ approvalStatus: 'approved', approvedBy: <accountId>, approvedAt: now, status: 'success' }`
 3. Matches payment amount against `emiSchedules` — marks installment(s) as `paid`
@@ -1485,30 +1485,29 @@ These routes are still planned for tenant-side lending/payment operations and ar
 
 | Method | Route | Description |
 |---|---|---|
-| GET | `/partner/qr-codes` | List all QR codes for this tenant |
-| POST | `/partner/qr-codes` | Upload a new QR code image (multipart/form-data) |
-| PUT | `/partner/qr-codes/:qrId/activate` | Set this QR as active (deactivates all others) |
-| DELETE | `/partner/qr-codes/:qrId` | Delete a QR code (blocked if `isActive: true`) |
+| GET | `/distributor/qr-codes` | List all QR codes for this tenant |
+| POST | `/distributor/qr-codes` | Add a new QR code image URL |
+| PATCH | `/distributor/qr-codes/:qrId/activate` | Set this QR as active (deactivates all others) |
+| DELETE | `/distributor/qr-codes/:qrId` | Delete a QR code (blocked if `isActive: true`) |
 
-**Request — POST `/partner/qr-codes`** (`multipart/form-data`):
+**Request — POST `/distributor/qr-codes`**:
 
 | Field | Type | Description |
 |---|---|---|
-| `image` | File | QR code image (PNG/JPG, max 2MB) |
+| `imageUrl` | String | Hosted QR code image URL |
 | `label` | String | Human-readable label, e.g. "HDFC UPI" |
 
-**Backend actions — POST `/partner/qr-codes`:**
-1. Validates image type and size
-2. Uploads image to S3, gets `imageUrl`
-3. Appends to `tenants.qrCodes` array: `{ label, imageUrl, isActive: false, uploadedBy }`
-4. If this is the first QR code, sets `isActive: true` automatically
+**Backend actions — POST `/distributor/qr-codes`:**
+1. Validates label and hosted `imageUrl`
+2. Appends to `tenants.qrCodes` array: `{ label, imageUrl, isActive, uploadedBy }`
+3. If this is the first QR code, sets `isActive: true` automatically
 
-**Backend actions — PUT `/partner/qr-codes/:qrId/activate`:**
+**Backend actions — PATCH `/distributor/qr-codes/:qrId/activate`:**
 1. Sets all `tenants.qrCodes[].isActive` → `false`
 2. Sets the target entry's `isActive` → `true`
 3. Atomic update to prevent race conditions
 
-**Response — GET `/partner/qr-codes`:**
+**Response — GET `/distributor/qr-codes`:**
 ```json
 {
   "qrCodes": [
@@ -1798,14 +1797,14 @@ FCM NOTIFICATION → Tenant Admin Partner App
 { notificationType: 'PAYMENT_APPROVAL_REQUIRED' }
         │
         ▼
-[Tenant admin opens Partner App]
-GET /partner/payments/pending-approval → sees pending payment
+[Tenant admin opens Tenant App]
+GET /distributor/payments/pending-approval → sees pending payment
         │
         ▼
 Tenant verifies receipt in their bank / UPI app
         │
         ▼
-POST /partner/payments/:paymentId/approve
+POST /distributor/payments/:paymentId/approve
         │
         ▼
 Update payments: { status: 'success', approvalStatus: 'approved' }
@@ -1846,31 +1845,31 @@ Send FCM NOTIFICATION: { notificationType: 'UNLOCK_SUCCESS' } → borrower
 Borrower taps "Request Unlock" → fills form (reason, details, optional JPEG)
         │
         ▼
-POST /app/unlock-request (multipart/form-data)
-  → image uploaded to S3 → imageUrl stored
+POST /app/unlock-request
+  → optional hosted imageUrl stored
   → unlockRequests created: { status: 'PENDING_TENANT', caseId, slaDeadline }
   → FCM NOTIFICATION (UNLOCK_REQUEST_RECEIVED) → tenant admin devices
         │
         ▼
-[Partner App — Tenant Admin]
-  GET /partner/unlock-requests → see case + image
+[Tenant App — Tenant Admin]
+  GET /distributor/unlock-requests → see case + image
   Tenant chooses one of three actions:
     ┌─────────────────────────────────────────────────────────┐
     │ OPTION A — Full Unlock                                  │
-    │   POST /partner/unlock-requests/:id/approve             │
+    │   POST /distributor/unlock-requests/:caseId/approve     │
     │   emiAction: 'waive' → installment.status = 'waived'   │
     │   OR emiAction: 'none' → installment stays 'overdue'   │
     │   → devices.state → UNLOCK_PENDING → FCM POLICY_UPDATE │
     │   → case status → RESOLVED_TENANT                       │
     ├─────────────────────────────────────────────────────────┤
     │ OPTION B — Temp Unlock                                  │
-    │   POST /partner/unlock-requests/:id/temp-unlock         │
+    │   POST /distributor/unlock-requests/:caseId/temp-unlock │
     │   durationHours: N                                      │
     │   → devices.state → TEMP_UNLOCK                        │
     │   → case status → RESOLVED_TENANT                       │
     ├─────────────────────────────────────────────────────────┤
     │ OPTION C — Reject                                       │
-    │   POST /partner/unlock-requests/:id/reject              │
+    │   POST /distributor/unlock-requests/:caseId/reject      │
     │   note: reason                                          │
     │   → case status → REJECTED                              │
     └─────────────────────────────────────────────────────────┘

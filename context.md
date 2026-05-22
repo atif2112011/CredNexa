@@ -185,7 +185,7 @@ Loan and EMI details (`loanAmount`, `emiAmount`, `tenureMonths`, `disbursementDa
 Borrower taps "I Have Paid" (POST /app/payment/submit)
   → Payment record created (approval_pending)
   → FCM NOTIFICATION to tenant admins
-  → Tenant verifies in bank app → approves (POST /partner/payments/:id/approve)
+  → Tenant verifies in bank app → approves (POST /distributor/payments/:id/approve)
   → Validation Engine (match to EMI schedule)
   → Policy Engine (evaluate tenant unlock rules)
   → Device Command Queue (UNLOCK command)

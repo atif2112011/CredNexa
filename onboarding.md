@@ -33,14 +33,18 @@ https://api.emishield.in/api/v1
 | Confirm Aadhaar OTP | `POST /app/consent/confirm` | Public | Implemented with mock Cashfree flow |
 | Register device | `POST /app/device/register` | Borrower user access token | Implemented |
 | Fetch device policy | `GET /app/device/policy` | Borrower user access token | Implemented |
-
-Not yet implemented in the current tested backend:
-
-- `POST /app/device/ping`
-- `POST /app/device/sync`
-- `POST /app/security/event`
-- FCM push delivery
-- Automatic EMI scheduler/state transition worker
+| Device ping | `POST /app/device/ping` | Borrower user access token | Implemented |
+| Device sync | `POST /app/device/sync` | Borrower user access token | Implemented |
+| Device command acknowledgement | `POST /app/device/command/ack` | Borrower user access token | Implemented |
+| Device security event | `POST /app/security/event` | Borrower user access token | Implemented |
+| Borrower payment QR | `GET /app/payment/qr` | Borrower user access token | Implemented |
+| Borrower payment submit | `POST /app/payment/submit` | Borrower user access token | Implemented |
+| Borrower payment history | `GET /app/payment/history` | Borrower user access token | Implemented |
+| Borrower payment detail | `GET /app/payment/:paymentId` | Borrower user access token | Implemented |
+| Borrower unlock request create | `POST /app/unlock-request` | Borrower user access token | Implemented |
+| Borrower active unlock request | `GET /app/unlock-request/active` | Borrower user access token | Implemented |
+| FCM command delivery worker | `npm run worker:fcm` | Backend worker | Implemented, mock by default |
+| Scheduled SLA/temp-unlock jobs | `npm run jobs:scheduled` | Backend worker | Implemented |
 
 ---
 
@@ -475,6 +479,100 @@ Shield App action:
 
 ---
 
+## Step 10A - Device Ping
+
+```http
+POST /api/v1/app/device/ping
+Authorization: Bearer <borrowerUserAccessToken>
+Content-Type: application/json
+
+{
+  "batteryLevel": 79,
+  "networkType": "wifi",
+  "appVersion": "1.0.1",
+  "fcmToken": "latest-fcm-token"
+}
+```
+
+Backend actions:
+
+1. Updates `devices.lastSeenAt`, online state, battery/network metadata, and FCM token if changed.
+2. Writes a `deviceEvents` heartbeat record.
+3. Returns desired and applied policy versions.
+
+---
+
+## Step 10B - Device Sync
+
+```http
+POST /api/v1/app/device/sync
+Authorization: Bearer <borrowerUserAccessToken>
+Content-Type: application/json
+
+{
+  "lastAppliedPolicyVersion": 1,
+  "state": "ACTIVE",
+  "isRooted": false,
+  "isTampered": false
+}
+```
+
+Backend actions:
+
+1. Updates device sync timestamps and security booleans.
+2. Returns current policy plus pending/sent commands.
+
+---
+
+## Step 10C - Command Acknowledgement
+
+After the app applies a command locally:
+
+```http
+POST /api/v1/app/device/command/ack
+Authorization: Bearer <borrowerUserAccessToken>
+Content-Type: application/json
+
+{
+  "commandId": "<deviceCommandId>",
+  "status": "acknowledged",
+  "appliedPolicyVersion": 2
+}
+```
+
+Backend actions:
+
+1. Marks command `acknowledged` or `failed`.
+2. Updates `lastAppliedPolicyVersion`.
+3. Moves device state to `ACTIVE`, `LOCKED`, or `TEMP_UNLOCK` based on the command type.
+
+---
+
+## Step 10D - Security Event
+
+```http
+POST /api/v1/app/security/event
+Authorization: Bearer <borrowerUserAccessToken>
+Content-Type: application/json
+
+{
+  "type": "ROOT_DETECTED",
+  "severity": "high",
+  "message": "su binary found",
+  "metadata": {
+    "path": "/system/xbin/su"
+  }
+}
+```
+
+Backend actions:
+
+1. Writes a `deviceEvents` security record.
+2. Creates a `riskFlags` entry for tenant/admin review.
+3. Marks the device as rooted or tampered for known event types.
+
+---
+
 ## Step 11 - Verify From Tenant App
 
 ### Track enrollment status
@@ -668,3 +766,63 @@ In this implementation:
 13. View borrower detail.
 14. View device detail.
 15. Recheck dashboard counts.
+
+---
+
+## Post-Onboarding Payment And Unlock Simulation
+
+### Borrower fetches active QR
+
+```http
+GET /api/v1/app/payment/qr
+Authorization: Bearer <borrowerUserAccessToken>
+```
+
+### Borrower submits payment
+
+```http
+POST /api/v1/app/payment/submit
+Authorization: Bearer <borrowerUserAccessToken>
+
+{
+  "qrCodeId": "<tenantQrCodeId>",
+  "amount": 3000,
+  "reference": "UPI123456"
+}
+```
+
+### Tenant approves payment
+
+```http
+POST /api/v1/distributor/payments/:paymentId/approve
+Authorization: Bearer <tenantAdminAccessToken>
+
+{
+  "note": "Verified UPI credit"
+}
+```
+
+This marks EMI installments paid, queues an `UNLOCK` command, and the FCM worker delivers a policy update.
+
+### Borrower creates unlock request
+
+```http
+POST /api/v1/app/unlock-request
+Authorization: Bearer <borrowerUserAccessToken>
+
+{
+  "reason": "Payment made but device is still locked",
+  "reasonCategory": "payment_made",
+  "details": "UPI ref UPI123456",
+  "imageUrl": "https://storage.example.com/evidence.png"
+}
+```
+
+Tenant reviews it from:
+
+```http
+GET /api/v1/distributor/unlock-requests
+POST /api/v1/distributor/unlock-requests/:caseId/approve
+POST /api/v1/distributor/unlock-requests/:caseId/temp-unlock
+POST /api/v1/distributor/unlock-requests/:caseId/reject
+```

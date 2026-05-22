@@ -1,15 +1,20 @@
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
-import { accountFields } from "@/lib/forms";
+import { buildAccountFields, prepareAccountPayload } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
 export default async function AccountsPage() {
-  const data = await getList("/admin/accounts");
+  const [data, partners, tenants] = await Promise.all([
+    getList("/admin/accounts"),
+    getList("/admin/channel-partners", { limit: 100 }),
+    getList("/admin/tenants", { limit: 100 })
+  ]);
+  const accountFields = buildAccountFields(partners.items, tenants.items);
 
   return (
     <>
-      <PageHeader title="Admin Accounts" description="Create and manage partner_admin and tenant_admin accounts." actions={<FormDialog title="Create admin account" triggerLabel="Create account" endpoint="/api/admin/accounts" fields={accountFields} />} />
+      <PageHeader title="Admin Accounts" description="Create and manage partner_admin and tenant_admin accounts." actions={<FormDialog title="Create admin account" triggerLabel="Create account" endpoint="/api/admin/accounts" fields={accountFields} preparePayload={prepareAccountPayload} />} />
       <ResourceTable
         rows={data.items}
         detailBasePath="/accounts"

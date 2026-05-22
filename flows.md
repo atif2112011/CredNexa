@@ -1195,7 +1195,7 @@ otifications
 Tenant admin receives FCM notification on their Partner App. They open the pending payments list.
 
 ```
-GET /partner/payments/pending-approval
+GET /distributor/payments/pending-approval
 Authorization: Bearer <tenantAdminJwt>
 ```
 
@@ -1222,7 +1222,7 @@ The tenant admin verifies the payment in their own bank/UPI app (checks inward c
 ### Step 6.5 — Tenant Approves Payment
 
 ```
-POST /partner/payments/:paymentId/approve
+POST /distributor/payments/:paymentId/approve
 Authorization: Bearer <tenantAdminJwt>
 ```
 
@@ -1307,7 +1307,7 @@ deepLink: 'emishield://home'
 #### Upload a New QR Code
 
 ```
-POST /partner/qr-codes
+POST /distributor/qr-codes
 Authorization: Bearer <tenantAdminJwt>
 Content-Type: multipart/form-data
 
@@ -1328,7 +1328,7 @@ Fields:
 #### Set Active QR
 
 ```
-PUT /partner/qr-codes/:qrId/activate
+PATCH /distributor/qr-codes/:qrId/activate
 Authorization: Bearer <tenantAdminJwt>
 ```
 
@@ -1339,7 +1339,7 @@ Authorization: Bearer <tenantAdminJwt>
 #### Delete QR
 
 ```
-DELETE /partner/qr-codes/:qrId
+DELETE /distributor/qr-codes/:qrId
 Authorization: Bearer <tenantAdminJwt>
 ```
 
@@ -1359,9 +1359,9 @@ Authorization: Bearer <tenantAdminJwt>
          │
          ▼
 [Partner App — Tenant Admin]
-  6.4  GET  /partner/payments/pending-approval
+  6.4  GET  /distributor/payments/pending-approval
        [Tenant admin verifies payment in bank/UPI app]
-  6.5  POST /partner/payments/:id/approve
+  6.5  POST /distributor/payments/:id/approve
          → payments (status: success, approvalStatus: approved)
          → emiSchedules (installments marked paid)
          → devices (state: UNLOCK_PENDING, policyKey: EMI_PAID)
@@ -1385,14 +1385,14 @@ Authorization: Bearer <tenantAdminJwt>
 |---|---|---|---|
 | 6.1 | GET | /app/payment/qr | 	okenType: user |
 | 6.3 | POST | /app/payment/submit | 	okenType: user |
-| 6.4 | GET | /partner/payments/pending-approval | 	okenType: account, tenant |
-| 6.5 | POST | /partner/payments/:paymentId/approve | 	okenType: account, tenant |
+| 6.4 | GET | /distributor/payments/pending-approval | tokenType: account, tenant_admin |
+| 6.5 | POST | /distributor/payments/:paymentId/approve | tokenType: account, tenant_admin |
 | 6.6 | GET | /app/device/policy | 	okenType: user |
 | 6.6 | POST | /app/device/command/ack | 	okenType: user |
-| QR | GET | /partner/qr-codes | 	okenType: account, tenant |
-| QR | POST | /partner/qr-codes | 	okenType: account, 	enant_admin |
-| QR | PUT | /partner/qr-codes/:qrId/activate | 	okenType: account, 	enant_admin |
-| QR | DELETE | /partner/qr-codes/:qrId | 	okenType: account, 	enant_admin |
+| QR | GET | /distributor/qr-codes | tokenType: account, tenant_admin |
+| QR | POST | /distributor/qr-codes | tokenType: account, tenant_admin |
+| QR | PATCH | /distributor/qr-codes/:qrId/activate | tokenType: account, tenant_admin |
+| QR | DELETE | /distributor/qr-codes/:qrId | tokenType: account, tenant_admin |
 
 ---
 
@@ -1445,7 +1445,7 @@ Request -- POST /app/unlock-request
 
 Tenant admin receives a push notification and opens the case in the Partner App.
 
-    GET /partner/unlock-requests/:requestId
+    GET /distributor/unlock-requests/:caseId
     Authorization: Bearer <tenantAdminJwt>
 
 **Response includes:**
@@ -1461,7 +1461,7 @@ Tenant admin receives a push notification and opens the case in the Partner App.
 
 Tenant verifies the borrower's claim and chooses to unlock the device.
 
-    POST /partner/unlock-requests/:requestId/approve
+    POST /distributor/unlock-requests/:caseId/approve
     Authorization: Bearer <tenantAdminJwt>
 
     Body:
@@ -1489,7 +1489,7 @@ Tenant verifies the borrower's claim and chooses to unlock the device.
 
 Tenant gives the borrower a time-limited window.
 
-    POST /partner/unlock-requests/:requestId/temp-unlock
+    POST /distributor/unlock-requests/:caseId/temp-unlock
     Authorization: Bearer <tenantAdminJwt>
 
     Body:
@@ -1508,7 +1508,7 @@ Tenant gives the borrower a time-limited window.
 
 ### Step 7.3C -- Tenant Rejects the Request
 
-    POST /partner/unlock-requests/:requestId/reject
+    POST /distributor/unlock-requests/:caseId/reject
     Authorization: Bearer <tenantAdminJwt>
 
     Body: { "note": "No payment received per bank records. Please use Pay Now." }
@@ -1545,7 +1545,7 @@ For each matched case:
 
 Partner admin receives the FCM notification and opens their escalation queue.
 
-    GET /cp/escalations
+    GET /partner/escalations
     Authorization: Bearer <partnerAdminJwt>
 
 Response shows all ESCALATED_PARTNER cases from tenants under this channel partner, including:
@@ -1555,9 +1555,9 @@ Response shows all ESCALATED_PARTNER cases from tenants under this channel partn
 - Time remaining on partnerSlaDeadline
 
 **CP takes one of the same three actions (same mechanics as tenant):**
-- POST /cp/escalations/:caseId/approve  -> RESOLVED_PARTNER
-- POST /cp/escalations/:caseId/temp-unlock -> RESOLVED_PARTNER
-- POST /cp/escalations/:caseId/reject -> REJECTED
+- POST /partner/escalations/:caseId/unlock  -> RESOLVED_PARTNER
+- POST /partner/escalations/:caseId/temp-unlock -> RESOLVED_PARTNER
+- POST /partner/escalations/:caseId/reject -> REJECTED
 
 ---
 
@@ -1609,7 +1609,7 @@ All super admin actions require a mandatory reason field. The action is recorded
          |
          v
 [Partner App -- Tenant Admin]   (SLA: configurable, default 24h)
-  7.2  GET  /partner/unlock-requests/:id    <- review case + image
+  7.2  GET  /distributor/unlock-requests/:caseId    <- review case + image
          |
     +----+-----------------------------------+
     v                  v                     v
@@ -1627,7 +1627,7 @@ All super admin actions require a mandatory reason field. The action is recorded
          |
          v
 [Partner App -- Partner Admin]   (SLA: configurable, default 48h)
-  7.5  GET  /cp/escalations
+  7.5  GET  /partner/escalations
          | (same 3 options: approve / temp-unlock / reject)
          | (if CP doesn't act before SLA)
          v
@@ -1649,18 +1649,17 @@ All super admin actions require a mandatory reason field. The action is recorded
 | Step | Method | Route | Auth |
 |---|---|---|---|
 | 7.1 | POST | /app/unlock-request | tokenType: user |
-| 7.1 | POST | /app/unlock-request/:id/image | tokenType: user |
 | 7.1 | GET | /app/unlock-request/active | tokenType: user |
-| 7.2 | GET | /partner/unlock-requests | tokenType: account, tenant |
-| 7.2 | GET | /partner/unlock-requests/:id | tokenType: account, tenant |
-| 7.3A | POST | /partner/unlock-requests/:id/approve | tokenType: account, tenant |
-| 7.3B | POST | /partner/unlock-requests/:id/temp-unlock | tokenType: account, tenant |
-| 7.3C | POST | /partner/unlock-requests/:id/reject | tokenType: account, tenant |
-| 7.5 | GET | /cp/escalations | tokenType: account, partner_admin |
-| 7.5 | GET | /cp/escalations/:caseId | tokenType: account, partner_admin |
-| 7.5 | POST | /cp/escalations/:caseId/approve | tokenType: account, partner_admin |
-| 7.5 | POST | /cp/escalations/:caseId/temp-unlock | tokenType: account, partner_admin |
-| 7.5 | POST | /cp/escalations/:caseId/reject | tokenType: account, partner_admin |
+| 7.2 | GET | /distributor/unlock-requests | tokenType: account, tenant_admin |
+| 7.2 | GET | /distributor/unlock-requests/:caseId | tokenType: account, tenant_admin |
+| 7.3A | POST | /distributor/unlock-requests/:caseId/approve | tokenType: account, tenant_admin |
+| 7.3B | POST | /distributor/unlock-requests/:caseId/temp-unlock | tokenType: account, tenant_admin |
+| 7.3C | POST | /distributor/unlock-requests/:caseId/reject | tokenType: account, tenant_admin |
+| 7.5 | GET | /partner/escalations | tokenType: account, partner_admin |
+| 7.5 | GET | /partner/escalations/:caseId | tokenType: account, partner_admin |
+| 7.5 | POST | /partner/escalations/:caseId/unlock | tokenType: account, partner_admin |
+| 7.5 | POST | /partner/escalations/:caseId/temp-unlock | tokenType: account, partner_admin |
+| 7.5 | POST | /partner/escalations/:caseId/reject | tokenType: account, partner_admin |
 | 7.7 | GET | /admin/escalations | tokenType: account, super_admin |
 | 7.7 | POST | /admin/escalations/:caseId/unlock | tokenType: account, super_admin |
 | 7.7 | POST | /admin/escalations/:caseId/temp-unlock | tokenType: account, super_admin |

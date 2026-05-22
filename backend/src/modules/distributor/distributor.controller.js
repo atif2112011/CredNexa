@@ -8,11 +8,16 @@ import { TENANT_CAPABILITIES } from "../../constants/tenant.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ConsentRecord } from "../../models/ConsentRecord.js";
 import { Device } from "../../models/Device.js";
+import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { EnrollmentToken } from "../../models/EnrollmentToken.js";
+import { Payment } from "../../models/Payment.js";
+import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { Tenant } from "../../models/Tenant.js";
+import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
+import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
@@ -61,6 +66,120 @@ const ensureDistributorAccess = async (req, res) => {
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
+};
+
+const queueTenantDeviceCommand = async ({ device, commandType, triggeredBy, accountId, payload = {}, session }) => {
+  const policyKey =
+    commandType === "LOCK"
+      ? DEVICE_POLICY_KEYS.EMI_LOCKED
+      : commandType === "TEMP_UNLOCK"
+        ? DEVICE_POLICY_KEYS.TEMP_UNLOCKED
+        : DEVICE_POLICY_KEYS.EMI_PAID;
+  const state =
+    commandType === "LOCK"
+      ? DEVICE_STATES.LOCKED
+      : commandType === "TEMP_UNLOCK"
+        ? DEVICE_STATES.TEMP_UNLOCK
+        : DEVICE_STATES.UNLOCK_PENDING;
+  const policy = await DevicePolicy.findOne({
+    tenantId: device.tenantId,
+    policyKey,
+    isActive: true
+  }).lean();
+
+  if (!policy) {
+    throw new Error(`Active ${policyKey} policy not found for tenant`);
+  }
+
+  const nextPolicyVersion = Number(device.desiredPolicyVersion || 0) + 1;
+  const update = {
+    $set: {
+      state,
+      stateUpdatedAt: new Date(),
+      stateUpdatedBy: accountId,
+      currentPolicyKey: policyKey,
+      currentPolicyId: policy._id,
+      desiredPolicyVersion: nextPolicyVersion
+    }
+  };
+
+  if (commandType === "TEMP_UNLOCK") {
+    update.$set.tempUnlockExpiresAt = payload.tempUnlockExpiresAt;
+  } else {
+    update.$unset = { tempUnlockExpiresAt: "" };
+  }
+
+  const updatedDevice = await Device.findByIdAndUpdate(device._id, update, {
+    new: true,
+    session
+  });
+
+  const commands = await DeviceCommand.create(
+    [
+      {
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        commandType,
+        triggeredBy,
+        triggeredByAccountId: accountId,
+        payload: {
+          policyKey,
+          policyVersion: nextPolicyVersion,
+          ...payload
+        }
+      }
+    ],
+    { session, ordered: true }
+  );
+
+  return { device: updatedDevice, command: commands[0] };
+};
+
+const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
+  const schedule = await EmiSchedule.findOne({ userId: payment.userId, tenantId: payment.tenantId }).session(session);
+  if (!schedule) return [];
+
+  let remainingAmount = Number(payment.amount);
+  const matchedInstallments = [];
+
+  for (const installment of schedule.installments) {
+    if (remainingAmount <= 0) break;
+    if (["paid", "waived"].includes(installment.status)) continue;
+
+    const outstanding = Math.max(Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0) - Number(installment.paidAmount || 0), 0);
+    if (!outstanding) continue;
+
+    const amountApplied = Math.min(remainingAmount, outstanding);
+    installment.paidAmount = Number(installment.paidAmount || 0) + amountApplied;
+    installment.paymentId = payment._id;
+
+    if (installment.paidAmount >= Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0)) {
+      installment.status = "paid";
+      installment.paidAt = new Date();
+    } else {
+      installment.status = "partial";
+    }
+
+    matchedInstallments.push({ installmentId: installment._id, amountApplied });
+    remainingAmount -= amountApplied;
+  }
+
+  const overdueInstallments = schedule.installments.filter((installment) => ["overdue", "partial"].includes(installment.status));
+  schedule.overdueInstallments = overdueInstallments.length;
+  schedule.overdueAmount = overdueInstallments.reduce((sum, installment) => {
+    const total = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
+    return sum + Math.max(total - Number(installment.paidAmount || 0), 0);
+  }, 0);
+
+  await schedule.save({ session });
+  payment.emiScheduleId = schedule._id;
+  payment.matchedInstallments = matchedInstallments;
+  payment.metadata = {
+    ...(payment.metadata || {}),
+    emiUpdatedBy: accountId
+  };
+
+  return matchedInstallments;
 };
 
 const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
@@ -685,5 +804,735 @@ export const regenerateEnrollmentQr = async (req, res) => {
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
     session.endSession();
+  }
+};
+
+/**
+ * List tenant payment QR codes.
+ * Sample request: GET /distributor/qr-codes
+ */
+export const listQrCodes = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    return sendSuccess(res, 200, "QR codes fetched successfully", tenant.qrCodes || []);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Add tenant payment QR code.
+ * Sample body: { "label": "PhonePe Business QR", "imageUrl": "https://storage.example.com/qr.png", "activate": true }
+ */
+export const addQrCode = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["label", "imageUrl"])) {
+      return sendError(res, 400, "QR label and imageUrl are required");
+    }
+
+    const shouldActivate = req.body.activate === true || !tenant.qrCodes?.length;
+    const tenantDocument = await Tenant.findById(tenant._id);
+
+    if (shouldActivate) {
+      tenantDocument.qrCodes.forEach((qrCode) => {
+        qrCode.isActive = false;
+      });
+    }
+
+    tenantDocument.qrCodes.push({
+      label: req.body.label,
+      imageUrl: req.body.imageUrl,
+      isActive: shouldActivate,
+      uploadedBy: req.auth.id
+    });
+    await tenantDocument.save();
+
+    return sendSuccess(res, 201, "QR code added successfully", tenantDocument.qrCodes.at(-1));
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Activate one tenant payment QR code.
+ * Sample request: PATCH /distributor/qr-codes/665f6f0b6f0f6f0b6f0f6f0b/activate
+ */
+export const activateQrCode = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const tenantDocument = await Tenant.findById(tenant._id);
+    const targetQrCode = tenantDocument.qrCodes.id(req.params.qrId);
+
+    if (!targetQrCode) {
+      return sendError(res, 404, "QR code not found");
+    }
+
+    tenantDocument.qrCodes.forEach((qrCode) => {
+      qrCode.isActive = qrCode._id.toString() === req.params.qrId;
+    });
+    await tenantDocument.save();
+
+    return sendSuccess(res, 200, "QR code activated successfully", targetQrCode);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Delete an inactive tenant payment QR code.
+ * Sample request: DELETE /distributor/qr-codes/665f6f0b6f0f6f0b6f0f6f0b
+ */
+export const deleteQrCode = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const tenantDocument = await Tenant.findById(tenant._id);
+    const targetQrCode = tenantDocument.qrCodes.id(req.params.qrId);
+
+    if (!targetQrCode) {
+      return sendError(res, 404, "QR code not found");
+    }
+
+    if (targetQrCode.isActive) {
+      return sendError(res, 400, "Cannot delete the active QR code");
+    }
+
+    targetQrCode.deleteOne();
+    await tenantDocument.save();
+
+    return sendSuccess(res, 200, "QR code deleted successfully");
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List tenant payments pending approval.
+ * Sample request: GET /distributor/payments/pending-approval
+ */
+export const listPendingPayments = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const payments = await Payment.find({ tenantId: tenant._id, approvalStatus: "pending_approval" })
+      .populate("userId", "name mobile loanId")
+      .populate("deviceId", "imei deviceModel manufacturer state")
+      .sort({ submittedAt: -1 })
+      .lean();
+
+    return sendSuccess(res, 200, "Pending payments fetched successfully", payments);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch tenant payment detail.
+ * Sample request: GET /distributor/payments/665f6f0b6f0f6f0b6f0f6f0b
+ */
+export const getPaymentById = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const payment = await Payment.findOne({ _id: req.params.paymentId, tenantId: tenant._id })
+      .populate("userId", "name mobile loanId")
+      .populate("deviceId", "imei deviceModel manufacturer state")
+      .lean();
+
+    if (!payment) {
+      return sendError(res, 404, "Payment not found");
+    }
+
+    return sendSuccess(res, 200, "Payment fetched successfully", payment);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Approve borrower QR payment and queue device unlock.
+ * Sample body: { "note": "Verified UPI credit in bank statement" }
+ */
+export const approvePayment = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const payment = await Payment.findOne({ _id: req.params.paymentId, tenantId: tenant._id }).session(session);
+    if (!payment) {
+      return sendError(res, 404, "Payment not found");
+    }
+
+    if (payment.approvalStatus !== "pending_approval") {
+      return sendError(res, 400, "Payment is already resolved");
+    }
+
+    const device = await Device.findOne({ _id: payment.deviceId, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found for payment");
+    }
+
+    session.startTransaction();
+
+    const matchedInstallments = await applyPaymentToEmiSchedule({ payment, accountId: req.auth.id, session });
+    payment.status = "success";
+    payment.approvalStatus = "approved";
+    payment.approvedBy = req.auth.id;
+    payment.approvedAt = new Date();
+    payment.completedAt = new Date();
+    payment.metadata = { ...(payment.metadata || {}), approvalNote: req.body.note };
+    await payment.save({ session });
+
+    const { command } = await queueTenantDeviceCommand({
+      device,
+      commandType: "UNLOCK",
+      triggeredBy: "payment_unlock",
+      accountId: req.auth.id,
+      payload: { paymentId: payment._id },
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.PAYMENT_APPROVED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: payment.userId,
+        deviceId: payment.deviceId,
+        metadata: { paymentId: payment._id, commandId: command._id, matchedInstallments }
+      },
+      { session }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: payment.userId,
+        deviceId: payment.deviceId,
+        metadata: { paymentId: payment._id, commandId: command._id, triggeredBy: "payment_unlock" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Payment approved and unlock queued successfully", {
+      paymentId: payment._id,
+      unlockCommandId: command._id,
+      matchedInstallments
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Reject borrower QR payment.
+ * Sample body: { "reason": "No matching credit found in bank statement" }
+ */
+export const rejectPayment = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["reason"])) {
+      return sendError(res, 400, "Rejection reason is required");
+    }
+
+    const payment = await Payment.findOne({ _id: req.params.paymentId, tenantId: tenant._id });
+    if (!payment) {
+      return sendError(res, 404, "Payment not found");
+    }
+
+    if (payment.approvalStatus !== "pending_approval") {
+      return sendError(res, 400, "Payment is already resolved");
+    }
+
+    payment.status = "rejected";
+    payment.approvalStatus = "rejected";
+    payment.rejectedBy = req.auth.id;
+    payment.rejectedAt = new Date();
+    payment.rejectionReason = req.body.reason;
+    await payment.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.PAYMENT_REJECTED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      userId: payment.userId,
+      deviceId: payment.deviceId,
+      reason: req.body.reason,
+      metadata: { paymentId: payment._id }
+    });
+
+    return sendSuccess(res, 200, "Payment rejected successfully", payment);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Manually lock a tenant device.
+ * Sample body: { "reason": "EMI grace period expired" }
+ */
+export const lockTenantDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["reason"])) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueTenantDeviceCommand({
+      device,
+      commandType: "LOCK",
+      triggeredBy: "manual_tenant",
+      accountId: req.auth.id,
+      payload: { reason: req.body.reason },
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device lock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Manually unlock a tenant device.
+ * Sample body: { "reason": "Manual payment verified" }
+ */
+export const unlockTenantDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["reason"])) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueTenantDeviceCommand({
+      device,
+      commandType: "UNLOCK",
+      triggeredBy: "manual_tenant",
+      accountId: req.auth.id,
+      payload: { reason: req.body.reason },
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.MANUAL_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id, action: "unlock" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device unlock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Manually temporary unlock a tenant device.
+ * Sample body: { "durationHours": 24, "reason": "Emergency access approved" }
+ */
+export const tempUnlockTenantDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["durationHours", "reason"])) {
+      return sendError(res, 400, "Duration and reason are required");
+    }
+
+    const tenantPolicy = await TenantPolicy.findOne({ tenantId: tenant._id }).lean();
+    const maxDurationHours = tenantPolicy?.tempUnlockRules?.maxDurationHours || 72;
+    const durationHours = Number(req.body.durationHours);
+
+    if (!Number.isFinite(durationHours) || durationHours <= 0 || durationHours > maxDurationHours) {
+      return sendError(res, 400, `Duration must be between 1 and ${maxDurationHours} hours`);
+    }
+
+    const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+
+    session.startTransaction();
+    const result = await queueTenantDeviceCommand({
+      device,
+      commandType: "TEMP_UNLOCK",
+      triggeredBy: "manual_tenant",
+      accountId: req.auth.id,
+      payload: { reason: req.body.reason, durationHours, tempUnlockExpiresAt },
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TEMP_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id, durationHours, tempUnlockExpiresAt }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Temporary unlock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * List tenant borrower unlock requests.
+ * Sample request: GET /distributor/unlock-requests?status=PENDING_TENANT
+ */
+export const listTenantUnlockRequests = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const filter = { tenantId: tenant._id };
+    if (req.query.status) filter.status = req.query.status;
+
+    const unlockRequests = await UnlockRequest.find(filter)
+      .populate("userId", "name mobile loanId")
+      .populate("deviceId", "imei deviceModel manufacturer state")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return sendSuccess(res, 200, "Unlock requests fetched successfully", unlockRequests);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch tenant borrower unlock request detail.
+ * Sample request: GET /distributor/unlock-requests/CASE-2026-ABCDE
+ */
+export const getTenantUnlockRequestByCaseId = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId, tenantId: tenant._id })
+      .populate("userId", "name mobile loanId loanAmount emiAmount")
+      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey")
+      .lean();
+
+    if (!unlockRequest) {
+      return sendError(res, 404, "Unlock request not found");
+    }
+
+    const [emiSchedule, commands, auditLogs] = await Promise.all([
+      EmiSchedule.findOne({ userId: unlockRequest.userId?._id || unlockRequest.userId, tenantId: tenant._id }).lean(),
+      DeviceCommand.find({ deviceId: unlockRequest.deviceId?._id || unlockRequest.deviceId }).sort({ createdAt: -1 }).lean(),
+      AuditLog.find({ caseId: unlockRequest.caseId }).sort({ timestamp: -1 }).lean()
+    ]);
+
+    return sendSuccess(res, 200, "Unlock request detail fetched successfully", {
+      unlockRequest,
+      emiSchedule,
+      commands,
+      auditLogs
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Approve borrower unlock request as tenant admin.
+ * Sample body: { "note": "Payment proof verified", "emiAction": "none" }
+ */
+export const approveTenantUnlockRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId, tenantId: tenant._id }).session(session);
+    if (!unlockRequest) {
+      return sendError(res, 404, "Unlock request not found");
+    }
+
+    if (unlockRequest.status !== "PENDING_TENANT") {
+      return sendError(res, 400, "Only PENDING_TENANT requests can be approved by tenant admin");
+    }
+
+    const device = await Device.findOne({ _id: unlockRequest.deviceId, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+
+    if (req.body.emiAction === "waive") {
+      const schedule = await EmiSchedule.findOne({ userId: unlockRequest.userId, tenantId: tenant._id }).session(session);
+      const installment = schedule?.installments?.find((item) => ["overdue", "partial", "pending"].includes(item.status));
+      if (installment) {
+        installment.status = "waived";
+        installment.waivedBy = req.auth.id;
+        installment.waivedAt = new Date();
+        installment.waiveReason = unlockRequest.caseId;
+        await schedule.save({ session });
+      }
+    }
+
+    const { command } = await queueTenantDeviceCommand({
+      device,
+      commandType: "UNLOCK",
+      triggeredBy: "manual_tenant",
+      accountId: req.auth.id,
+      payload: { caseId: unlockRequest.caseId, note: req.body.note },
+      session
+    });
+
+    unlockRequest.status = "RESOLVED_TENANT";
+    unlockRequest.resolutionAction = req.body.emiAction === "waive" ? "waived" : "unlocked";
+    unlockRequest.resolutionNote = req.body.note;
+    unlockRequest.resolvedBy = req.auth.id;
+    unlockRequest.resolvedAt = new Date();
+    await unlockRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: unlockRequest.userId,
+        deviceId: unlockRequest.deviceId,
+        caseId: unlockRequest.caseId,
+        metadata: { commandId: command._id, emiAction: req.body.emiAction || "none" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Unlock request approved successfully", {
+      unlockRequest,
+      command
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Temporary unlock a borrower request as tenant admin.
+ * Sample body: { "durationHours": 24, "note": "Emergency access approved" }
+ */
+export const tempUnlockTenantUnlockRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["durationHours", "note"])) {
+      return sendError(res, 400, "Duration and note are required");
+    }
+
+    const tenantPolicy = await TenantPolicy.findOne({ tenantId: tenant._id }).lean();
+    const maxDurationHours = tenantPolicy?.tempUnlockRules?.maxDurationHours || 72;
+    const durationHours = Number(req.body.durationHours);
+
+    if (!Number.isFinite(durationHours) || durationHours <= 0 || durationHours > maxDurationHours) {
+      return sendError(res, 400, `Duration must be between 1 and ${maxDurationHours} hours`);
+    }
+
+    const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId, tenantId: tenant._id }).session(session);
+    if (!unlockRequest) {
+      return sendError(res, 404, "Unlock request not found");
+    }
+
+    if (unlockRequest.status !== "PENDING_TENANT") {
+      return sendError(res, 400, "Only PENDING_TENANT requests can be resolved by tenant admin");
+    }
+
+    const device = await Device.findOne({ _id: unlockRequest.deviceId, tenantId: tenant._id }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+    session.startTransaction();
+
+    const { command } = await queueTenantDeviceCommand({
+      device,
+      commandType: "TEMP_UNLOCK",
+      triggeredBy: "manual_tenant",
+      accountId: req.auth.id,
+      payload: { caseId: unlockRequest.caseId, durationHours, tempUnlockExpiresAt, note: req.body.note },
+      session
+    });
+
+    unlockRequest.status = "RESOLVED_TENANT";
+    unlockRequest.resolutionAction = "temp_unlocked";
+    unlockRequest.resolutionNote = req.body.note;
+    unlockRequest.tempUnlockDurationHours = durationHours;
+    unlockRequest.resolvedBy = req.auth.id;
+    unlockRequest.resolvedAt = new Date();
+    await unlockRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TEMP_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: unlockRequest.userId,
+        deviceId: unlockRequest.deviceId,
+        caseId: unlockRequest.caseId,
+        metadata: { commandId: command._id, durationHours, tempUnlockExpiresAt }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Temporary unlock request approved successfully", {
+      unlockRequest,
+      command
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Reject borrower unlock request as tenant admin.
+ * Sample body: { "note": "No matching payment found" }
+ */
+export const rejectTenantUnlockRequest = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!hasRequiredFields(req.body, ["note"])) {
+      return sendError(res, 400, "Note is required");
+    }
+
+    const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId, tenantId: tenant._id });
+    if (!unlockRequest) {
+      return sendError(res, 404, "Unlock request not found");
+    }
+
+    if (unlockRequest.status !== "PENDING_TENANT") {
+      return sendError(res, 400, "Only PENDING_TENANT requests can be rejected by tenant admin");
+    }
+
+    unlockRequest.status = "REJECTED";
+    unlockRequest.resolutionAction = "rejected";
+    unlockRequest.resolutionNote = req.body.note;
+    unlockRequest.resolvedBy = req.auth.id;
+    unlockRequest.resolvedAt = new Date();
+    await unlockRequest.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.CASE_REJECTED_BY_TENANT,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      userId: unlockRequest.userId,
+      deviceId: unlockRequest.deviceId,
+      caseId: unlockRequest.caseId,
+      reason: req.body.note,
+      metadata: { rejectedBy: "tenant_admin" }
+    });
+
+    return sendSuccess(res, 200, "Unlock request rejected successfully", unlockRequest);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
   }
 };

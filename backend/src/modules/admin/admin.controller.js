@@ -754,6 +754,18 @@ export const createAdminAccount = async (req, res) => {
       if (!tenant) return sendError(res, 400, "Active tenant not found");
     }
 
+    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId && !isValidObjectId(req.body.channelPartnerId)) {
+      return sendError(res, 400, "Valid channelPartnerId is required when provided");
+    }
+
+    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId) {
+      const channelPartner = await ChannelPartner.findOne({
+        _id: req.body.channelPartnerId,
+        isActive: true
+      });
+      if (!channelPartner) return sendError(res, 400, "Active channel partner not found");
+    }
+
     if (req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN) {
       const channelPartner = await ChannelPartner.findOne({
         _id: req.body.channelPartnerId,
@@ -770,7 +782,7 @@ export const createAdminAccount = async (req, res) => {
       role: req.body.role,
       tenantId: req.body.role === ACCOUNT_ROLES.TENANT_ADMIN ? req.body.tenantId : undefined,
       channelPartnerId:
-        req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN ? req.body.channelPartnerId : undefined,
+        req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN || req.body.channelPartnerId ? req.body.channelPartnerId : undefined,
       passwordHash,
       createdBy: req.auth.id
     });
@@ -1504,7 +1516,14 @@ export const getAuditLogs = async (req, res) => {
     if (req.query.eventType) filter.eventType = req.query.eventType;
 
     const [items, total] = await Promise.all([
-      AuditLog.find(filter).skip(skip).limit(limit).sort({ timestamp: -1 }).lean(),
+      AuditLog.find(filter)
+        .populate("actorId", "name email")
+        .populate("tenantId", "name")
+        .populate("channelPartnerId", "name")
+        .skip(skip)
+        .limit(limit)
+        .sort({ timestamp: -1 })
+        .lean(),
       AuditLog.countDocuments(filter)
     ]);
 

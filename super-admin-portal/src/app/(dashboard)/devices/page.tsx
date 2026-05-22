@@ -18,7 +18,7 @@ export default async function DevicesPage() {
           { key: "state", header: "State", type: "status" },
           { key: "tenantId.name", header: "Tenant" },
           { key: "userId.name", header: "Borrower" },
-          { key: "updatedAt", header: "Updated", type: "date" }
+          { key: "updatedAt", header: "Last Active", type: "date" }
         ]}
       />
     </>

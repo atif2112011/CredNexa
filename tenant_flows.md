@@ -19,8 +19,12 @@
 | View Device Inventory | `GET /distributor/devices` | Available |
 | View Device Detail | `GET /distributor/devices/:id` | Available |
 | Regenerate Enrollment QR | `POST /distributor/enrollment/:token/regenerate` | Available |
+| Tenant QR Code Management | `/distributor/qr-codes/*` | Available |
+| Payment Approval Queue | `/distributor/payments/*` | Available |
+| Manual Device Lock / Unlock | `/distributor/devices/:id/*` | Available |
+| Borrower Unlock Request Queue | `/distributor/unlock-requests/*` | Available |
 
-Current simulation can complete the main happy path using the Tenant App `/distributor/*` APIs plus borrower-side `/app/*` APIs.
+Current simulation can complete onboarding, QR payment approval, borrower unlock requests, manual tenant lock/unlock, and device command acknowledgement using Tenant App `/distributor/*` APIs plus borrower-side `/app/*` APIs.
 
 ---
 
@@ -305,5 +309,225 @@ Authorization: Bearer <tenantAdminToken>
 - new `tokenExpiresAt`
 - new `qrPayload`
 - new `qrCodeDataUrl`
+
+**API status:** Available.
+
+---
+
+## Flow TA-10 — Tenant Payment QR Management
+
+> **Actor:** Tenant Admin  
+> **Outcome:** Tenant admin manages the QR image borrowers use for external UPI/manual payment.
+
+### List QR Codes
+
+```http
+GET /distributor/qr-codes
+Authorization: Bearer <tenantAdminToken>
+```
+
+### Add QR Code
+
+```http
+POST /distributor/qr-codes
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "label": "PhonePe Business QR",
+  "imageUrl": "https://storage.example.com/tenant/phonepe-qr.png",
+  "activate": true
+}
+```
+
+### Activate QR Code
+
+```http
+PATCH /distributor/qr-codes/:qrId/activate
+Authorization: Bearer <tenantAdminToken>
+```
+
+### Delete Inactive QR Code
+
+```http
+DELETE /distributor/qr-codes/:qrId
+Authorization: Bearer <tenantAdminToken>
+```
+
+**Rules:**
+- The first QR is activated automatically.
+- Activating one QR deactivates all others.
+- The active QR cannot be deleted.
+
+**API status:** Available.
+
+---
+
+## Flow TA-11 — Payment Approval And Unlock
+
+> **Actor:** Tenant Admin  
+> **Outcome:** Tenant admin approves borrower-submitted QR payments and queues device unlock.
+
+### List Pending Payments
+
+```http
+GET /distributor/payments/pending-approval
+Authorization: Bearer <tenantAdminToken>
+```
+
+### View Payment Detail
+
+```http
+GET /distributor/payments/:paymentId
+Authorization: Bearer <tenantAdminToken>
+```
+
+### Approve Payment
+
+```http
+POST /distributor/payments/:paymentId/approve
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "note": "Verified UPI credit in bank statement"
+}
+```
+
+**Backend actions:**
+1. Confirms payment belongs to tenant.
+2. Marks payment `success` / `approved`.
+3. Applies amount to oldest unpaid EMI installments.
+4. Updates device to `UNLOCK_PENDING` and `EMI_PAID`.
+5. Creates a pending `UNLOCK` device command.
+6. FCM worker sends the policy update.
+
+### Reject Payment
+
+```http
+POST /distributor/payments/:paymentId/reject
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "reason": "No matching credit found in bank statement"
+}
+```
+
+**API status:** Available.
+
+---
+
+## Flow TA-12 — Manual Device Lock / Unlock
+
+> **Actor:** Tenant Admin  
+> **Outcome:** Tenant admin can manually control a tenant device outside onboarding.
+
+### Manual Lock
+
+```http
+POST /distributor/devices/:id/lock
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "reason": "EMI grace period expired"
+}
+```
+
+### Manual Full Unlock
+
+```http
+POST /distributor/devices/:id/unlock
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "reason": "Manual payment verified"
+}
+```
+
+### Manual Temporary Unlock
+
+```http
+POST /distributor/devices/:id/temp-unlock
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "durationHours": 24,
+  "reason": "Emergency access approved"
+}
+```
+
+**Backend actions:**
+1. Validates device belongs to tenant.
+2. Updates device state and current policy key.
+3. Increments desired policy version.
+4. Creates a pending `deviceCommands` record.
+5. FCM worker delivers policy update.
+
+**API status:** Available.
+
+---
+
+## Flow TA-13 — Borrower Unlock Request Queue
+
+> **Actor:** Tenant Admin  
+> **Outcome:** Tenant admin reviews borrower-created unlock requests.
+
+### List Requests
+
+```http
+GET /distributor/unlock-requests?status=PENDING_TENANT
+Authorization: Bearer <tenantAdminToken>
+```
+
+### View Request Detail
+
+```http
+GET /distributor/unlock-requests/:caseId
+Authorization: Bearer <tenantAdminToken>
+```
+
+### Approve Full Unlock
+
+```http
+POST /distributor/unlock-requests/:caseId/approve
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "note": "Payment proof verified",
+  "emiAction": "none"
+}
+```
+
+Use `"emiAction": "waive"` only when the tenant intentionally waives the active overdue installment.
+
+### Approve Temporary Unlock
+
+```http
+POST /distributor/unlock-requests/:caseId/temp-unlock
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "durationHours": 24,
+  "note": "Emergency access approved"
+}
+```
+
+### Reject Request
+
+```http
+POST /distributor/unlock-requests/:caseId/reject
+Authorization: Bearer <tenantAdminToken>
+
+Body:
+{
+  "note": "No matching payment found"
+}
+```
 
 **API status:** Available.

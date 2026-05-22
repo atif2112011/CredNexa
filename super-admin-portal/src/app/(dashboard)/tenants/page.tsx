@@ -1,11 +1,15 @@
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
-import { tenantFields } from "@/lib/forms";
+import { buildTenantFields } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
 export default async function TenantsPage() {
-  const data = await getList("/admin/tenants");
+  const [data, partners] = await Promise.all([
+    getList("/admin/tenants"),
+    getList("/admin/channel-partners", { limit: 100 })
+  ]);
+  const tenantFields = buildTenantFields(partners.items);
 
   return (
     <>

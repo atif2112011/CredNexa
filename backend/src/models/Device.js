@@ -68,6 +68,9 @@ const deviceSchema = new mongoose.Schema(
     },
     lastPolicyAppliedAt: Date,
     lastSeenAt: Date,
+    lastSyncAt: Date,
+    batteryLevel: Number,
+    networkType: String,
     isOnline: {
       type: Boolean,
       default: false

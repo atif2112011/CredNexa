@@ -14,6 +14,7 @@ export type ResourceColumn = {
   key: string;
   header: string;
   type?: "text" | "date" | "status" | "boolean";
+  className?: string;
 };
 
 type ResourceTableProps = {
@@ -37,7 +38,9 @@ export function ResourceTable({ rows, columns, detailBasePath }: ResourceTablePr
     ...columns.map((column) => ({
       accessorKey: column.key,
       header: column.header,
-            cell: ({ row }: { row: { original: RecordItem } }) => renderValue(row.original, column)
+            cell: ({ row }: { row: { original: RecordItem } }) => (
+              <div className={column.className}>{renderValue(row.original, column)}</div>
+            )
     })),
     ...(detailBasePath
       ? [
