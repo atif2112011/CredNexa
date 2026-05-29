@@ -14,4 +14,5 @@ apiRoutes.use("/auth", authRoutes);
 apiRoutes.use("/admin", adminRoutes);
 apiRoutes.use("/partner", partnerRoutes);
 apiRoutes.use("/distributor", distributorRoutes);
+apiRoutes.use("/tenant", distributorRoutes);
 apiRoutes.use("/app", appRoutes);
