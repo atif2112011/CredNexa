@@ -20,10 +20,14 @@ const tempDurations = [
 ];
 
 const actions = [
-  { label: "Unlock device", value: "unlock" },
-  { label: "Unlock device and waive payment", value: "waive" },
+  { label: "Full unlock", value: "full-unlock" },
   { label: "Temporary unlock", value: "temp-unlock" },
   { label: "Reject case", value: "reject" }
+];
+
+const emiActions = [
+  { label: "All pending paid", value: "mark_paid" },
+  { label: "All pending waived", value: "waive" }
 ];
 
 function isResolvable(status: unknown) {
@@ -33,7 +37,8 @@ function isResolvable(status: unknown) {
 export function ResolveCaseDialog({ item }: { item: RecordItem }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [action, setAction] = useState("unlock");
+  const [action, setAction] = useState("full-unlock");
+  const [emiAction, setEmiAction] = useState("mark_paid");
   const [durationHours, setDurationHours] = useState("24");
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -55,9 +60,9 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
     const body =
       action === "temp-unlock"
         ? { reason, durationHours: Number(durationHours) }
-        : action === "waive"
-          ? { reason, emiAction: "waive" }
-          : { reason };
+        : action === "reject"
+          ? { reason }
+          : { reason, emiAction };
 
     setIsSubmitting(true);
     const response = await fetch(endpoint, {
@@ -88,7 +93,7 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Resolve {caseId}</DialogTitle>
-          <DialogDescription>Choose the final action for this escalated case.</DialogDescription>
+          <DialogDescription>Permanent unlock requires marking all pending EMIs paid or waived. Temporary unlock does not resolve EMI delinquency.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <div className="rounded-xl border bg-muted/20 p-4">
@@ -125,6 +130,23 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
                 className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               >
                 {tempDurations.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+          {action === "full-unlock" ? (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor={`emi-action-${caseId}`}>EMI update</Label>
+              <select
+                id={`emi-action-${caseId}`}
+                value={emiAction}
+                onChange={(event) => setEmiAction(event.target.value)}
+                className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              >
+                {emiActions.map((item) => (
                   <option key={item.value} value={item.value}>
                     {item.label}
                   </option>

@@ -1,6 +1,7 @@
 import { DetailGrid } from "@/components/data/detail-grid";
 import { ResourceTable } from "@/components/data/resource-table";
 import { ActivePolicyPanel, RiskFlagMetricsPanel } from "@/components/data/visual-panels";
+import { DeviceOverridePanel } from "@/components/devices/device-override-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getDetail } from "@/services/admin";
@@ -18,6 +19,7 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
       <PageHeader title={String(device.imei || "Device")} description="Device state, borrower mapping, policy snapshot, command history, and audit trail." />
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "updatedAt", type: "date" }]} />
+        <DeviceOverridePanel device={device} />
         <div className="grid gap-6 xl:grid-cols-2">
           <ActivePolicyPanel policy={detail.policy} />
           <RiskFlagMetricsPanel flags={detail.riskFlags} />
