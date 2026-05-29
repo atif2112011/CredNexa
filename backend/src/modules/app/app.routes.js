@@ -12,6 +12,7 @@ import {
   getPaymentDetail,
   getPaymentHistory,
   getPaymentQr,
+  generateTestUserAccessToken,
   initiateConsentOtp,
   pingDevice,
   reportSecurityEvent,
@@ -22,6 +23,7 @@ import {
 
 export const appRoutes = Router();
 
+appRoutes.post("/testing/access-token", generateTestUserAccessToken);
 appRoutes.get("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", initiateConsentOtp);
 appRoutes.post("/consent/confirm", confirmConsentOtp);

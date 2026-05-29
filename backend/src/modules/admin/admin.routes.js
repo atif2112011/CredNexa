@@ -20,6 +20,7 @@ import {
   getDeviceById,
   getDeviceCommands,
   listDeviceCommands,
+  lockAdminDevice,
   getTenantById,
   listAdminAccounts,
   listAdminEscalations,
@@ -30,7 +31,9 @@ import {
   publishConsentVersion,
   rejectAdminEscalation,
   tempUnlockAdminEscalation,
+  tempUnlockAdminDevice,
   unlockAdminEscalation,
+  unlockAdminDeviceWithWaive,
   updateAdminAccount,
   updateAdminAccountStatus,
   updateChannelPartner,
@@ -78,6 +81,9 @@ adminRoutes.post("/escalations/:caseId/reject", rejectAdminEscalation);
 adminRoutes.get("/devices", listDevices);
 adminRoutes.get("/commands", listDeviceCommands);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
+adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
+adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
+adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 

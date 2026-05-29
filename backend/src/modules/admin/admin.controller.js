@@ -121,6 +121,100 @@ const applyEscalationDeviceCommand = async ({
   return { device, command: command[0] };
 };
 
+const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetState, policyKey, reason, durationHours, session }) => {
+  const activePolicy = await DevicePolicy.findOne({
+    tenantId: device.tenantId,
+    policyKey,
+    isActive: true
+  }).lean();
+
+  if (!activePolicy) {
+    throw new Error(`Active ${policyKey} policy not found for tenant`);
+  }
+
+  const nextPolicyVersion = Number(device.desiredPolicyVersion || 0) + 1;
+  const deviceUpdate = {
+    $set: {
+      state: targetState,
+      stateUpdatedAt: new Date(),
+      stateUpdatedBy: accountId,
+      currentPolicyKey: policyKey,
+      currentPolicyId: activePolicy._id,
+      desiredPolicyVersion: nextPolicyVersion
+    }
+  };
+
+  if (durationHours) {
+    deviceUpdate.$set.tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+  } else {
+    deviceUpdate.$unset = { tempUnlockExpiresAt: "" };
+  }
+
+  const updatedDevice = await Device.findByIdAndUpdate(device._id, deviceUpdate, {
+    new: true,
+    session
+  });
+
+  const command = await DeviceCommand.create(
+    [
+      {
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        commandType,
+        triggeredBy: "super_admin",
+        triggeredByAccountId: accountId,
+        payload: {
+          reason,
+          durationHours,
+          policyKey,
+          policyVersion: nextPolicyVersion
+        }
+      }
+    ],
+    { session, ordered: true }
+  );
+
+  return { device: updatedDevice, command: command[0] };
+};
+
+const resolveAllUnpaidInstallments = async ({ userId, tenantId, accountId, reason, emiAction, session }) => {
+  if (!["mark_paid", "waive"].includes(emiAction)) {
+    throw new Error("emiAction must be mark_paid or waive");
+  }
+
+  const schedule = await EmiSchedule.findOne({ userId, tenantId }).session(session);
+  const unpaidInstallments = schedule?.installments?.filter((item) => ["overdue", "partial", "pending"].includes(item.status)) || [];
+
+  if (!schedule || !unpaidInstallments.length) {
+    throw new Error("No unpaid EMI installments found to update");
+  }
+
+  for (const installment of unpaidInstallments) {
+    if (emiAction === "mark_paid") {
+      installment.status = "paid";
+      installment.paidAmount = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
+      installment.paidAt = new Date();
+    } else {
+      installment.status = "waived";
+      installment.waivedBy = accountId;
+      installment.waivedAt = new Date();
+      installment.waiveReason = reason;
+    }
+  }
+
+  schedule.overdueInstallments = schedule.installments.filter((item) => ["overdue", "partial"].includes(item.status)).length;
+  schedule.overdueAmount = schedule.installments.reduce((sum, item) => {
+    if (!["overdue", "partial"].includes(item.status)) return sum;
+    return sum + Math.max(Number(item.emiAmount || 0) + Number(item.penaltyAmount || 0) - Number(item.paidAmount || 0), 0);
+  }, 0);
+  await schedule.save({ session });
+
+  return {
+    schedule,
+    updatedInstallmentIds: unpaidInstallments.map((item) => item._id)
+  };
+};
+
 /**
  * Super Admin dashboard overview.
  * Sample request: /admin/dashboard
@@ -1119,8 +1213,8 @@ export const getAdminEscalationByCaseId = async (req, res) => {
 };
 
 /**
- * Override full unlock for an escalated case.
- * Sample body: { "reason": "Tenant and partner breached SLA. Borrower proof verified.", "emiAction": "none" }
+ * Override full unlock for an escalated case by resolving all unpaid EMIs.
+ * Sample body: { "reason": "Tenant and partner breached SLA. Payment verified.", "emiAction": "mark_paid" }
  */
 export const unlockAdminEscalation = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1128,6 +1222,10 @@ export const unlockAdminEscalation = async (req, res) => {
   try {
     if (!req.body.reason) {
       return sendError(res, 400, "Reason is required");
+    }
+
+    if (!["mark_paid", "waive"].includes(req.body.emiAction)) {
+      return sendError(res, 400, "Full unlock requires emiAction: mark_paid or waive. Use temporary unlock for time-bound access.");
     }
 
     const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId });
@@ -1152,29 +1250,23 @@ export const unlockAdminEscalation = async (req, res) => {
       session
     });
 
-    if (req.body.emiAction === "waive") {
-      const schedule = await EmiSchedule.findOne({
+    let emiUpdate;
+    try {
+      emiUpdate = await resolveAllUnpaidInstallments({
         userId: unlockRequest.userId,
-        tenantId: unlockRequest.tenantId
-      }).session(session);
-      const installment = schedule?.installments?.find((item) => ["overdue", "partial", "pending"].includes(item.status));
-
-      if (installment) {
-        installment.status = "waived";
-        installment.waivedBy = req.auth.id;
-        installment.waivedAt = new Date();
-        installment.waiveReason = unlockRequest.caseId;
-        schedule.overdueInstallments = schedule.installments.filter((item) => ["overdue", "partial"].includes(item.status)).length;
-        schedule.overdueAmount = schedule.installments.reduce((sum, item) => {
-          if (!["overdue", "partial"].includes(item.status)) return sum;
-          return sum + Math.max(Number(item.emiAmount || 0) + Number(item.penaltyAmount || 0) - Number(item.paidAmount || 0), 0);
-        }, 0);
-        await schedule.save({ session });
-      }
+        tenantId: unlockRequest.tenantId,
+        accountId: req.auth.id,
+        reason: unlockRequest.caseId,
+        emiAction: req.body.emiAction,
+        session
+      });
+    } catch (error) {
+      await session.abortTransaction();
+      return sendError(res, 400, error.message);
     }
 
     unlockRequest.status = "RESOLVED_SUPER_ADMIN";
-    unlockRequest.resolutionAction = req.body.emiAction === "waive" ? "waived" : "override";
+    unlockRequest.resolutionAction = req.body.emiAction === "waive" ? "waived" : "unlocked";
     unlockRequest.resolutionNote = req.body.reason;
     unlockRequest.resolvedBy = req.auth.id;
     unlockRequest.resolvedAt = new Date();
@@ -1190,7 +1282,7 @@ export const unlockAdminEscalation = async (req, res) => {
         deviceId: unlockRequest.deviceId,
         caseId: unlockRequest.caseId,
         reason: req.body.reason,
-        metadata: { action: "unlock", commandId: command._id, emiAction: req.body.emiAction || "none" }
+        metadata: { action: "unlock", commandId: command._id, emiAction: req.body.emiAction, updatedInstallmentIds: emiUpdate.updatedInstallmentIds }
       },
       { session }
     );
@@ -1444,6 +1536,210 @@ export const getDeviceCommands = async (req, res) => {
     return sendSuccess(res, 200, "Device commands fetched successfully", commands);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Super admin manual device lock.
+ * Sample body: { "reason": "Compliance hold requested by lender" }
+ */
+export const lockAdminDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+
+    const result = await queueAdminDeviceCommand({
+      device,
+      accountId: req.auth.id,
+      commandType: "LOCK",
+      targetState: DEVICE_STATES.LOCKED,
+      policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+      reason: req.body.reason,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id, source: "device_detail" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Device lock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Super admin temporary device unlock.
+ * Sample body: { "durationHours": 60, "reason": "Emergency access approved" }
+ */
+export const tempUnlockAdminDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    if (!req.body.reason || !req.body.durationHours) {
+      return sendError(res, 400, "Reason and durationHours are required");
+    }
+
+    const durationHours = Number(req.body.durationHours);
+    if (!Number.isFinite(durationHours) || durationHours <= 0) {
+      return sendError(res, 400, "durationHours must be greater than zero");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+
+    const result = await queueAdminDeviceCommand({
+      device,
+      accountId: req.auth.id,
+      commandType: "TEMP_UNLOCK",
+      targetState: DEVICE_STATES.TEMP_UNLOCK,
+      policyKey: DEVICE_POLICY_KEYS.TEMP_UNLOCKED,
+      reason: req.body.reason,
+      durationHours,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TEMP_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id, durationHours, source: "device_detail" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Temporary unlock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Super admin full unlock with EMI update.
+ * Sample body: { "reason": "Payment verified by lender", "emiAction": "mark_paid" }
+ */
+export const unlockAdminDeviceWithWaive = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    if (!["mark_paid", "waive"].includes(req.body.emiAction)) {
+      return sendError(res, 400, "Full unlock requires emiAction: mark_paid or waive");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+
+    let emiUpdate;
+    try {
+      emiUpdate = await resolveAllUnpaidInstallments({
+        userId: device.userId,
+        tenantId: device.tenantId,
+        accountId: req.auth.id,
+        reason: req.body.reason,
+        emiAction: req.body.emiAction,
+        session
+      });
+    } catch (error) {
+      await session.abortTransaction();
+      return sendError(res, 400, error.message);
+    }
+
+    const result = await queueAdminDeviceCommand({
+      device,
+      accountId: req.auth.id,
+      commandType: "UNLOCK",
+      targetState: DEVICE_STATES.UNLOCK_PENDING,
+      policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
+      reason: req.body.reason,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.MANUAL_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: {
+          commandId: result.command._id,
+          emiAction: req.body.emiAction,
+          updatedInstallmentIds: emiUpdate.updatedInstallmentIds,
+          source: "device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Device unlock with EMI update queued successfully", {
+      ...result,
+      updatedInstallmentIds: emiUpdate.updatedInstallmentIds
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 

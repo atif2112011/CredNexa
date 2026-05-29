@@ -60,6 +60,47 @@ const buildMockCashfreeProfile = (user) => ({
 });
 
 /**
+ * Generate a user-app access token for local testing.
+ * Sample body: { "userId": "665f..." } OR { "mobile": "9876543210" } OR { "loanId": "LOAN-001" }
+ */
+export const generateTestUserAccessToken = async (req, res) => {
+  try {
+    if (env.nodeEnv === "production") {
+      return sendError(res, 404, "Route not found");
+    }
+
+    const { userId, mobile, loanId } = req.body;
+
+    if (!userId && !mobile && !loanId) {
+      return sendError(res, 400, "userId, mobile, or loanId is required");
+    }
+
+    const filter = userId ? { _id: userId } : mobile ? { mobile } : { loanId };
+    const user = await User.findOne(filter).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 404, "Active user not found");
+    }
+
+    return sendSuccess(res, 200, "Test user access token generated successfully", {
+      accessToken: signUserAccessToken(user),
+      tokenType: "user",
+      expiresIn: env.jwtAccessExpiresIn,
+      user: {
+        id: user._id,
+        name: user.name,
+        mobile: user.mobile,
+        loanId: user.loanId,
+        tenantId: user.tenantId,
+        consentRecordId: user.consentRecordId
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Fetch current consent terms.
  * Sample request: GET /app/consent/terms
  */
