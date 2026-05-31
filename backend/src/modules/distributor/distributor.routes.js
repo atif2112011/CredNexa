@@ -9,6 +9,8 @@ import {
   approveTenantUnlockRequest,
   deleteQrCode,
   generateEnrollmentQr,
+  getBorrowersWithPendingEmis,
+  getBorrowersWithOverdueEmis,
   getDashboard,
   getDistributorDeviceById,
   getDistributorDevices,
@@ -17,6 +19,8 @@ import {
   getEnrollmentStatusByToken,
   getPaymentById,
   getTenantUnlockRequestByCaseId,
+  getUserEmiInstallments,
+  listPaymentApprovalRequests,
   listPendingPayments,
   listQrCodes,
   listTenantUnlockRequests,
@@ -25,6 +29,7 @@ import {
   registerBorrower,
   rejectPayment,
   rejectTenantUnlockRequest,
+  sendUpcomingPaymentCommand,
   tempUnlockTenantDevice,
   tempUnlockTenantUnlockRequest,
   unlockTenantDevice
@@ -40,9 +45,13 @@ distributorRoutes.post("/enrollment/qr", generateEnrollmentQr);
 distributorRoutes.get("/enrollments/:token/status", getEnrollmentStatusByToken);
 distributorRoutes.post("/enrollment/:token/regenerate", regenerateEnrollmentQr);
 distributorRoutes.get("/users", getDistributorUsers);
+distributorRoutes.get("/users/pending-emis", getBorrowersWithPendingEmis);
+distributorRoutes.get("/users/overdue-emis", getBorrowersWithOverdueEmis);
+distributorRoutes.get("/users/:id/emi-installments", getUserEmiInstallments);
 distributorRoutes.get("/users/:id", getDistributorUserById);
 distributorRoutes.get("/devices", getDistributorDevices);
 distributorRoutes.get("/devices/:id", getDistributorDeviceById);
+distributorRoutes.post("/devices/:id/upcoming-payment-reminder", sendUpcomingPaymentCommand);
 distributorRoutes.post("/devices/:id/lock", lockTenantDevice);
 distributorRoutes.post("/devices/:id/unlock", unlockTenantDevice);
 distributorRoutes.post("/devices/:id/temp-unlock", tempUnlockTenantDevice);
@@ -50,6 +59,7 @@ distributorRoutes.get("/qr-codes", listQrCodes);
 distributorRoutes.post("/qr-codes", addQrCode);
 distributorRoutes.patch("/qr-codes/:qrId/activate", activateQrCode);
 distributorRoutes.delete("/qr-codes/:qrId", deleteQrCode);
+distributorRoutes.get("/payments/approval-requests", listPaymentApprovalRequests);
 distributorRoutes.get("/payments/pending-approval", listPendingPayments);
 distributorRoutes.get("/payments/:paymentId", getPaymentById);
 distributorRoutes.post("/payments/:paymentId/approve", approvePayment);

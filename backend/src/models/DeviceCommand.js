@@ -14,7 +14,7 @@ const deviceCommandSchema = new mongoose.Schema(
     },
     commandType: {
       type: String,
-      enum: ["LOCK", "UNLOCK", "TEMP_UNLOCK"],
+      enum: ["LOCK", "UNLOCK", "TEMP_UNLOCK", "UPCOMING_PAYMENT"],
       required: true
     },
     status: {

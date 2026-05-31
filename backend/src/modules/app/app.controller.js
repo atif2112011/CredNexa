@@ -380,6 +380,10 @@ export const registerDevice = async (req, res) => {
       return sendError(res, 403, "Consent record is required before device registration");
     }
 
+    if (user.isDeviceLinked) {
+      return sendError(res, 400, "User is already linked to a device");
+    }
+
     const existingDevice = await Device.findOne({ imei: req.body.imei }).lean();
 
     if (existingDevice) {
@@ -421,6 +425,11 @@ export const registerDevice = async (req, res) => {
       { session, ordered: true }
     );
     const device = devices[0];
+
+    user.isDeviceLinked = true;
+    user.linkedDeviceId = device._id;
+    user.deviceLinkedAt = new Date();
+    await user.save({ session });
 
     await createAuditLog(
       {

@@ -38,6 +38,21 @@ const generateInstallments = ({ emiAmount, tenureMonths, disbursementDate }) => 
   }));
 };
 
+const getPagination = (query) => {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+  return { page, limit, skip: (page - 1) * limit };
+};
+
+const buildPagination = (page, limit, total) => ({
+  page,
+  limit,
+  total,
+  pages: Math.ceil(total / limit) || 1
+});
+
+const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+
 const ensureDistributorAccess = async (req, res) => {
   if (req.auth.role !== ACCOUNT_ROLES.TENANT_ADMIN) {
     sendError(res, 403, "tenant_admin role is required");
@@ -567,16 +582,208 @@ export const getEnrollmentStatusByToken = async (req, res) => {
 };
 
 /**
- * List users under tenant.
- * Sample query: /distributor/users?page=1&limit=20
+ * List borrowers under tenant with pagination and search.
+ * Sample query: /distributor/users?page=1&limit=20&search=ramesh
  */
 export const getDistributorUsers = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    const users = await User.find({ tenantId: tenant._id }).sort({ createdAt: -1 }).lean();
-    return sendSuccess(res, 200, "Users fetched successfully", users);
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { tenantId: tenant._id };
+
+    if (req.query.search) {
+      const search = buildSearchRegex(req.query.search);
+      filter.$or = [{ name: search }, { mobile: search }, { email: search }, { loanId: search }];
+    }
+
+    if (req.query.onboardingStatus === "onboarded") filter.isDeviceLinked = true;
+    if (req.query.onboardingStatus === "pending") filter.isDeviceLinked = { $ne: true };
+
+    const [items, total] = await Promise.all([
+      User.find(filter)
+        .populate("linkedDeviceId", "imei deviceModel manufacturer state lastSeenAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Users fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const filterSchedulesByBorrowerSearch = (schedules, searchValue) => {
+  const search = searchValue ? buildSearchRegex(searchValue) : null;
+  if (!search) return schedules;
+
+  return schedules.filter((schedule) => {
+    const user = schedule.userId || {};
+    return [user.name, user.mobile, user.email, user.loanId].some((value) => value && search.test(String(value)));
+  });
+};
+
+const formatScheduleInstallmentSummary = ({ schedule, installments, installmentKey }) => ({
+  borrower: schedule.userId,
+  emiScheduleId: schedule._id,
+  loanId: schedule.loanId,
+  [installmentKey]: installments,
+  installmentCount: installments.length,
+  totalAmount: installments.reduce((sum, item) => {
+    const total = Number(item.emiAmount || 0) + Number(item.penaltyAmount || 0);
+    return sum + Math.max(total - Number(item.paidAmount || 0), 0);
+  }, 0),
+  overdueAmount: schedule.overdueAmount,
+  overdueInstallments: schedule.overdueInstallments,
+  dpd: schedule.dpd
+});
+
+/**
+ * List borrowers with upcoming unpaid EMI installments due in the next x days.
+ * Sample query: /distributor/users/pending-emis?days=10&page=1&limit=20&search=ramesh
+ */
+export const getBorrowersWithPendingEmis = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const { page, limit, skip } = getPagination(req.query);
+    const days = Math.min(Math.max(Number(req.query.days) || 10, 1), 365);
+    const now = new Date();
+    const dueUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    const scheduleFilter = {
+      tenantId: tenant._id,
+      installments: {
+        $elemMatch: {
+          status: { $in: ["pending", "partial"] },
+          dueDate: { $gte: now, $lte: dueUntil }
+        }
+      }
+    };
+
+    const schedules = await EmiSchedule.find(scheduleFilter)
+      .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths isDeviceLinked linkedDeviceId")
+      .sort({ "installments.dueDate": 1 })
+      .lean();
+
+    const filteredSchedules = filterSchedulesByBorrowerSearch(schedules, req.query.search);
+
+    const items = filteredSchedules.slice(skip, skip + limit).map((schedule) => {
+      const upcomingInstallments = schedule.installments.filter(
+        (item) => ["pending", "partial"].includes(item.status) && item.dueDate >= now && item.dueDate <= dueUntil
+      );
+      return formatScheduleInstallmentSummary({
+        schedule,
+        installments: upcomingInstallments,
+        installmentKey: "upcomingInstallments"
+      });
+    });
+
+    return sendSuccess(res, 200, "Borrowers with upcoming EMIs fetched successfully", {
+      items,
+      days,
+      dueUntil,
+      pagination: buildPagination(page, limit, filteredSchedules.length)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List borrowers with overdue EMI installments under tenant.
+ * Sample query: /distributor/users/overdue-emis?page=1&limit=20&search=ramesh
+ */
+export const getBorrowersWithOverdueEmis = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const { page, limit, skip } = getPagination(req.query);
+    const now = new Date();
+    const scheduleFilter = {
+      tenantId: tenant._id,
+      installments: {
+        $elemMatch: {
+          $or: [{ status: "overdue" }, { status: "partial", dueDate: { $lt: now } }, { status: "pending", dueDate: { $lt: now } }]
+        }
+      }
+    };
+
+    const schedules = await EmiSchedule.find(scheduleFilter)
+      .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths isDeviceLinked linkedDeviceId")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const filteredSchedules = filterSchedulesByBorrowerSearch(schedules, req.query.search);
+
+    const items = filteredSchedules.slice(skip, skip + limit).map((schedule) => {
+      const overdueInstallments = schedule.installments.filter(
+        (item) => item.status === "overdue" || (["pending", "partial"].includes(item.status) && item.dueDate < now)
+      );
+      return formatScheduleInstallmentSummary({
+        schedule,
+        installments: overdueInstallments,
+        installmentKey: "overdueEmiInstallments"
+      });
+    });
+
+    return sendSuccess(res, 200, "Borrowers with overdue EMIs fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, filteredSchedules.length)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch all EMI installments for one borrower.
+ * Sample request: GET /distributor/users/665f.../emi-installments
+ */
+export const getUserEmiInstallments = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid user ID is required");
+    }
+
+    const [user, schedule] = await Promise.all([
+      User.findOne({ _id: req.params.id, tenantId: tenant._id }).lean(),
+      EmiSchedule.findOne({ userId: req.params.id, tenantId: tenant._id }).lean()
+    ]);
+
+    if (!user) {
+      return sendError(res, 404, "Borrower not found");
+    }
+
+    if (!schedule) {
+      return sendError(res, 404, "EMI schedule not found");
+    }
+
+    return sendSuccess(res, 200, "EMI installments fetched successfully", {
+      borrower: {
+        id: user._id,
+        name: user.name,
+        mobile: user.mobile,
+        email: user.email,
+        loanId: user.loanId
+      },
+      emiScheduleId: schedule._id,
+      installments: schedule.installments,
+      overdueAmount: schedule.overdueAmount,
+      overdueInstallments: schedule.overdueInstallments,
+      dpd: schedule.dpd
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -644,16 +851,53 @@ export const getDistributorUserById = async (req, res) => {
 };
 
 /**
- * List devices under tenant.
- * Sample query: /distributor/devices
+ * List devices under tenant with borrower details, pagination, filters, and search.
+ * Sample query: /distributor/devices?page=1&limit=20&search=ramesh&state=ACTIVE
  */
 export const getDistributorDevices = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    const devices = await Device.find({ tenantId: tenant._id }).sort({ createdAt: -1 }).lean();
-    return sendSuccess(res, 200, "Devices fetched successfully", devices);
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { tenantId: tenant._id };
+
+    if (req.query.state) filter.state = req.query.state;
+    if (req.query.policyKey) filter.currentPolicyKey = req.query.policyKey;
+    if (req.query.imei) filter.imei = buildSearchRegex(req.query.imei);
+
+    if (req.query.search) {
+      const search = buildSearchRegex(req.query.search);
+      const users = await User.find({
+        tenantId: tenant._id,
+        $or: [{ name: search }, { mobile: search }, { email: search }, { loanId: search }]
+      })
+        .select("_id")
+        .lean();
+
+      filter.$or = [
+        { imei: search },
+        { imei2: search },
+        { deviceModel: search },
+        { manufacturer: search },
+        { userId: { $in: users.map((user) => user._id) } }
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      Device.find(filter)
+        .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths isDeviceLinked")
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Device.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Devices fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -680,21 +924,25 @@ export const getDistributorDeviceById = async (req, res) => {
       return sendError(res, 404, "Device not found");
     }
 
-    const policy = device.currentPolicyId
-      ? await DevicePolicy.findOne({
-          _id: device.currentPolicyId,
-          tenantId: tenant._id,
-          isActive: true
-        }).lean()
-      : await DevicePolicy.findOne({
-          tenantId: tenant._id,
-          policyKey: device.currentPolicyKey,
-          isActive: true
-        }).lean();
+    const [policy, emiSchedule] = await Promise.all([
+      device.currentPolicyId
+        ? DevicePolicy.findOne({
+            _id: device.currentPolicyId,
+            tenantId: tenant._id,
+            isActive: true
+          }).lean()
+        : DevicePolicy.findOne({
+            tenantId: tenant._id,
+            policyKey: device.currentPolicyKey,
+            isActive: true
+          }).lean(),
+      EmiSchedule.findOne({ userId: device.userId?._id || device.userId, tenantId: tenant._id }).lean()
+    ]);
 
     return sendSuccess(res, 200, "Device detail fetched successfully", {
       device,
       borrower: device.userId,
+      emiSchedule,
       currentPolicy: policy
         ? {
             id: policy._id,
@@ -703,6 +951,88 @@ export const getDistributorDeviceById = async (req, res) => {
             restrictions: policy.restrictions
           }
         : null
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue an upcoming payment reminder command for a device when a due EMI is coming up.
+ * Sample body: { "windowDays": 7, "note": "Reminder before due date" }
+ */
+export const sendUpcomingPaymentCommand = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+
+    const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id }).lean();
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const windowDays = Math.min(Math.max(Number(req.body.windowDays || req.query.windowDays || 7), 1), 30);
+    const now = new Date();
+    const windowEnd = new Date(Date.now() + windowDays * 24 * 60 * 60 * 1000);
+    const schedule = await EmiSchedule.findOne({ userId: device.userId, tenantId: tenant._id }).lean();
+    const upcomingInstallment = schedule?.installments
+      ?.filter((item) => ["pending", "partial"].includes(item.status))
+      .filter((item) => item.dueDate >= now && item.dueDate <= windowEnd)
+      .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
+
+    if (!upcomingInstallment) {
+      return sendSuccess(res, 200, "No upcoming payment found for device", {
+        queued: false,
+        deviceId: device._id,
+        windowDays
+      });
+    }
+
+    const commands = await DeviceCommand.create([
+      {
+        deviceId: device._id,
+        tenantId: tenant._id,
+        commandType: "UPCOMING_PAYMENT",
+        triggeredBy: "manual_tenant",
+        triggeredByAccountId: req.auth.id,
+        payload: {
+          note: req.body.note,
+          windowDays,
+          emiScheduleId: schedule._id,
+          installmentId: upcomingInstallment._id,
+          installmentNumber: upcomingInstallment.installmentNumber,
+          dueDate: upcomingInstallment.dueDate,
+          emiAmount: upcomingInstallment.emiAmount,
+          penaltyAmount: upcomingInstallment.penaltyAmount || 0,
+          outstandingAmount: Math.max(
+            Number(upcomingInstallment.emiAmount || 0) +
+              Number(upcomingInstallment.penaltyAmount || 0) -
+              Number(upcomingInstallment.paidAmount || 0),
+            0
+          )
+        }
+      }
+    ]);
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      userId: device.userId,
+      deviceId: device._id,
+      reason: req.body.note,
+      metadata: { commandId: commands[0]._id, commandType: "UPCOMING_PAYMENT", installmentId: upcomingInstallment._id }
+    });
+
+    return sendSuccess(res, 201, "Upcoming payment reminder command queued successfully", {
+      queued: true,
+      command: commands[0],
+      upcomingInstallment
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -930,6 +1260,51 @@ export const listPendingPayments = async (req, res) => {
       .lean();
 
     return sendSuccess(res, 200, "Pending payments fetched successfully", payments);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List tenant payment approval requests with pagination and search.
+ * Sample request: GET /distributor/payments/approval-requests?status=pending_approval&search=ramesh&page=1&limit=20
+ */
+export const listPaymentApprovalRequests = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { tenantId: tenant._id };
+
+    if (req.query.status && req.query.status !== "all") filter.approvalStatus = req.query.status;
+
+    if (req.query.search) {
+      const search = buildSearchRegex(req.query.search);
+      const users = await User.find({
+        tenantId: tenant._id,
+        $or: [{ name: search }, { mobile: search }, { email: search }, { loanId: search }]
+      })
+        .select("_id")
+        .lean();
+      filter.$or = [{ "metadata.reference": search }, { userId: { $in: users.map((user) => user._id) } }];
+    }
+
+    const [items, total] = await Promise.all([
+      Payment.find(filter)
+        .populate("userId", "name mobile email loanId")
+        .populate("deviceId", "imei deviceModel manufacturer state")
+        .sort({ submittedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Payment.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Payment approval requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -1265,23 +1640,43 @@ export const tempUnlockTenantDevice = async (req, res) => {
 
 /**
  * List tenant borrower unlock requests.
- * Sample request: GET /distributor/unlock-requests?status=PENDING_TENANT
+ * Sample request: GET /distributor/unlock-requests?status=PENDING_TENANT&page=1&limit=20
  */
 export const listTenantUnlockRequests = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
+    const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
     if (req.query.status) filter.status = req.query.status;
 
-    const unlockRequests = await UnlockRequest.find(filter)
-      .populate("userId", "name mobile loanId")
-      .populate("deviceId", "imei deviceModel manufacturer state")
-      .sort({ createdAt: -1 })
-      .lean();
+    if (req.query.search) {
+      const search = buildSearchRegex(req.query.search);
+      const users = await User.find({
+        tenantId: tenant._id,
+        $or: [{ name: search }, { mobile: search }, { email: search }, { loanId: search }]
+      })
+        .select("_id")
+        .lean();
+      filter.$or = [{ caseId: search }, { reason: search }, { userId: { $in: users.map((user) => user._id) } }];
+    }
 
-    return sendSuccess(res, 200, "Unlock requests fetched successfully", unlockRequests);
+    const [items, total] = await Promise.all([
+      UnlockRequest.find(filter)
+        .populate("userId", "name mobile email loanId")
+        .populate("deviceId", "imei deviceModel manufacturer state")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      UnlockRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Unlock requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

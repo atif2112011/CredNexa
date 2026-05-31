@@ -45,6 +45,15 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "ConsentRecord"
     },
+    isDeviceLinked: {
+      type: Boolean,
+      default: false
+    },
+    linkedDeviceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Device"
+    },
+    deviceLinkedAt: Date,
     isActive: {
       type: Boolean,
       default: true

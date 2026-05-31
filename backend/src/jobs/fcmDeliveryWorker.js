@@ -25,19 +25,42 @@ const loadFirebaseAdmin = async () => {
   return firebaseApp;
 };
 
-const buildPolicyUpdateMessage = ({ device, command }) => ({
-  token: device.fcmToken,
-  data: {
-    type: "POLICY_UPDATE",
+const buildPolicyUpdateMessage = ({ device, command }) => {
+  const baseData = {
     commandId: command._id.toString(),
-    commandType: command.commandType,
-    policyKey: String(command.payload?.policyKey || device.currentPolicyKey),
-    policyVersion: String(command.payload?.policyVersion || device.desiredPolicyVersion)
-  },
-  android: {
-    priority: "high"
+    commandType: command.commandType
+  };
+
+  if (command.commandType === "UPCOMING_PAYMENT") {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        type: "UPCOMING_PAYMENT",
+        installmentId: String(command.payload?.installmentId || ""),
+        installmentNumber: String(command.payload?.installmentNumber || ""),
+        dueDate: command.payload?.dueDate ? new Date(command.payload.dueDate).toISOString() : "",
+        outstandingAmount: String(command.payload?.outstandingAmount || 0)
+      },
+      android: {
+        priority: "high"
+      }
+    };
   }
-});
+
+  return {
+    token: device.fcmToken,
+    data: {
+      ...baseData,
+      type: "POLICY_UPDATE",
+      policyKey: String(command.payload?.policyKey || device.currentPolicyKey),
+      policyVersion: String(command.payload?.policyVersion || device.desiredPolicyVersion)
+    },
+    android: {
+      priority: "high"
+    }
+  };
+};
 
 export const runFcmDeliveryBatch = async ({ limit = 50 } = {}) => {
   await connectDatabase();
