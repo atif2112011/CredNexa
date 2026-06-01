@@ -1040,8 +1040,8 @@ export const sendUpcomingPaymentCommand = async (req, res) => {
 };
 
 /**
- * Cancel an old enrollment token and create a fresh QR for the same borrower.
- * Sample request: POST /distributor/enrollment/abcdef/regenerate
+ * Generate or reuse an enrollment QR for one borrower.
+ * Sample request: POST /distributor/users/665f.../enrollment/qr
  */
 export const regenerateEnrollmentQr = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1050,58 +1050,92 @@ export const regenerateEnrollmentQr = async (req, res) => {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    const oldEnrollmentToken = await EnrollmentToken.findOne({
-      token: req.params.token,
-      tenantId: tenant._id
-    });
-
-    if (!oldEnrollmentToken) {
-      return sendError(res, 404, "Enrollment token not found");
+    if (!mongoose.isValidObjectId(req.params.userId)) {
+      return sendError(res, 400, "Valid user ID is required");
     }
 
-    const [user, existingDevice] = await Promise.all([
-      User.findOne({ _id: oldEnrollmentToken.userId, tenantId: tenant._id }).lean(),
-      Device.findOne({ userId: oldEnrollmentToken.userId, tenantId: tenant._id }).lean()
-    ]);
+    const user = await User.findOne({ _id: req.params.userId, tenantId: tenant._id }).lean();
 
-    if (!user) {
-      return sendError(res, 404, "Borrower not found for enrollment token");
+    if (!user || !user.isActive) {
+      return sendError(res, 404, "Active borrower not found");
     }
 
+    const existingDevice = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
     if (existingDevice) {
       return sendError(res, 400, "Device is already registered for this borrower");
     }
 
-    if (oldEnrollmentToken.consumedAt) {
-      return sendError(res, 400, "Enrollment token is already consumed");
-    }
+    const now = new Date();
+    const validEnrollmentToken = await EnrollmentToken.findOne({
+      userId: user._id,
+      tenantId: tenant._id,
+      consumedAt: null,
+      cancelledAt: null,
+      expiresAt: { $gt: now }
+    }).sort({ createdAt: -1 });
 
-    if (oldEnrollmentToken.regeneratedTo) {
-      return sendError(res, 400, "This enrollment token has already been regenerated");
+    if (validEnrollmentToken) {
+      validEnrollmentToken.lastQrGeneratedAt = now;
+      await validEnrollmentToken.save();
+
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.ENROLLMENT_QR_GENERATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: user._id,
+        metadata: { enrollmentTokenId: validEnrollmentToken._id, reused: true }
+      });
+
+      const qrResponse = await buildQrResponse(validEnrollmentToken);
+
+      return sendSuccess(res, 200, "Enrollment QR generated successfully", {
+        reusedExistingToken: true,
+        borrower: {
+          id: user._id,
+          name: user.name,
+          mobile: user.mobile,
+          loanId: user.loanId
+        },
+        ...qrResponse
+      });
     }
 
     session.startTransaction();
 
-    oldEnrollmentToken.cancelledAt = new Date();
-    await oldEnrollmentToken.save({ session });
+    const oldEnrollmentToken = await EnrollmentToken.findOne({
+      userId: user._id,
+      tenantId: tenant._id,
+      consumedAt: null,
+      cancelledAt: null
+    })
+      .sort({ createdAt: -1 })
+      .session(session);
+
+    if (oldEnrollmentToken) {
+      oldEnrollmentToken.cancelledAt = now;
+      await oldEnrollmentToken.save({ session });
+    }
 
     const newEnrollmentTokens = await EnrollmentToken.create(
       [
         {
           token: createEnrollmentTokenValue(),
-          userId: oldEnrollmentToken.userId,
-          tenantId: oldEnrollmentToken.tenantId,
+          userId: user._id,
+          tenantId: tenant._id,
           expiresAt: getEnrollmentTokenExpiry(),
-          lastQrGeneratedAt: new Date(),
-          regeneratedFrom: oldEnrollmentToken._id,
+          lastQrGeneratedAt: now,
+          regeneratedFrom: oldEnrollmentToken?._id,
           createdBy: req.auth.id
         }
       ],
       { session, ordered: true }
     );
 
-    oldEnrollmentToken.regeneratedTo = newEnrollmentTokens[0]._id;
-    await oldEnrollmentToken.save({ session });
+    if (oldEnrollmentToken) {
+      oldEnrollmentToken.regeneratedTo = newEnrollmentTokens[0]._id;
+      await oldEnrollmentToken.save({ session });
+    }
 
     await createAuditLog(
       {
@@ -1109,9 +1143,9 @@ export const regenerateEnrollmentQr = async (req, res) => {
         actorId: req.auth.id,
         tenantId: tenant._id,
         channelPartnerId: tenant.channelPartnerId,
-        userId: oldEnrollmentToken.userId,
+        userId: user._id,
         metadata: {
-          oldEnrollmentTokenId: oldEnrollmentToken._id,
+          oldEnrollmentTokenId: oldEnrollmentToken?._id,
           newEnrollmentTokenId: newEnrollmentTokens[0]._id
         }
       },
@@ -1123,8 +1157,15 @@ export const regenerateEnrollmentQr = async (req, res) => {
     const qrResponse = await buildQrResponse(newEnrollmentTokens[0]);
 
     return sendSuccess(res, 201, "Enrollment QR regenerated successfully", {
-      oldEnrollmentToken: oldEnrollmentToken.token,
-      oldEnrollmentTokenId: oldEnrollmentToken._id,
+      reusedExistingToken: false,
+      oldEnrollmentToken: oldEnrollmentToken?.token,
+      oldEnrollmentTokenId: oldEnrollmentToken?._id,
+      borrower: {
+        id: user._id,
+        name: user.name,
+        mobile: user.mobile,
+        loanId: user.loanId
+      },
       ...qrResponse
     });
   } catch (error) {
