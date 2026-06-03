@@ -16,6 +16,7 @@ import { Payment } from "../../models/Payment.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { Tenant } from "../../models/Tenant.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
+import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
@@ -201,19 +202,20 @@ const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
 
 const getEnrollmentTokenExpiry = () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-const buildQrPayload = (enrollmentToken) => ({
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": "com.emishield.app/.AdminReceiver",
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION":
-    "https://cdn.emishield.in/releases/shield.apk",
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "<SHA256_OF_APK_SIGNING_CERT>",
-  "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": false,
+const buildQrPayload = (enrollmentToken, provisioningDetails) => (
+  {
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": provisioningDetails?.adminComponentName,
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": provisioningDetails?.adminPackageDownloadUrl,
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": provisioningDetails?.adminSignatureChecksum,
+  "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": provisioningDetails?.skipEncryption || false,
   "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
     enrollmentToken
   }
 });
 
 const buildQrResponse = async (enrollmentToken) => {
-  const qrPayload = buildQrPayload(enrollmentToken.token);
+  const provisioningDetails = await ProvisioningDetails.findOne({}).lean();
+  const qrPayload = buildQrPayload(enrollmentToken.token, provisioningDetails);
   const qrCodeDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
     errorCorrectionLevel: "M",
     margin: 2,

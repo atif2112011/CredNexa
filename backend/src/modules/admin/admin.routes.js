@@ -39,7 +39,9 @@ import {
   updateChannelPartner,
   updateChannelPartnerStatus,
   updateTenant,
-  updateTenantStatus
+  updateTenantStatus,
+  upsertProvisioningDetails,
+  getProvisioningDetails
 } from "./admin.controller.js";
 
 export const adminRoutes = Router();
@@ -90,3 +92,6 @@ adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 adminRoutes.get("/risk-flags", getAdminRiskFlags);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
 adminRoutes.get("/audit-logs", getAuditLogs);
+
+adminRoutes.post("/provisioning-details", upsertProvisioningDetails);
+adminRoutes.get("/provisioning-details", getProvisioningDetails);

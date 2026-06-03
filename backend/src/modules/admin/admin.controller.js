@@ -18,6 +18,7 @@ import { RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
+import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
@@ -1896,3 +1897,54 @@ export const getAuditLogs = async (req, res) => {
     return sendError(res, 500, error.message || "Internal server error");
   }
 };
+
+
+/**
+ * Create/Update provisioning Details
+ * Sample query: /admin/provisioning-details
+ */
+
+export const upsertProvisioningDetails=async(req,res)=>{
+  try{
+    const {componentName,packageUrl,checksum}=req.body;
+
+    if(!componentName || !packageUrl || !checksum){
+      return sendError(res,400,"componentName, packageUrl and checksum are required");
+    }
+    const skipEncryption=req.body?.skipEncryption || false;
+
+    const provisioningDetail=await ProvisioningDetails.findOneAndUpdate(
+     {},
+     {adminComponentName:componentName,
+      adminPackageDownloadUrl:packageUrl,
+      adminSignatureChecksum:checksum,
+      skipEncryption
+     },
+      { upsert: true, new: true }
+    );
+    return sendSuccess(res,200,"Provisioning details upserted successfully",provisioningDetail);
+
+
+  }
+  catch(error){
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+}
+
+/**
+ * Get provisioning Details
+ * Sample query: /admin/provisioning-details
+ */
+
+export const getProvisioningDetails=async(req,res)=>{
+  try{
+    const provisioningDetail=await ProvisioningDetails.findOne({}).lean();
+    if(!provisioningDetail){
+      return sendError(res,404,"Provisioning details not found");
+    }
+    return sendSuccess(res,200,"Provisioning details fetched successfully",provisioningDetail);
+  }
+  catch(error){
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+}
