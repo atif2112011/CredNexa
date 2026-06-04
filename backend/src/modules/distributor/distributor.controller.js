@@ -206,7 +206,7 @@ const buildQrPayload = (enrollmentToken, provisioningDetails) => (
   {
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": provisioningDetails?.adminComponentName,
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": provisioningDetails?.adminPackageDownloadUrl,
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": provisioningDetails?.adminSignatureChecksum,
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM": provisioningDetails?.adminSignatureChecksum,
   "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": provisioningDetails?.skipEncryption || false,
   "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
     enrollmentToken
