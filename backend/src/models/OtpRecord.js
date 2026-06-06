@@ -13,7 +13,7 @@ const otpRecordSchema = new mongoose.Schema(
     },
     purpose: {
       type: String,
-      enum: ["login", "consent", "aadhaar_consent"],
+      enum: ["login", "consent", "aadhaar_consent", "onboarding_resume", "device_login"],
       required: true
     },
     verificationSessionId: {

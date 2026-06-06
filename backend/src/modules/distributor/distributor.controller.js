@@ -267,6 +267,23 @@ export const registerBorrower = async (req, res) => {
       return sendError(res, 400, "Borrower and EMI details are required");
     }
 
+    if(req.body.tenureMonths <= 0) {
+      return sendError(res, 400, "Tenure months must be greater than 0");
+    }
+    if(req.body.loanAmount <= 0) {
+      return sendError(res, 400, "Loan amount must be greater than 0");
+    }
+    if(req.body.emiAmount <= 0) {
+      return sendError(res, 400, "EMI amount must be greater than 0");
+    }
+
+    if(new Date(req.body.disbursementDate) < new Date()) {
+      return sendError(res, 400, "Disbursement date cannot be in the past");
+    }
+    if(req.body.tenureMonths*req.body.emiAmount < req.body.loanAmount) {
+      return sendError(res, 400, "Total EMI amount cannot be less than loan amount");
+    }
+
     const existingUser = await User.findOne({
       $or: [{ mobile: req.body.mobile }, { loanId: req.body.loanId }]
     }).lean();
@@ -297,6 +314,8 @@ export const registerBorrower = async (req, res) => {
     );
 
     const user = users[0];
+    
+
     const installments = generateInstallments(req.body);
 
     const schedules = await EmiSchedule.create(

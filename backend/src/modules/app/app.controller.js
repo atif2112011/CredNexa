@@ -1,9 +1,11 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 
 import { env } from "../../config/env.js";
+import { firebaseStorage } from "../../config/firebase.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { AuditLog } from "../../models/AuditLog.js";
@@ -14,6 +16,7 @@ import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DeviceEvent } from "../../models/DeviceEvent.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EnrollmentToken } from "../../models/EnrollmentToken.js";
+import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { Payment } from "../../models/Payment.js";
 import { RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
@@ -58,6 +61,186 @@ const buildMockCashfreeProfile = (user) => ({
   address: "Mock Aadhaar address",
   aadhaarLinkedMobile: user.aadhaarLinkedMobile
 });
+
+const buildUserDetails = (user) => ({
+  id: user._id,
+  name: user.name,
+  mobile: user.mobile,
+  email: user.email,
+  aadhaarVerified: user.aadhaarVerified,
+  tenantId: user.tenantId,
+  isDeviceLinked: user.isDeviceLinked,
+  linkedDeviceId: user.linkedDeviceId
+});
+
+const buildLoanDetails = (user, schedule) => ({
+  loanId: user.loanId,
+  loanAmount: user.loanAmount,
+  emiAmount: user.emiAmount,
+  tenureMonths: user.tenureMonths,
+  disbursementDate: user.disbursementDate,
+  emiScheduleId: schedule?._id,
+  overdueAmount: schedule?.overdueAmount || 0,
+  overdueInstallments: schedule?.overdueInstallments || 0,
+  dpd: schedule?.dpd || 0
+});
+
+const getInstallmentOutstanding = (installment) => {
+  const totalPayable = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
+  return Math.max(totalPayable - Number(installment.paidAmount || 0), 0);
+};
+
+const buildInstallmentSummary = (installment) => ({
+  installmentId: installment._id,
+  installmentNumber: installment.installmentNumber,
+  dueDate: installment.dueDate,
+  emiAmount: installment.emiAmount,
+  penaltyAmount: installment.penaltyAmount || 0,
+  paidAmount: installment.paidAmount || 0,
+  amountDue: getInstallmentOutstanding(installment),
+  status: installment.status,
+  paidAt: installment.paidAt,
+  paymentId: installment.paymentId
+});
+
+const getCurrentDueInstallment = (installments = [], now = new Date()) => {
+  const dueCutoff = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+  return installments
+    .filter((installment) => ["pending", "partial", "overdue"].includes(installment.status))
+    .filter((installment) => installment.dueDate && new Date(installment.dueDate) <= dueCutoff)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
+};
+
+const getImageExtension = (mimeType) => {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  return "bin";
+};
+
+const uploadImageToFirebase = async ({ file, folder, recordId, userId, tenantId, metadata = {} }) => {
+  if (!file) return null;
+
+  const extension = getImageExtension(file.mimetype);
+  const storagePath = [
+    folder,
+    tenantId.toString(),
+    userId.toString(),
+    `${recordId.toString()}-${Date.now()}.${extension}`
+  ].join("/");
+  const storageRef = ref(firebaseStorage, storagePath);
+
+  await uploadBytes(storageRef, file.buffer, {
+    contentType: file.mimetype,
+    customMetadata: {
+      userId: userId.toString(),
+      tenantId: tenantId.toString(),
+      ...metadata
+    }
+  });
+
+  const imageUrl = await getDownloadURL(storageRef);
+
+  return {
+    imageUrl,
+    storagePath,
+    mimeType: file.mimetype,
+    originalName: file.originalname,
+    size: file.size,
+    uploadedAt: new Date()
+  };
+};
+
+const uploadPaymentProofImage = async ({ file, paymentId, userId, tenantId }) =>
+  uploadImageToFirebase({
+    file,
+    folder: "payment-proofs",
+    recordId: paymentId,
+    userId,
+    tenantId,
+    metadata: { paymentId: paymentId.toString() }
+  });
+
+const uploadUnlockRequestImage = async ({ file, caseId, userId, tenantId }) =>
+  uploadImageToFirebase({
+    file,
+    folder: "unlock-requests",
+    recordId: caseId,
+    userId,
+    tenantId,
+    metadata: { caseId: caseId.toString() }
+  });
+
+const OTP_PURPOSES = Object.freeze({
+  AADHAAR_CONSENT: "aadhaar_consent",
+  ONBOARDING_RESUME: "onboarding_resume",
+  DEVICE_LOGIN: "device_login"
+});
+
+const FLOW_TYPES = Object.freeze({
+  ONBOARDING_CONSENT: "ONBOARDING_CONSENT",
+  ONBOARDING_RESUME: "ONBOARDING_RESUME",
+  DEVICE_LOGIN: "DEVICE_LOGIN"
+});
+
+const NEXT_STEPS = Object.freeze({
+  VERIFY_OTP: "VERIFY_OTP",
+  SHOW_CONSENT: "SHOW_CONSENT",
+  REGISTER_DEVICE: "REGISTER_DEVICE",
+  SYNC_DEVICE: "SYNC_DEVICE"
+});
+
+const isMobileMatch = (user, mobile) => {
+  return [user.mobile, user.aadhaarLinkedMobile].filter(Boolean).includes(mobile);
+};
+
+const maskMobile = (mobile) => `${mobile.slice(0, 2)}****${mobile.slice(-4)}`;
+
+const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
+  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
+  const otpHash = await bcrypt.hash(MOCK_CASHFREE_OTP, 12);
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  const providerReferenceId = `mock_otp_ref_${crypto.randomBytes(8).toString("hex")}`;
+
+  await OtpRecord.create({
+    mobile,
+    otpHash,
+    purpose,
+    verificationSessionId,
+    enrollmentTokenId: enrollmentToken?._id,
+    userId: user._id,
+    providerReferenceId,
+    expiresAt,
+    providerResponse: {
+      provider: "mock",
+      mode: "mock",
+      status: "OTP_SENT",
+      flowType
+    }
+  });
+
+  return {
+    verificationSessionId,
+    providerReferenceId,
+    expiresInSeconds: 600
+  };
+};
+
+const getDeviceSyncState = async (device) => {
+  const [policy, pendingCommands] = await Promise.all([
+    DevicePolicy.findOne({ tenantId: device.tenantId, policyKey: device.currentPolicyKey, isActive: true }).lean(),
+    DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
+  ]);
+
+  return {
+    deviceState: device.state,
+    currentPolicyKey: device.currentPolicyKey,
+    desiredPolicyVersion: device.desiredPolicyVersion,
+    policy,
+    pendingCommands
+  };
+};
 
 /**
  * Generate a user-app access token for local testing.
@@ -119,78 +302,116 @@ export const getConsentTerms = async (req, res) => {
 };
 
 /**
- * Initiate mocked Cashfree Aadhaar OTP.
- * Sample body: { "enrollmentToken": "...", "aadhaarLinkedMobile": "9876543210" }
+ * Initiate mocked OTP and let the backend decide the caller's onboarding branch.
+ * Sample body: { "mobile": "9876543210", "enrollmentToken": "optional" }
  */
 export const initiateConsentOtp = async (req, res) => {
   try {
-    if (!hasRequiredFields(req.body, ["enrollmentToken", "aadhaarLinkedMobile"])) {
-      return sendError(res, 400, "Enrollment token and Aadhaar-linked mobile are required");
+    if (!hasRequiredFields(req.body, ["mobile"])) {
+      return sendError(res, 400, "Mobile is required");
     }
 
-    const enrollmentToken = await EnrollmentToken.findOne({
-      token: req.body.enrollmentToken,
-      consumedAt: null,
-      cancelledAt: null,
-      expiresAt: { $gt: new Date() }
-    });
+    const { mobile, enrollmentToken: enrollmentTokenValue } = req.body;
+    let enrollmentToken = null;
 
-    if (!enrollmentToken) {
-      return sendError(res, 400, "Valid enrollment token not found");
+    if (enrollmentTokenValue) {
+      enrollmentToken = await EnrollmentToken.findOne({
+        token: enrollmentTokenValue,
+        consumedAt: null,
+        cancelledAt: null,
+        expiresAt: { $gt: new Date() }
+      });
     }
 
-    const user = await User.findById(enrollmentToken.userId);
+    if (enrollmentToken) {
+      const user = await User.findById(enrollmentToken.userId);
 
-    if (!user || !user.isActive) {
-      return sendError(res, 400, "Active user not found");
-    }
-
-    if (user.aadhaarLinkedMobile !== req.body.aadhaarLinkedMobile) {
-      return sendError(res, 400, "Aadhaar-linked mobile does not match registered borrower mobile");
-    }
-
-    const consentVersion = await ConsentVersion.findOne({ isCurrent: true }).lean();
-
-    if (!consentVersion) {
-      return sendError(res, 400, "Active consent version not found");
-    }
-
-    const verificationSessionId = `cf_mock_${crypto.randomBytes(12).toString("hex")}`;
-    const otpHash = await bcrypt.hash(MOCK_CASHFREE_OTP, 12);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    const providerReferenceId = `cashfree_mock_ref_${crypto.randomBytes(8).toString("hex")}`;
-
-    await OtpRecord.create({
-      mobile: req.body.aadhaarLinkedMobile,
-      otpHash,
-      purpose: "aadhaar_consent",
-      verificationSessionId,
-      enrollmentTokenId: enrollmentToken._id,
-      userId: user._id,
-      providerReferenceId,
-      expiresAt,
-      providerResponse: {
-        provider: "cashfree",
-        mode: "mock",
-        status: "OTP_SENT"
+      if (!user || !user.isActive) {
+        return sendError(res, 400, "Active user not found");
       }
+
+      if (!isMobileMatch(user, mobile)) {
+        return sendError(res, 400, "Aadhaar Mobile does not match registered borrower");
+      }
+
+      if (!user.consentRecordId) {
+        const consentVersion = await ConsentVersion.findOne({ isCurrent: true }).lean();
+
+        if (!consentVersion) {
+          return sendError(res, 400, "Active consent version not found");
+        }
+
+        const otp = await sendMockOtp({
+          mobile,
+          purpose: OTP_PURPOSES.AADHAAR_CONSENT,
+          user,
+          enrollmentToken,
+          flowType: FLOW_TYPES.ONBOARDING_CONSENT
+        });
+
+        await createAuditLog({
+          eventType: AUDIT_EVENTS.CONSENT_OTP_INITIATED,
+          actorId: user._id,
+          actorCollection: "users",
+          tenantId: user.tenantId,
+          userId: user._id,
+          metadata: {
+            verificationSessionId: otp.verificationSessionId,
+            providerReferenceId: otp.providerReferenceId,
+            flowType: FLOW_TYPES.ONBOARDING_CONSENT
+          }
+        });
+
+        return sendSuccess(res, 200, "OTP sent successfully", {
+          verificationSessionId: otp.verificationSessionId,
+          otpSent: true,
+          flowType: FLOW_TYPES.ONBOARDING_CONSENT,
+          nextStep: NEXT_STEPS.VERIFY_OTP,
+          maskedMobile: maskMobile(mobile),
+          expiresInSeconds: otp.expiresInSeconds
+        });
+      }
+
+      if (!user.isDeviceLinked) {
+        const otp = await sendMockOtp({
+          mobile,
+          purpose: OTP_PURPOSES.ONBOARDING_RESUME,
+          user,
+          enrollmentToken,
+          flowType: FLOW_TYPES.ONBOARDING_RESUME
+        });
+
+        return sendSuccess(res, 200, "OTP sent successfully", {
+          verificationSessionId: otp.verificationSessionId,
+          otpSent: true,
+          flowType: FLOW_TYPES.ONBOARDING_RESUME,
+          nextStep: NEXT_STEPS.VERIFY_OTP,
+          maskedMobile: maskMobile(mobile),
+          expiresInSeconds: otp.expiresInSeconds
+        });
+      }
+    }
+
+    const user = await User.findOne({ mobile, isActive: true });
+
+    if (!user || !user.isDeviceLinked) {
+      return sendError(res, 400, "Valid enrollment token or registered linked device is required");
+    }
+
+    const otp = await sendMockOtp({
+      mobile,
+      purpose: OTP_PURPOSES.DEVICE_LOGIN,
+      user,
+      flowType: FLOW_TYPES.DEVICE_LOGIN
     });
 
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.CONSENT_OTP_INITIATED,
-      actorId: user._id,
-      actorCollection: "users",
-      tenantId: user.tenantId,
-      userId: user._id,
-      metadata: { verificationSessionId, providerReferenceId }
-    });
-
-    return sendSuccess(res, 200, "Aadhaar OTP sent successfully", {
-      verificationSessionId,
+    return sendSuccess(res, 200, "OTP sent successfully", {
+      verificationSessionId: otp.verificationSessionId,
       otpSent: true,
-      maskedMobile: `${req.body.aadhaarLinkedMobile.slice(0, 2)}****${req.body.aadhaarLinkedMobile.slice(-4)}`,
-      expiresInSeconds: 600,
-      mockOtp: MOCK_CASHFREE_OTP
+      flowType: FLOW_TYPES.DEVICE_LOGIN,
+      nextStep: NEXT_STEPS.VERIFY_OTP,
+      maskedMobile: maskMobile(mobile),
+      expiresInSeconds: otp.expiresInSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -198,59 +419,21 @@ export const initiateConsentOtp = async (req, res) => {
 };
 
 /**
- * Confirm mocked Cashfree Aadhaar OTP and create immutable consent record.
- * Sample body: { "enrollmentToken": "...", "verificationSessionId": "cf_mock_...", "otp": "123456", "consentCheckboxAccepted": true, "consentVersion": "1.0" }
+ * Verify mocked OTP and return the next app step.
+ * Sample body: { "mobile": "9876543210", "verificationSessionId": "otp_...", "otp": "123456", "enrollmentToken": "optional" }
  */
-export const confirmConsentOtp = async (req, res) => {
-  const session = await mongoose.startSession();
-
+export const verifyConsentOtp = async (req, res) => {
   try {
-    const requiredFields = [
-      "enrollmentToken",
-      "verificationSessionId",
-      "otp",
-      "consentCheckboxAccepted",
-      "consentVersion"
-    ];
-
-    if (!hasRequiredFields(req.body, requiredFields)) {
-      return sendError(res, 400, "Enrollment token, verification session, OTP, and consent confirmation are required");
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId", "otp"])) {
+      return sendError(res, 400, "Mobile, verification session, and OTP are required");
     }
 
-    if (req.body.consentCheckboxAccepted !== true) {
-      return sendError(res, 400, "Consent checkbox must be accepted");
-    }
-
-    const enrollmentToken = await EnrollmentToken.findOne({
-      token: req.body.enrollmentToken,
-      consumedAt: null,
-      cancelledAt: null,
+    const otpRecord = await OtpRecord.findOne({
+      mobile: req.body.mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      verified: false,
       expiresAt: { $gt: new Date() }
     });
-
-    if (!enrollmentToken) {
-      return sendError(res, 400, "Valid enrollment token not found");
-    }
-
-    const [user, consentVersion, otpRecord] = await Promise.all([
-      User.findById(enrollmentToken.userId),
-      ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
-      OtpRecord.findOne({
-        verificationSessionId: req.body.verificationSessionId,
-        enrollmentTokenId: enrollmentToken._id,
-        purpose: "aadhaar_consent",
-        verified: false,
-        expiresAt: { $gt: new Date() }
-      })
-    ]);
-
-    if (!user || !user.isActive) {
-      return sendError(res, 400, "Active user not found");
-    }
-
-    if (!consentVersion) {
-      return sendError(res, 400, "Current consent version does not match request");
-    }
 
     if (!otpRecord) {
       return sendError(res, 400, "Valid OTP session not found");
@@ -268,23 +451,188 @@ export const confirmConsentOtp = async (req, res) => {
       return sendError(res, 400, "Invalid OTP");
     }
 
+    const user = await User.findById(otpRecord.userId);
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    if (!isMobileMatch(user, req.body.mobile)) {
+      return sendError(res, 400, "Mobile does not match registered borrower");
+    }
+
+    if ([OTP_PURPOSES.AADHAAR_CONSENT, OTP_PURPOSES.ONBOARDING_RESUME].includes(otpRecord.purpose)) {
+      const enrollmentToken = await EnrollmentToken.findOne({
+        _id: otpRecord.enrollmentTokenId,
+        consumedAt: null,
+        cancelledAt: null,
+        expiresAt: { $gt: new Date() }
+      });
+
+      if (!enrollmentToken || enrollmentToken.token !== req.body.enrollmentToken) {
+        return sendError(res, 400, "Valid enrollment token not found");
+      }
+    }
+
     const verifiedProfile = buildMockCashfreeProfile(user);
 
-    if (normalizeName(verifiedProfile.name) !== normalizeName(user.name)) {
+    if (otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT && normalizeName(verifiedProfile.name) !== normalizeName(user.name)) {
       return sendError(res, 400, "Aadhaar name does not match registered borrower name");
     }
 
-    session.startTransaction();
-
     otpRecord.verified = true;
     otpRecord.providerResponse = {
-      provider: "cashfree",
-      mode: "mock",
+      ...(otpRecord.providerResponse || {}),
       status: "VERIFIED",
       verifiedProfile
     };
-    await otpRecord.save({ session });
+    await otpRecord.save();
 
+    const accessToken = signUserAccessToken(user);
+    const userPayload = {
+      id: user._id,
+      name: user.name,
+      mobile: user.mobile,
+      tenantId: user.tenantId,
+      consentRecordId: user.consentRecordId,
+      isDeviceLinked: user.isDeviceLinked,
+      linkedDeviceId: user.linkedDeviceId
+    };
+
+    if (otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT) {
+      return sendSuccess(res, 200, "OTP verified successfully", {
+        accessToken,
+        tokenType: "user",
+        flowType: FLOW_TYPES.ONBOARDING_CONSENT,
+        nextStep: NEXT_STEPS.SHOW_CONSENT,
+        user: userPayload
+      });
+    }
+
+    if (otpRecord.purpose === OTP_PURPOSES.ONBOARDING_RESUME) {
+      return sendSuccess(res, 200, "OTP verified successfully", {
+        accessToken,
+        tokenType: "user",
+        flowType: FLOW_TYPES.ONBOARDING_RESUME,
+        nextStep: NEXT_STEPS.REGISTER_DEVICE,
+        user: userPayload
+      });
+    }
+
+    if (otpRecord.purpose !== OTP_PURPOSES.DEVICE_LOGIN) {
+      return sendError(res, 400, "Unsupported OTP purpose");
+    }
+
+    const device = await Device.findOne({ userId: user._id });
+
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    device.lastSeenAt = new Date();
+    device.lastSyncAt = new Date();
+    device.isOnline = true;
+    await device.save();
+
+    await DeviceEvent.create({
+      deviceId: device._id,
+      userId: user._id,
+      tenantId: device.tenantId,
+      eventType: "sync",
+      payload: {
+        source: "device_login",
+        verificationSessionId: otpRecord.verificationSessionId
+      }
+    });
+
+    return sendSuccess(res, 200, "OTP verified successfully", {
+      accessToken,
+      tokenType: "user",
+      flowType: FLOW_TYPES.DEVICE_LOGIN,
+      nextStep: NEXT_STEPS.SYNC_DEVICE,
+      user: userPayload,
+      device: {
+        deviceId: device._id,
+        state: device.state,
+        currentPolicyKey: device.currentPolicyKey,
+        desiredPolicyVersion: device.desiredPolicyVersion,
+        lastAppliedPolicyVersion: device.lastAppliedPolicyVersion,
+        tempUnlockExpiresAt: device.tempUnlockExpiresAt
+      },
+      ...(await getDeviceSyncState(device))
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Accept consent after OTP verification and consent-screen display.
+ * Sample body: { "consentCheckboxAccepted": true, "consentVersion": "1.0" }
+ */
+export const acceptConsent = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!hasRequiredFields(req.body, ["consentCheckboxAccepted", "consentVersion"])) {
+      return sendError(res, 400, "Consent confirmation and consent version are required");
+    }
+
+    if (req.body.consentCheckboxAccepted !== true) {
+      return sendError(res, 400, "Consent checkbox must be accepted");
+    }
+
+    const user = await User.findById(req.auth.id);
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    if (user.consentRecordId) {
+      return sendSuccess(res, 200, "Consent already accepted", {
+        consentRecordId: user.consentRecordId,
+        consentAccepted: true,
+        accessToken: signUserAccessToken(user),
+        tokenType: "user",
+        nextStep: user.isDeviceLinked ? NEXT_STEPS.SYNC_DEVICE : NEXT_STEPS.REGISTER_DEVICE,
+        user: {
+          id: user._id,
+          name: user.name,
+          tenantId: user.tenantId,
+          consentRecordId: user.consentRecordId
+        }
+      });
+    }
+
+    const [consentVersion, otpRecord, enrollmentToken] = await Promise.all([
+      ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
+      OtpRecord.findOne({
+        userId: user._id,
+        purpose: OTP_PURPOSES.AADHAAR_CONSENT,
+        verified: true,
+        expiresAt: { $gt: new Date() }
+      }).sort({ updatedAt: -1 }),
+      EnrollmentToken.findOne({
+        userId: user._id,
+        consumedAt: null,
+        cancelledAt: null,
+        expiresAt: { $gt: new Date() }
+      }).sort({ createdAt: -1 })
+    ]);
+
+    if (!consentVersion) {
+      return sendError(res, 400, "Current consent version does not match request");
+    }
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Verified OTP session not found");
+    }
+
+    if (!enrollmentToken || !otpRecord.enrollmentTokenId?.equals(enrollmentToken._id)) {
+      return sendError(res, 400, "Valid enrollment token not found");
+    }
+
+    const verifiedProfile = otpRecord.providerResponse?.verifiedProfile || buildMockCashfreeProfile(user);
     const aadhaarVerificationRef = `cashfree_mock_verified_${crypto.randomBytes(10).toString("hex")}`;
     const consentPayload = {
       userId: user._id,
@@ -297,6 +645,8 @@ export const confirmConsentOtp = async (req, res) => {
       consentCheckboxAccepted: true,
       verifiedProfile
     };
+
+    session.startTransaction();
 
     const consentRecords = await ConsentRecord.create(
       [
@@ -314,9 +664,6 @@ export const confirmConsentOtp = async (req, res) => {
     user.aadhaarVerified = true;
     user.consentRecordId = consentRecord._id;
     await user.save({ session });
-
-    enrollmentToken.consumedAt = new Date();
-    await enrollmentToken.save({ session });
 
     await createAuditLog(
       {
@@ -336,11 +683,12 @@ export const confirmConsentOtp = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 201, "Consent confirmed successfully", {
+    return sendSuccess(res, 201, "Consent accepted successfully", {
       consentRecordId: consentRecord._id,
       consentAccepted: true,
       accessToken: signUserAccessToken(user),
       tokenType: "user",
+      nextStep: NEXT_STEPS.REGISTER_DEVICE,
       user: {
         id: user._id,
         name: user.name,
@@ -400,6 +748,18 @@ export const registerDevice = async (req, res) => {
       return sendError(res, 400, "Active EMI_PAID policy not found for tenant");
     }
 
+    const enrollmentToken = await EnrollmentToken.findOne({
+      userId: user._id,
+      tenantId: user.tenantId,
+      consumedAt: null,
+      cancelledAt: null,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!enrollmentToken) {
+      return sendError(res, 400, "Active enrollment token not found for device registration");
+    }
+
     session.startTransaction();
 
     const devices = await Device.create(
@@ -431,6 +791,9 @@ export const registerDevice = async (req, res) => {
     user.deviceLinkedAt = new Date();
     await user.save({ session });
 
+    enrollmentToken.consumedAt = new Date();
+    await enrollmentToken.save({ session });
+
     await createAuditLog(
       {
         eventType: AUDIT_EVENTS.DEVICE_REGISTERED,
@@ -439,7 +802,11 @@ export const registerDevice = async (req, res) => {
         tenantId: user.tenantId,
         userId: user._id,
         deviceId: device._id,
-        metadata: { imei: device.imei, currentPolicyKey: device.currentPolicyKey }
+        metadata: {
+          imei: device.imei,
+          currentPolicyKey: device.currentPolicyKey,
+          enrollmentTokenId: enrollmentToken._id
+        }
       },
       { session }
     );
@@ -499,6 +866,127 @@ export const getDevicePolicy = async (req, res) => {
 };
 
 /**
+ * Fetch borrower app dashboard summary.
+ * Sample request: GET /app/dashboard
+ */
+export const getAppDashboard = async (req, res) => {
+  try {
+    const user = await User.findById(req.auth.id).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const [schedule, device] = await Promise.all([
+      EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean(),
+      Device.findOne({ userId: user._id }).lean()
+    ]);
+
+    const installments = schedule?.installments || [];
+    const currentDueInstallment = getCurrentDueInstallment(installments);
+    const recentPaidInstallments = installments
+      .filter((installment) => installment.status === "paid")
+      .sort((a, b) => new Date(b.paidAt || b.dueDate || 0) - new Date(a.paidAt || a.dueDate || 0))
+      .slice(0, 5)
+      .map(buildInstallmentSummary);
+
+    const response = {
+      userDetails: buildUserDetails(user),
+      loanDetails: buildLoanDetails(user, schedule),
+      device: device
+        ? {
+            deviceId: device._id,
+            state: device.state,
+            currentPolicyKey: device.currentPolicyKey,
+            desiredPolicyVersion: device.desiredPolicyVersion,
+            lastSeenAt: device.lastSeenAt
+          }
+        : null,
+      recentActivity: {
+        paidInstallments: recentPaidInstallments
+      }
+    };
+
+    if (currentDueInstallment) {
+      response.currentEmiDue = buildInstallmentSummary(currentDueInstallment);
+    }
+
+    return sendSuccess(res, 200, "Dashboard fetched successfully", response);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch all installments for the authenticated borrower's loan.
+ * Sample request: GET /app/installments
+ */
+export const getInstallments = async (req, res) => {
+  try {
+    const user = await User.findById(req.auth.id).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
+
+    if (!schedule) {
+      return sendError(res, 404, "EMI schedule not found");
+    }
+
+    return sendSuccess(res, 200, "Installments fetched successfully", {
+      loanDetails: buildLoanDetails(user, schedule),
+      installments: [...schedule.installments]
+        .sort((a, b) => Number(a.installmentNumber || 0) - Number(b.installmentNumber || 0))
+        .map(buildInstallmentSummary)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch one borrower installment detail.
+ * Sample request: GET /app/installments/665f...
+ */
+export const getInstallmentDetail = async (req, res) => {
+  try {
+    const user = await User.findById(req.auth.id).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
+
+    if (!schedule) {
+      return sendError(res, 404, "EMI schedule not found");
+    }
+
+    const installment = schedule.installments.find(
+      (item) => item._id.toString() === req.params.installmentId
+    );
+
+    if (!installment) {
+      return sendError(res, 404, "Installment not found");
+    }
+
+    const payment = installment.paymentId
+      ? await Payment.findOne({ _id: installment.paymentId, userId: user._id }).lean()
+      : null;
+
+    return sendSuccess(res, 200, "Installment fetched successfully", {
+      installment: buildInstallmentSummary(installment),
+      loanDetails: buildLoanDetails(user, schedule),
+      payment
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Fetch active tenant QR code for borrower payment.
  * Sample request: GET /app/payment/qr
  */
@@ -539,7 +1027,8 @@ export const getPaymentQr = async (req, res) => {
 
 /**
  * Submit QR payment for tenant approval.
- * Sample body: { "qrCodeId": "665f6f0b6f0f6f0b6f0f6f0b", "amount": 3500, "reference": "UPI123456" }
+ * JSON body: { "qrCodeId": "665f6f0b6f0f6f0b6f0f6f0b", "amount": 3500, "reference": "UPI123456" }
+ * Multipart fields: qrCodeId, amount, reference, note, proofImage
  */
 export const submitPayment = async (req, res) => {
   try {
@@ -573,12 +1062,24 @@ export const submitPayment = async (req, res) => {
       return sendError(res, 409, "A payment is already pending approval for this device");
     }
 
+    const paymentId = new mongoose.Types.ObjectId();
+    const proof = req.file
+      ? await uploadPaymentProofImage({
+          file: req.file,
+          paymentId,
+          userId: req.auth.id,
+          tenantId: device.tenantId
+        })
+      : null;
+
     const payment = await Payment.create({
+      _id: paymentId,
       userId: req.auth.id,
       tenantId: device.tenantId,
       deviceId: device._id,
       amount,
       qrCodeId: activeQrCode._id,
+      proof,
       metadata: {
         reference: req.body.reference,
         note: req.body.note
@@ -598,7 +1099,8 @@ export const submitPayment = async (req, res) => {
     return sendSuccess(res, 201, "Payment submitted for tenant approval", {
       paymentId: payment._id,
       status: payment.status,
-      approvalStatus: payment.approvalStatus
+      approvalStatus: payment.approvalStatus,
+      proof: payment.proof
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -638,7 +1140,8 @@ export const getPaymentDetail = async (req, res) => {
 
 /**
  * Create borrower unlock request.
- * Sample body: { "reason": "Payment made but device is still locked", "reasonCategory": "payment_made", "details": "UPI ref UPI123456", "imageUrl": "https://..." }
+ * JSON body: { "reason": "Payment made but device is still locked", "reasonCategory": "payment_made", "details": "UPI ref UPI123456", "imageUrl": "https://..." }
+ * Multipart fields: reason, reasonCategory, details, image
  */
 export const createUnlockRequest = async (req, res) => {
   try {
@@ -664,9 +1167,18 @@ export const createUnlockRequest = async (req, res) => {
     const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId }).lean();
     const slaHours = tenantPolicy?.escalationRules?.tenantSlaHours || tenantPolicy?.escalationRules?.slaHours || 24;
     const slaDeadline = new Date(Date.now() + slaHours * 60 * 60 * 1000);
+    const caseId = createCaseId();
+    const uploadedImage = req.file
+      ? await uploadUnlockRequestImage({
+          file: req.file,
+          caseId,
+          userId: req.auth.id,
+          tenantId: device.tenantId
+        })
+      : null;
 
     const unlockRequest = await UnlockRequest.create({
-      caseId: createCaseId(),
+      caseId,
       userId: req.auth.id,
       deviceId: device._id,
       tenantId: device.tenantId,
@@ -674,7 +1186,11 @@ export const createUnlockRequest = async (req, res) => {
       reason: req.body.reason,
       reasonCategory: req.body.reasonCategory || "other",
       details: req.body.details,
-      imageUrl: req.body.imageUrl,
+      imageUrl: uploadedImage?.imageUrl || req.body.imageUrl,
+      imageStoragePath: uploadedImage?.storagePath,
+      imageMimeType: uploadedImage?.mimeType,
+      imageSize: uploadedImage?.size,
+      imageUploadedAt: uploadedImage?.uploadedAt,
       slaDeadline
     });
 
@@ -693,7 +1209,8 @@ export const createUnlockRequest = async (req, res) => {
     return sendSuccess(res, 201, "Unlock request created successfully", {
       caseId: unlockRequest.caseId,
       status: unlockRequest.status,
-      slaDeadline: unlockRequest.slaDeadline
+      slaDeadline: unlockRequest.slaDeadline,
+      imageUrl: unlockRequest.imageUrl
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -787,17 +1304,8 @@ export const syncDevice = async (req, res) => {
       payload: req.body
     });
 
-    const [policy, pendingCommands] = await Promise.all([
-      DevicePolicy.findOne({ tenantId: device.tenantId, policyKey: device.currentPolicyKey, isActive: true }).lean(),
-      DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
-    ]);
-
     return sendSuccess(res, 200, "Device sync completed", {
-      deviceState: device.state,
-      currentPolicyKey: device.currentPolicyKey,
-      desiredPolicyVersion: device.desiredPolicyVersion,
-      policy,
-      pendingCommands
+      ...(await getDeviceSyncState(device))
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

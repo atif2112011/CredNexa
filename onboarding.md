@@ -28,9 +28,10 @@ https://api.emishield.in/api/v1
 | View device inventory | `GET /distributor/devices` | `tenant_admin` access token | Implemented |
 | View device detail | `GET /distributor/devices/:id` | `tenant_admin` access token | Implemented |
 | Regenerate enrollment QR | `POST /distributor/enrollment/:token/regenerate` | `tenant_admin` access token | Implemented |
+| Initiate onboarding/login OTP | `POST /app/consent/initiate` | Public | Implemented with mock OTP flow |
+| Verify onboarding/login OTP | `POST /app/consent/verify-otp` | Public | Implemented with mock OTP flow |
 | Fetch consent terms | `GET /app/consent/terms` | Public | Implemented |
-| Initiate Aadhaar OTP | `POST /app/consent/initiate` | Public | Implemented with mock Cashfree flow |
-| Confirm Aadhaar OTP | `POST /app/consent/confirm` | Public | Implemented with mock Cashfree flow |
+| Accept consent | `POST /app/consent/accept` | Borrower user access token | Implemented |
 | Register device | `POST /app/device/register` | Borrower user access token | Implemented |
 | Fetch device policy | `GET /app/device/policy` | Borrower user access token | Implemented |
 | Device ping | `POST /app/device/ping` | Borrower user access token | Implemented |
@@ -67,9 +68,12 @@ There is no `tenant_staff` role in the current flow.
 2. The account refresh token is stored only as an HTTP-only cookie.
 3. The QR payload contains only an opaque `enrollmentToken`.
 4. The QR payload must not contain `userId`, `tenantId`, loan data, or EMI details.
-5. The borrower access token is issued only after consent OTP confirmation.
-6. The borrower access token is used for device registration and device policy fetch.
-7. Tenant and device policies are created for every tenant from centralized constants during tenant creation.
+5. The mock OTP value is always `123456`, but `/app/consent/initiate` does not return it.
+6. The borrower access token is issued after OTP verification.
+7. Device registration is blocked until consent has been accepted.
+8. The enrollment token is consumed only after successful device registration.
+9. The borrower access token is used for consent acceptance, device registration, and device policy fetch.
+10. Tenant and device policies are created for every tenant from centralized constants during tenant creation.
 
 ---
 
@@ -259,9 +263,137 @@ No borrower, tenant, or loan identifiers are exposed in the QR.
 
 ---
 
-## Step 6 - Fetch Consent Terms
+## Step 6 - Initiate Mock OTP
 
-The Shield App fetches the current consent version before OTP.
+After QR provisioning, the Shield App asks for the borrower's mobile number and starts the OTP flow. The app can send the QR-provided `enrollmentToken` when it has one.
+
+```http
+POST /api/v1/app/consent/initiate
+Content-Type: application/json
+
+{
+  "enrollmentToken": "<enrollmentToken>",
+  "mobile": "9876543210"
+}
+```
+
+Backend actions:
+
+1. Checks whether the enrollment token is valid and still unconsumed.
+2. If the token is valid and the user has no consent, starts `ONBOARDING_CONSENT`.
+3. If the token is valid, consent exists, and no device is linked, starts `ONBOARDING_RESUME`.
+4. If the token is absent/invalid, but the mobile belongs to a user with a linked device, starts `DEVICE_LOGIN`.
+5. Creates an `otpRecords` document using the mock OTP `123456`.
+6. Writes an audit log for the new onboarding consent branch.
+
+Response does not include the OTP:
+
+```json
+{
+  "verificationSessionId": "otp_...",
+  "otpSent": true,
+  "flowType": "ONBOARDING_CONSENT",
+  "nextStep": "VERIFY_OTP",
+  "maskedMobile": "98****3210",
+  "expiresInSeconds": 600
+}
+```
+
+For testing, use:
+
+```text
+123456
+```
+
+---
+
+## Step 7 - Verify Mock OTP
+
+```http
+POST /api/v1/app/consent/verify-otp
+Content-Type: application/json
+
+{
+  "enrollmentToken": "<enrollmentToken>",
+  "mobile": "9876543210",
+  "verificationSessionId": "otp_...",
+  "otp": "123456"
+}
+```
+
+Backend actions:
+
+1. Validates the OTP session and attempt count.
+2. Verifies the mock OTP.
+3. For onboarding branches, confirms the enrollment token is still valid.
+4. For `ONBOARDING_CONSENT`, verifies the mock Aadhaar profile and returns `nextStep: "SHOW_CONSENT"`.
+5. For `ONBOARDING_RESUME`, returns `nextStep: "REGISTER_DEVICE"`.
+6. For `DEVICE_LOGIN`, returns the same kind of state/policy/command payload as device sync and `nextStep: "SYNC_DEVICE"`.
+
+New onboarding response:
+
+```json
+{
+  "accessToken": "<borrowerUserAccessToken>",
+  "tokenType": "user",
+  "flowType": "ONBOARDING_CONSENT",
+  "nextStep": "SHOW_CONSENT",
+  "user": {
+    "id": "<userId>",
+    "name": "Ramesh Kumar",
+    "mobile": "9876543210",
+    "tenantId": "<tenantId>",
+    "consentRecordId": null,
+    "isDeviceLinked": false,
+    "linkedDeviceId": null
+  }
+}
+```
+
+Returning linked-device response:
+
+```json
+{
+  "accessToken": "<borrowerUserAccessToken>",
+  "tokenType": "user",
+  "flowType": "DEVICE_LOGIN",
+  "nextStep": "SYNC_DEVICE",
+  "user": {
+    "id": "<userId>",
+    "name": "Ramesh Kumar",
+    "mobile": "9876543210",
+    "tenantId": "<tenantId>",
+    "consentRecordId": "<consentRecordId>",
+    "isDeviceLinked": true,
+    "linkedDeviceId": "<deviceId>"
+  },
+  "device": {
+    "deviceId": "<deviceId>",
+    "state": "LOCKED",
+    "currentPolicyKey": "EMI_LOCKED",
+    "desiredPolicyVersion": 4,
+    "lastAppliedPolicyVersion": 3,
+    "tempUnlockExpiresAt": null
+  },
+  "deviceState": "LOCKED",
+  "currentPolicyKey": "EMI_LOCKED",
+  "desiredPolicyVersion": 4,
+  "policy": {},
+  "pendingCommands": []
+}
+```
+
+Important:
+
+- `/app/consent/initiate` does not return the mock OTP.
+- For local testing, the mock OTP is always `123456`.
+- A borrower token returned before consent cannot register a device until consent is accepted.
+
+---
+
+## Step 8 - Fetch Consent Terms
+
+The Shield App fetches the current consent version after OTP verification returns `nextStep: "SHOW_CONSENT"`.
 
 ```http
 GET /api/v1/app/consent/terms
@@ -275,62 +407,20 @@ Expected result:
 - Privacy policy text.
 - Tripartite acknowledgement text.
 
-The borrower must accept the consent checkbox before OTP confirmation.
+The borrower must accept the consent checkbox before device registration.
 
 ---
 
-## Step 7 - Initiate Mock Cashfree Aadhaar OTP
+## Step 9 - Accept Consent
+
+Use the borrower user access token from OTP verification.
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/v1/app/consent/accept
+Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
 {
-  "enrollmentToken": "<enrollmentToken>",
-  "aadhaarLinkedMobile": "9876543210"
-}
-```
-
-Backend actions:
-
-1. Validates token exists.
-2. Rejects expired, consumed, or cancelled tokens.
-3. Loads the borrower from the token.
-4. Confirms `aadhaarLinkedMobile` matches the registered borrower.
-5. Confirms an active consent version exists.
-6. Creates an `otpRecords` document.
-7. Writes an audit log.
-
-Current simulation response includes the mock OTP:
-
-```json
-{
-  "verificationSessionId": "cf_mock_...",
-  "otpSent": true,
-  "maskedMobile": "98****3210",
-  "expiresInSeconds": 600,
-  "mockOtp": "123456"
-}
-```
-
-For testing, use:
-
-```text
-123456
-```
-
----
-
-## Step 8 - Confirm Consent OTP
-
-```http
-POST /api/v1/app/consent/confirm
-Content-Type: application/json
-
-{
-  "enrollmentToken": "<enrollmentToken>",
-  "verificationSessionId": "cf_mock_...",
-  "otp": "123456",
   "consentCheckboxAccepted": true,
   "consentVersion": "1.0"
 }
@@ -338,18 +428,15 @@ Content-Type: application/json
 
 Backend actions:
 
-1. Validates token exists.
-2. Rejects expired, consumed, or cancelled tokens.
-3. Validates OTP session.
-4. Verifies mock OTP.
-5. Builds a mock Cashfree Aadhaar profile.
-6. Compares Aadhaar profile name with borrower name.
-7. Creates a `consentRecords` document.
-8. Marks the borrower as Aadhaar verified.
-9. Saves `consentRecordId` on the user.
-10. Marks the enrollment token as consumed.
-11. Writes an audit log.
-12. Issues a borrower user access token.
+1. Validates borrower user JWT.
+2. Confirms a verified onboarding consent OTP session exists.
+3. Confirms the enrollment token is still valid and unconsumed.
+4. Creates a `consentRecords` document.
+5. Marks the borrower as Aadhaar verified.
+6. Saves `consentRecordId` on the user.
+7. Writes an audit log.
+8. Issues a borrower user access token.
+9. Does not consume the enrollment token.
 
 Expected response:
 
@@ -359,6 +446,7 @@ Expected response:
   "consentAccepted": true,
   "accessToken": "<borrowerUserAccessToken>",
   "tokenType": "user",
+  "nextStep": "REGISTER_DEVICE",
   "user": {
     "id": "<userId>",
     "name": "Ramesh Kumar",
@@ -372,8 +460,9 @@ Important:
 
 - The current borrower flow returns an access token.
 - It does not return a borrower refresh token in the tested implementation.
+- The enrollment token remains usable for recovery until device registration succeeds.
 
-Enrollment status after consent confirmation, before device registration:
+Enrollment status after consent acceptance, before device registration:
 
 ```text
 CONSENT_COMPLETED
@@ -381,9 +470,9 @@ CONSENT_COMPLETED
 
 ---
 
-## Step 9 - Register Device
+## Step 10 - Register Device
 
-Use the borrower user access token from consent confirmation.
+Use the borrower user access token from consent acceptance.
 
 ```http
 POST /api/v1/app/device/register
@@ -411,7 +500,8 @@ Backend actions:
 6. Creates a `devices` document.
 7. Sets device state to `ACTIVE`.
 8. Sets `currentPolicyKey` to `EMI_PAID`.
-9. Writes an audit log.
+9. Marks the enrollment token as consumed.
+10. Writes an audit log.
 
 Expected response:
 
@@ -445,7 +535,7 @@ ACTIVATION_COMPLETE
 
 ---
 
-## Step 10 - Fetch Current Device Policy
+## Step 11 - Fetch Current Device Policy
 
 ```http
 GET /api/v1/app/device/policy
@@ -479,7 +569,7 @@ Shield App action:
 
 ---
 
-## Step 10A - Device Ping
+## Step 11A - Device Ping
 
 ```http
 POST /api/v1/app/device/ping
@@ -502,7 +592,7 @@ Backend actions:
 
 ---
 
-## Step 10B - Device Sync
+## Step 11B - Device Sync
 
 ```http
 POST /api/v1/app/device/sync
@@ -524,7 +614,7 @@ Backend actions:
 
 ---
 
-## Step 10C - Command Acknowledgement
+## Step 11C - Command Acknowledgement
 
 After the app applies a command locally:
 
@@ -548,7 +638,7 @@ Backend actions:
 
 ---
 
-## Step 10D - Security Event
+## Step 11D - Security Event
 
 ```http
 POST /api/v1/app/security/event
@@ -573,7 +663,7 @@ Backend actions:
 
 ---
 
-## Step 11 - Verify From Tenant App
+## Step 12 - Verify From Tenant App
 
 ### Track enrollment status
 
@@ -683,7 +773,7 @@ The old token status becomes:
 TOKEN_CANCELLED
 ```
 
-Use the new token for consent initiation and confirmation.
+Use the new token for OTP initiation, OTP verification, consent acceptance, and device registration.
 
 ---
 
@@ -745,7 +835,7 @@ In this implementation:
 
 - Account access token is a JWT.
 - Account refresh token is stored as an HTTP-only cookie.
-- Borrower user access token is issued after consent confirmation.
+- Borrower user access token is issued after OTP verification and refreshed again after consent acceptance.
 
 ---
 
@@ -756,16 +846,17 @@ In this implementation:
 3. Register borrower.
 4. Generate QR and confirm `qrCodeDataUrl` is returned.
 5. Check enrollment status is `QR_GENERATED`.
-6. Fetch consent terms.
-7. Initiate consent OTP with Aadhaar-linked mobile.
-8. Confirm consent OTP with `123456`.
-9. Save borrower user access token.
-10. Register device.
-11. Fetch device policy.
-12. Check enrollment status is `ACTIVATION_COMPLETE`.
-13. View borrower detail.
-14. View device detail.
-15. Recheck dashboard counts.
+6. Initiate OTP with mobile and enrollment token.
+7. Verify OTP with `123456`.
+8. Fetch consent terms after `nextStep: "SHOW_CONSENT"`.
+9. Accept consent.
+10. Save borrower user access token.
+11. Register device.
+12. Fetch device policy.
+13. Check enrollment status is `ACTIVATION_COMPLETE`.
+14. View borrower detail.
+15. View device detail.
+16. Recheck dashboard counts.
 
 ---
 

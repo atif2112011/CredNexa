@@ -58,6 +58,18 @@ const unlockRequestSchema = new mongoose.Schema(
     imageUrl: {
       type: String
     },
+    imageStoragePath: {
+      type: String
+    },
+    imageMimeType: {
+      type: String
+    },
+    imageSize: {
+      type: Number
+    },
+    imageUploadedAt: {
+      type: Date
+    },
     slaDeadline: {
       type: Date
     },

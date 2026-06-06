@@ -69,6 +69,14 @@ const paymentSchema = new mongoose.Schema(
         amountApplied: Number
       }
     ],
+    proof: {
+      imageUrl: String,
+      storagePath: String,
+      mimeType: String,
+      originalName: String,
+      size: Number,
+      uploadedAt: Date
+    },
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {}
