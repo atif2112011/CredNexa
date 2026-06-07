@@ -248,9 +248,9 @@ const getDeviceSyncState = async (device) => {
  */
 export const generateTestUserAccessToken = async (req, res) => {
   try {
-    if (env.nodeEnv === "production") {
-      return sendError(res, 404, "Route not found");
-    }
+    // if (env.nodeEnv === "production") {
+    //   return sendError(res, 404, "Route not found");
+    // }
 
     const { userId, mobile, loanId } = req.body;
 
