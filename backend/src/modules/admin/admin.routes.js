@@ -30,6 +30,7 @@ import {
   listTenants,
   publishConsentVersion,
   rejectAdminEscalation,
+  sendCustomNotification,
   tempUnlockAdminEscalation,
   tempUnlockAdminDevice,
   unlockAdminEscalation,
@@ -92,6 +93,8 @@ adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 adminRoutes.get("/risk-flags", getAdminRiskFlags);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
 adminRoutes.get("/audit-logs", getAuditLogs);
+
+adminRoutes.post("/notifications/custom", sendCustomNotification);
 
 adminRoutes.post("/provisioning-details", upsertProvisioningDetails);
 adminRoutes.get("/provisioning-details", getProvisioningDetails);

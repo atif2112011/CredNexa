@@ -22,6 +22,7 @@ import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
+import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
 
 const getPagination = (query) => {
   const page = Math.max(Number(query.page || 1), 1);
@@ -1741,6 +1742,119 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
     session.endSession();
+  }
+};
+
+/**
+ * Send a custom notification to one borrower, one tenant, or all registered devices.
+ * Sample body: { "title": "Payment reminder", "text": "Your EMI is due soon", "userId": "optional", "tenantId": "optional" }
+ */
+export const sendCustomNotification = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["title", "text"])) {
+      return sendError(res, 400, "Title and text are required");
+    }
+
+    const title = String(req.body.title).trim();
+    const text = String(req.body.text).trim();
+
+    if (!title || !text) {
+      return sendError(res, 400, "Title and text cannot be empty");
+    }
+
+    if (title.length > 120) {
+      return sendError(res, 400, "Title must be 120 characters or fewer");
+    }
+
+    if (text.length > 1000) {
+      return sendError(res, 400, "Text must be 1000 characters or fewer");
+    }
+
+    const deviceFilter = {
+      fcmToken: { $exists: true, $ne: "" }
+    };
+    let scope = "all";
+
+    if (req.body.userId) {
+      if (!isValidObjectId(req.body.userId)) {
+        return sendError(res, 400, "Invalid user ID");
+      }
+
+      const user = await User.findOne({ _id: req.body.userId, isActive: true }).lean();
+      if (!user) {
+        return sendError(res, 404, "Active user not found");
+      }
+
+      deviceFilter.userId = user._id;
+      scope = "user";
+    } else if (req.body.tenantId) {
+      if (!isValidObjectId(req.body.tenantId)) {
+        return sendError(res, 400, "Invalid tenant ID");
+      }
+
+      const tenant = await Tenant.findById(req.body.tenantId).lean();
+      if (!tenant) {
+        return sendError(res, 404, "Tenant not found");
+      }
+
+      const activeUsers = await User.find({ tenantId: tenant._id, isActive: true }).select("_id").lean();
+      deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
+      deviceFilter.tenantId = tenant._id;
+      scope = "tenant";
+    } else {
+      const activeUsers = await User.find({ isActive: true }).select("_id").lean();
+      deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
+    }
+
+    const devices = await Device.find(deviceFilter).select("_id tenantId userId fcmToken").lean();
+
+    if (!devices.length) {
+      return sendError(res, 404, "No registered devices with FCM tokens found for this notification target");
+    }
+
+    const commands = await DeviceCommand.create(
+      devices.map((device) => ({
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        commandType: "NOTIFICATION",
+        triggeredBy: "super_admin",
+        triggeredByAccountId: req.auth.id,
+        payload: {
+          title,
+          text,
+          scope,
+          userId: req.body.userId,
+          tenantId: req.body.tenantId
+        }
+      }))
+    );
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
+      actorId: req.auth.id,
+      actorCollection: "accounts",
+      tenantId: scope === "tenant" ? req.body.tenantId : undefined,
+      userId: scope === "user" ? req.body.userId : undefined,
+      metadata: {
+        scope,
+        title,
+        targetDeviceCount: devices.length,
+        commandIds: commands.map((command) => command._id)
+      }
+    });
+
+    const commandIds = commands.map((command) => command._id);
+    const deliveryResults = await runFcmDeliveryBatch({ limit: commands.length, commandIds });
+
+    return sendSuccess(res, 201, "Custom notification queued successfully", {
+      scope,
+      targetDeviceCount: devices.length,
+      queuedCommandCount: commands.length,
+      deliveryAttempted: true,
+      deliveryResults
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
   }
 };
 

@@ -5,16 +5,40 @@ import { FcmDeliveryLog } from "../models/FcmDeliveryLog.js";
 
 let firebaseApp;
 
+const buildServiceAccountFromEnv = () => {
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  if (!projectId || !clientEmail || !privateKey) {
+    return null;
+  }
+
+  return {
+    project_id: projectId,
+    client_email: clientEmail,
+    private_key: privateKey
+  };
+};
+
 const loadFirebaseAdmin = async () => {
   if (process.env.FCM_MOCK_MODE !== "false") return null;
   if (firebaseApp) return firebaseApp;
 
   const admin = await import("firebase-admin");
   const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const serviceAccount = buildServiceAccountFromEnv();
 
   if (serviceAccountJson) {
     firebaseApp = admin.default.initializeApp({
       credential: admin.default.credential.cert(JSON.parse(serviceAccountJson))
+    });
+    return firebaseApp;
+  }
+
+  if (serviceAccount) {
+    firebaseApp = admin.default.initializeApp({
+      credential: admin.default.credential.cert(serviceAccount)
     });
     return firebaseApp;
   }
@@ -30,6 +54,29 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
     commandId: command._id.toString(),
     commandType: command.commandType
   };
+
+  if (command.commandType === "NOTIFICATION") {
+    return {
+      token: device.fcmToken,
+      notification: {
+        title: String(command.payload?.title || ""),
+        body: String(command.payload?.text || "")
+      },
+      data: {
+        ...baseData,
+        type: "NOTIFICATION",
+        notificationType: "CUSTOM",
+        title: String(command.payload?.title || ""),
+        text: String(command.payload?.text || "")
+      },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "custom_notifications"
+        }
+      }
+    };
+  }
 
   if (command.commandType === "UPCOMING_PAYMENT") {
     return {
@@ -62,14 +109,20 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
   };
 };
 
-export const runFcmDeliveryBatch = async ({ limit = 50 } = {}) => {
+export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   await connectDatabase();
 
-  const commands = await DeviceCommand.find({
+  const commandFilter = {
     status: { $in: ["pending", "failed"] },
     retryCount: { $lt: 5 },
     $or: [{ nextRetryAt: { $exists: false } }, { nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }]
-  })
+  };
+
+  if (commandIds?.length) {
+    commandFilter._id = { $in: commandIds };
+  }
+
+  const commands = await DeviceCommand.find(commandFilter)
     .sort({ createdAt: 1 })
     .limit(limit);
 
@@ -89,6 +142,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50 } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         status: "skipped",
+        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
         error: command.failureReason
       });
       results.push({ commandId: command._id, status: "skipped" });
@@ -113,6 +167,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50 } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
+        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
         status: "sent",
         providerMessageId,
         metadata: { mockMode: !firebase }
@@ -129,6 +184,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50 } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
+        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
         status: "failed",
         error: error.message
       });
