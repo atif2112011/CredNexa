@@ -17,5 +17,5 @@ const startServer = async () => {
   }
 };
 
-if(env.vercelDeploy === "false")
+if(env.vercelDeploy === false)
 startServer();

@@ -21,7 +21,7 @@ export const env = {
   refreshCookieName: process.env.REFRESH_COOKIE_NAME || "refreshToken",
   cookieSecure: process.env.COOKIE_SECURE === "true",
   corsOrigin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : ["http://localhost:3000"],
-  vercelDeploy: process.env.VERCEL === "true" || "false",
+  vercelDeploy: process.env.VERCEL === "true",
   // Firebase configuration
   firebaseApiKey: process.env.FIREBASE_API_KEY,
   firebaseAuthDomain: process.env.FIREBASE_AUTH_DOMAIN,

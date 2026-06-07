@@ -1750,6 +1750,8 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
  * Sample body: { "title": "Payment reminder", "text": "Your EMI is due soon", "userId": "optional", "tenantId": "optional" }
  */
 export const sendCustomNotification = async (req, res) => {
+  const notificationRequestId = `custom_notification_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
   try {
     if (!hasRequiredFields(req.body, ["title", "text"])) {
       return sendError(res, 400, "Title and text are required");
@@ -1770,10 +1772,20 @@ export const sendCustomNotification = async (req, res) => {
       return sendError(res, 400, "Text must be 1000 characters or fewer");
     }
 
+    console.info("Custom notification request received", {
+      notificationRequestId,
+      actorId: req.auth.id,
+      hasUserId: Boolean(req.body.userId),
+      hasTenantId: Boolean(req.body.tenantId),
+      titleLength: title.length,
+      textLength: text.length
+    });
+
     const deviceFilter = {
       fcmToken: { $exists: true, $ne: "" }
     };
     let scope = "all";
+    let activeUserCount;
 
     if (req.body.userId) {
       if (!isValidObjectId(req.body.userId)) {
@@ -1787,6 +1799,14 @@ export const sendCustomNotification = async (req, res) => {
 
       deviceFilter.userId = user._id;
       scope = "user";
+      activeUserCount = 1;
+
+      console.info("Custom notification user target resolved", {
+        notificationRequestId,
+        scope,
+        userId: String(user._id),
+        tenantId: user.tenantId ? String(user.tenantId) : undefined
+      });
     } else if (req.body.tenantId) {
       if (!isValidObjectId(req.body.tenantId)) {
         return sendError(res, 400, "Invalid tenant ID");
@@ -1798,19 +1818,53 @@ export const sendCustomNotification = async (req, res) => {
       }
 
       const activeUsers = await User.find({ tenantId: tenant._id, isActive: true }).select("_id").lean();
+      activeUserCount = activeUsers.length;
       deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
       deviceFilter.tenantId = tenant._id;
       scope = "tenant";
+
+      console.info("Custom notification tenant target resolved", {
+        notificationRequestId,
+        scope,
+        tenantId: String(tenant._id),
+        activeUserCount
+      });
     } else {
       const activeUsers = await User.find({ isActive: true }).select("_id").lean();
+      activeUserCount = activeUsers.length;
       deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
+
+      console.info("Custom notification all-users target resolved", {
+        notificationRequestId,
+        scope,
+        activeUserCount
+      });
     }
 
     const devices = await Device.find(deviceFilter).select("_id tenantId userId fcmToken").lean();
 
     if (!devices.length) {
+      console.warn("Custom notification has no target devices with FCM tokens", {
+        notificationRequestId,
+        scope,
+        userId: req.body.userId,
+        tenantId: req.body.tenantId,
+        activeUserCount
+      });
+
       return sendError(res, 404, "No registered devices with FCM tokens found for this notification target");
     }
+
+    console.info("Custom notification target devices resolved", {
+      notificationRequestId,
+      scope,
+      activeUserCount,
+      targetDeviceCount: devices.length,
+      deviceIds: devices.map((device) => String(device._id)),
+      userIds: [...new Set(devices.map((device) => String(device.userId)))],
+      tenantIds: [...new Set(devices.map((device) => String(device.tenantId)))],
+      devicesWithFcmToken: devices.filter((device) => Boolean(device.fcmToken)).length
+    });
 
     const commands = await DeviceCommand.create(
       devices.map((device) => ({
@@ -1829,6 +1883,15 @@ export const sendCustomNotification = async (req, res) => {
       }))
     );
 
+    const commandIds = commands.map((command) => command._id);
+
+    console.info("Custom notification commands queued", {
+      notificationRequestId,
+      scope,
+      commandCount: commands.length,
+      commandIds: commandIds.map((commandId) => String(commandId))
+    });
+
     await createAuditLog({
       eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
       actorId: req.auth.id,
@@ -1839,21 +1902,51 @@ export const sendCustomNotification = async (req, res) => {
         scope,
         title,
         targetDeviceCount: devices.length,
-        commandIds: commands.map((command) => command._id)
+        commandIds
       }
     });
 
-    const commandIds = commands.map((command) => command._id);
     const deliveryResults = await runFcmDeliveryBatch({ limit: commands.length, commandIds });
+    const deliverySummary = deliveryResults.reduce(
+      (summary, result) => {
+        const status = result.status || "unknown";
+        summary[status] = (summary[status] || 0) + 1;
+        return summary;
+      },
+      {}
+    );
+
+    console.info("Custom notification delivery attempted", {
+      notificationRequestId,
+      scope,
+      commandCount: commands.length,
+      deliverySummary,
+      deliveryResults: deliveryResults.map((result) => ({
+        commandId: result.commandId ? String(result.commandId) : undefined,
+        status: result.status,
+        providerMessageId: result.providerMessageId,
+        error: result.error
+      }))
+    });
 
     return sendSuccess(res, 201, "Custom notification queued successfully", {
       scope,
       targetDeviceCount: devices.length,
       queuedCommandCount: commands.length,
       deliveryAttempted: true,
+      deliverySummary,
       deliveryResults
     });
   } catch (error) {
+    console.error("Custom notification failed", {
+      notificationRequestId,
+      actorId: req.auth?.id,
+      userId: req.body?.userId,
+      tenantId: req.body?.tenantId,
+      message: error.message,
+      stack: error.stack
+    });
+
     return sendError(res, 500, error.message || "Internal server error");
   }
 };
