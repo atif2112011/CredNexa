@@ -277,8 +277,13 @@ export const registerBorrower = async (req, res) => {
       return sendError(res, 400, "EMI amount must be greater than 0");
     }
 
-    if(new Date(req.body.disbursementDate) < new Date()) {
-      return sendError(res, 400, "Disbursement date cannot be in the past");
+    const disbursementDate = new Date(req.body.disbursementDate);
+    const previousDayStart = new Date();
+    previousDayStart.setHours(0, 0, 0, 0);
+    previousDayStart.setDate(previousDayStart.getDate() - 1);
+
+    if (disbursementDate < previousDayStart) {
+      return sendError(res, 400, "Disbursement date cannot be earlier than previous day");
     }
     if(req.body.tenureMonths*req.body.emiAmount < req.body.loanAmount) {
       return sendError(res, 400, "Total EMI amount cannot be less than loan amount");
