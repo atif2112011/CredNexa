@@ -7,6 +7,10 @@ export const sendSuccess = (res, statusCode, message, data = null) => {
 };
 
 export const sendError = (res, statusCode, error) => {
+  console.error("API Error", {
+    statusCode,
+    error
+  });
   return res.status(statusCode).json({
     success: false,
     error

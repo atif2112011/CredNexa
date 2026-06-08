@@ -16,6 +16,28 @@ const createAuditLog = async (payload) => AuditLog.create(payload);
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
+// Intended production intervals:
+// - FCM delivery: every 5 minutes, so queued admin/policy commands do not wait on EMI scans.
+// - Temp unlock expiry: every 10 minutes, so expired temporary unlocks are relocked promptly.
+// - SLA escalation: every 30 minutes, because SLA windows are hour-based.
+// - EMI policy: every 30 minutes, because reminders and lock thresholds are day-based.
+export const SCHEDULED_JOB_INTERVALS = Object.freeze({
+  fcmDeliveryMs: 5 * 60 * 1000,
+  tempUnlockExpiryMs: 10 * 60 * 1000,
+  slaEscalationMs: 30 * 60 * 1000,
+  emiPolicyMs: 30 * 60 * 1000
+});
+
+export const SCHEDULED_JOB_LIMITS = Object.freeze({
+  fcmDelivery: 100,
+  tempUnlockExpiry: 200,
+  slaEscalation: 200,
+  emiPolicy: 500
+});
+
+let scheduledJobTimers = [];
+const runningTimedJobs = new Set();
+
 const EMI_CRON_CONFIG = Object.freeze({
   upcomingPaymentNotifications: {
     10: {
@@ -48,7 +70,55 @@ const getInstallmentOutstanding = (installment) => {
 
 const isInstallmentUnpaid = (installment) => ["pending", "overdue", "partial"].includes(installment.status);
 
-export const runSlaEscalationJob = async () => {
+const logJobStart = (jobName) => {
+  const startedAt = new Date();
+  console.info(`${jobName} started`, { jobName, startedAt: startedAt.toISOString() });
+  return startedAt;
+};
+
+const logJobFinish = (jobName, startedAt, result) => {
+  const finishedAt = new Date();
+  console.info(`${jobName} finished`, {
+    jobName,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    result
+  });
+};
+
+const logJobFailure = (jobName, startedAt, error) => {
+  const finishedAt = new Date();
+  console.error(`${jobName} failed`, {
+    jobName,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    message: error.message,
+    stack: error.stack
+  });
+};
+
+const runTimedJob = async (jobName, jobFn) => {
+  if (runningTimedJobs.has(jobName)) {
+    console.warn(`${jobName} skipped because previous run is still active`, { jobName });
+    return;
+  }
+
+  runningTimedJobs.add(jobName);
+  const startedAt = logJobStart(jobName);
+
+  try {
+    const result = await jobFn();
+    logJobFinish(jobName, startedAt, result);
+  } catch (error) {
+    logJobFailure(jobName, startedAt, error);
+  } finally {
+    runningTimedJobs.delete(jobName);
+  }
+};
+
+export const runSlaEscalationJob = async ({ limit = SCHEDULED_JOB_LIMITS.slaEscalation } = {}) => {
   await connectDatabase();
   const now = new Date();
   const escalated = [];
@@ -56,7 +126,7 @@ export const runSlaEscalationJob = async () => {
   const tenantBreaches = await UnlockRequest.find({
     status: "PENDING_TENANT",
     slaDeadline: { $lte: now }
-  });
+  }).limit(limit);
 
   for (const unlockRequest of tenantBreaches) {
     const tenantPolicy = await TenantPolicy.findOne({ tenantId: unlockRequest.tenantId }).lean();
@@ -96,7 +166,7 @@ export const runSlaEscalationJob = async () => {
   const partnerBreaches = await UnlockRequest.find({
     status: "ESCALATED_PARTNER",
     partnerSlaDeadline: { $lte: now }
-  });
+  }).limit(limit);
 
   for (const unlockRequest of partnerBreaches) {
     unlockRequest.status = "ESCALATED_ADMIN";
@@ -132,13 +202,13 @@ export const runSlaEscalationJob = async () => {
   return escalated;
 };
 
-export const runTempUnlockExpiryJob = async () => {
+export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.tempUnlockExpiry } = {}) => {
   await connectDatabase();
   const now = new Date();
   const devices = await Device.find({
     state: DEVICE_STATES.TEMP_UNLOCK,
     tempUnlockExpiresAt: { $lte: now }
-  });
+  }).limit(limit);
   const relocked = [];
 
   for (const device of devices) {
@@ -186,14 +256,23 @@ export const runTempUnlockExpiryJob = async () => {
   return relocked;
 };
 
-export const runEmiPolicyJob = async () => {
+export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy } = {}) => {
   await connectDatabase();
   const now = new Date();
+  const reminderDays = Object.keys(EMI_CRON_CONFIG.upcomingPaymentNotifications).map(Number);
+  const maxReminderDays = Math.max(...reminderDays);
+  const queryDueDate = addDays(now, maxReminderDays);
   const schedules = await EmiSchedule.find({
-    "installments.status": { $in: ["pending", "overdue", "partial"] }
-  });
+    installments: {
+      $elemMatch: {
+        status: { $in: ["pending", "overdue", "partial"] },
+        dueDate: { $lte: queryDueDate }
+      }
+    }
+  }).limit(limit);
 
   const result = {
+    scannedSchedules: schedules.length,
     remindersQueued: [],
     devicesLocked: [],
     skippedTempUnlock: [],
@@ -318,23 +397,41 @@ export const runEmiPolicyJob = async () => {
 
     if (existingLockCommand) continue;
 
-    const nextPolicyVersion = Number(device.desiredPolicyVersion || 0) + 1;
-    device.state = DEVICE_STATES.LOCKED;
-    device.currentPolicyKey = DEVICE_POLICY_KEYS.EMI_LOCKED;
-    device.currentPolicyId = policy._id;
-    device.desiredPolicyVersion = nextPolicyVersion;
-    device.stateUpdatedAt = now;
-    device.tempUnlockExpiresAt = undefined;
-    await device.save();
+    const lockedDevice = await Device.findOneAndUpdate(
+      {
+        _id: device._id,
+        state: { $ne: DEVICE_STATES.LOCKED },
+        $or: [
+          { state: { $ne: DEVICE_STATES.TEMP_UNLOCK } },
+          { tempUnlockExpiresAt: { $lte: now } },
+          { tempUnlockExpiresAt: null }
+        ]
+      },
+      {
+        $set: {
+          state: DEVICE_STATES.LOCKED,
+          currentPolicyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+          currentPolicyId: policy._id,
+          stateUpdatedAt: now
+        },
+        $inc: { desiredPolicyVersion: 1 },
+        $unset: { tempUnlockExpiresAt: "" }
+      },
+      { new: true }
+    );
+
+    if (!lockedDevice) {
+      continue;
+    }
 
     const command = await DeviceCommand.create({
-      deviceId: device._id,
-      tenantId: device.tenantId,
+      deviceId: lockedDevice._id,
+      tenantId: lockedDevice.tenantId,
       commandType: "LOCK",
       triggeredBy: "auto_policy",
       payload: {
         policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-        policyVersion: nextPolicyVersion,
+        policyVersion: lockedDevice.desiredPolicyVersion,
         reason: EMI_CRON_CONFIG.lockReason,
         installmentId: lockableInstallment._id.toString(),
         installmentNumber: lockableInstallment.installmentNumber,
@@ -347,9 +444,9 @@ export const runEmiPolicyJob = async () => {
     await createAuditLog({
       eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
       actorCollection: "system",
-      tenantId: device.tenantId,
-      userId: device.userId,
-      deviceId: device._id,
+      tenantId: lockedDevice.tenantId,
+      userId: lockedDevice.userId,
+      deviceId: lockedDevice._id,
       reason: EMI_CRON_CONFIG.lockReason,
       metadata: {
         commandId: command._id,
@@ -361,7 +458,7 @@ export const runEmiPolicyJob = async () => {
     });
 
     result.devicesLocked.push({
-      deviceId: device._id,
+      deviceId: lockedDevice._id,
       commandId: command._id,
       installmentId: lockableInstallment._id
     });
@@ -371,11 +468,75 @@ export const runEmiPolicyJob = async () => {
 };
 
 export const runScheduledJobs = async () => {
-  const [slaEscalations, relockedDevices] = await Promise.all([runSlaEscalationJob(), runTempUnlockExpiryJob()]);
-  const emiPolicy = await runEmiPolicyJob();
-  const fcmDeliveries = await runFcmDeliveryBatch();
+  const slaEscalations = await runSlaEscalationJob({ limit: SCHEDULED_JOB_LIMITS.slaEscalation });
+  const relockedDevices = await runTempUnlockExpiryJob({ limit: SCHEDULED_JOB_LIMITS.tempUnlockExpiry });
+  const emiPolicy = await runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy });
+  const fcmDeliveries = await runFcmDeliveryBatch({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery });
 
   return { slaEscalations, relockedDevices, emiPolicy, fcmDeliveries };
+};
+
+export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
+  if (scheduledJobTimers.length) {
+    console.info("Scheduled job timers already started", {
+      timerCount: scheduledJobTimers.length,
+      recommendedIntervals: SCHEDULED_JOB_INTERVALS,
+      batchLimits: SCHEDULED_JOB_LIMITS
+    });
+    return scheduledJobTimers;
+  }
+
+  const jobs = [
+    {
+      name: "fcmDeliveryJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.fcmDeliveryMs,
+      run: () => runFcmDeliveryBatch({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery })
+    },
+    {
+      name: "tempUnlockExpiryJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.tempUnlockExpiryMs,
+      run: () => runTempUnlockExpiryJob({ limit: SCHEDULED_JOB_LIMITS.tempUnlockExpiry })
+    },
+    {
+      name: "slaEscalationJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.slaEscalationMs,
+      run: () => runSlaEscalationJob({ limit: SCHEDULED_JOB_LIMITS.slaEscalation })
+    },
+    {
+      name: "emiPolicyJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.emiPolicyMs,
+      run: () => runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy })
+    }
+  ];
+
+  scheduledJobTimers = jobs.map((job) => {
+    console.info(`${job.name} timer started`, {
+      jobName: job.name,
+      intervalMs: job.intervalMs,
+      batchLimits: SCHEDULED_JOB_LIMITS
+    });
+
+    if (runImmediately) {
+      void runTimedJob(job.name, job.run);
+    }
+
+    return setInterval(() => {
+      void runTimedJob(job.name, job.run);
+    }, job.intervalMs);
+  });
+
+  return scheduledJobTimers;
+};
+
+export const stopScheduledJobTimers = () => {
+  for (const timer of scheduledJobTimers) {
+    clearInterval(timer);
+  }
+
+  const stoppedCount = scheduledJobTimers.length;
+  scheduledJobTimers = [];
+  console.info("Scheduled job timers stopped", { stoppedCount });
+  return stoppedCount;
 };
 
 if (process.argv[1]?.endsWith("scheduledJobs.js")) {
