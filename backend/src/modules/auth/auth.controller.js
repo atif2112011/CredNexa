@@ -18,7 +18,7 @@ const getRefreshCookieOptions = () => ({
   httpOnly: true,
   secure: env.cookieSecure,
   sameSite: env.cookieSecure ? "none" : "lax",
-  path: "/api/v1/auth"
+  path: "/api/auth"
 });
 
 const signAccessToken = (payload) => {
