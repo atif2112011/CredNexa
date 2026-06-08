@@ -310,7 +310,7 @@ export const initiateConsentOtp = async (req, res) => {
     if (!hasRequiredFields(req.body, ["mobile"])) {
       return sendError(res, 400, "Mobile is required");
     }
-    console.log("[initiateConsentOtp] Request body", { body: req.body });
+    // console.log("[initiateConsentOtp] Request body", { body: req.body });
     const { mobile, enrollmentToken: enrollmentTokenValue } = req.body;
     let enrollmentToken = null;
 
@@ -393,7 +393,7 @@ export const initiateConsentOtp = async (req, res) => {
     }
 
     const user = await User.findOne({ mobile, isActive: true });
-    console.log("[initiateConsentOtp] User lookup by mobile", { mobile, userId: user?._id,user: user});
+    // console.log("[initiateConsentOtp] User lookup by mobile", { mobile, userId: user?._id,user: user});
     if (!user || !user.isDeviceLinked) {
       return sendError(res, 400, "Valid enrollment token or registered linked device is required");
     }
