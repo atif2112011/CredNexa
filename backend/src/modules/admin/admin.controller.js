@@ -1662,6 +1662,63 @@ export const tempUnlockAdminDevice = async (req, res) => {
 };
 
 /**
+ * Super admin full device unlock without EMI update.
+ * Sample body: { "reason": "Manual unlock approved" }
+ */
+export const unlockAdminDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+
+    const result = await queueAdminDeviceCommand({
+      device,
+      accountId: req.auth.id,
+      commandType: "UNLOCK",
+      targetState: DEVICE_STATES.UNLOCK_PENDING,
+      policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
+      reason: req.body.reason,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.MANUAL_UNLOCK_TRIGGERED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.reason,
+        metadata: { commandId: result.command._id, source: "device_detail" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Device unlock queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
  * Super admin full unlock with EMI update.
  * Sample body: { "reason": "Payment verified by lender", "emiAction": "mark_paid" }
  */

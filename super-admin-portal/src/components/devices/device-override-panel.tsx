@@ -16,12 +16,7 @@ import type { RecordItem } from "@/types/api";
 const actions = [
   { label: "Manual lock", value: "lock", icon: LockKeyhole },
   { label: "Temp unlock", value: "temp-unlock", icon: TimerReset },
-  { label: "Full unlock", value: "unlock-waive", icon: ShieldCheck }
-];
-
-const emiActions = [
-  { label: "All pending paid", value: "mark_paid" },
-  { label: "All pending waived", value: "waive" }
+  { label: "Full unlock", value: "unlock", icon: ShieldCheck }
 ];
 
 const durationOptions = [
@@ -37,7 +32,6 @@ const durationOptions = [
 export function DeviceOverridePanel({ device }: { device: RecordItem }) {
   const router = useRouter();
   const [action, setAction] = useState("temp-unlock");
-  const [emiAction, setEmiAction] = useState("mark_paid");
   const [durationHours, setDurationHours] = useState("60");
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -55,9 +49,7 @@ export function DeviceOverridePanel({ device }: { device: RecordItem }) {
     const payload =
       action === "temp-unlock"
         ? { reason, durationHours: Number(durationHours) }
-        : action === "unlock-waive"
-          ? { reason, emiAction }
-          : { reason };
+        : { reason };
 
     setIsSubmitting(true);
     const response = await fetch(endpoint, {
@@ -110,7 +102,7 @@ export function DeviceOverridePanel({ device }: { device: RecordItem }) {
             </div>
             <div>
               <p className="font-semibold">Queue device override</p>
-              <p className="text-sm text-muted-foreground">Full unlock requires marking all pending EMIs paid or waived.</p>
+              <p className="text-sm text-muted-foreground">Full unlock restores the paid policy without changing EMI records.</p>
             </div>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
@@ -139,23 +131,6 @@ export function DeviceOverridePanel({ device }: { device: RecordItem }) {
                   className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
                 >
                   {durationOptions.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
-            {action === "unlock-waive" ? (
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="device-override-emi-action">EMI update</Label>
-                <select
-                  id="device-override-emi-action"
-                  value={emiAction}
-                  onChange={(event) => setEmiAction(event.target.value)}
-                  className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                >
-                  {emiActions.map((item) => (
                     <option key={item.value} value={item.value}>
                       {item.label}
                     </option>

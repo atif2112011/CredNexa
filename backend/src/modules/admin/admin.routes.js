@@ -33,6 +33,7 @@ import {
   sendCustomNotification,
   tempUnlockAdminEscalation,
   tempUnlockAdminDevice,
+  unlockAdminDevice,
   unlockAdminEscalation,
   unlockAdminDeviceWithWaive,
   updateAdminAccount,
@@ -86,6 +87,7 @@ adminRoutes.get("/commands", listDeviceCommands);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
 adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
+adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
