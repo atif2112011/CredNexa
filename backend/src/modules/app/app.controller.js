@@ -30,6 +30,7 @@ import { hasRequiredFields } from "../../utils/validators.js";
 
 const MOCK_CASHFREE_OTP = "123456";
 const OTP_EXPIRES_IN_SECONDS = 600;
+const OTP_DELIVERY_ERROR_MESSAGE = "Unable to send OTP right now";
 const OTP_PROVIDERS = Object.freeze({
   MOCK: "mock",
   TWILIO_VERIFY: "twilio_verify"
@@ -272,9 +273,27 @@ const sendTwilioVerifyOtp = async ({ mobile, purpose, user, enrollmentToken, flo
   const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
   const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
   const to = normalizeMobileForTwilio(mobile);
-  const verification = await getTwilioClient()
-    .verify.v2.services(env.twilioVerifyServiceSid)
-    .verifications.create({ to, channel: "sms" });
+  let verification;
+
+  try {
+    verification = await getTwilioClient()
+      .verify.v2.services(env.twilioVerifyServiceSid)
+      .verifications.create({ to, channel: "sms" });
+  } catch (error) {
+    console.error("OTP provider send failed", {
+      provider: OTP_PROVIDERS.TWILIO_VERIFY,
+      mobile,
+      normalizedMobile: to,
+      purpose,
+      flowType,
+      userId: user?._id,
+      enrollmentTokenId: enrollmentToken?._id,
+      status: error.status,
+      code: error.code,
+      message: error.message
+    });
+    throw new Error(OTP_DELIVERY_ERROR_MESSAGE);
+  }
 
   await OtpRecord.create({
     mobile,
