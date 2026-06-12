@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
+import twilio from "twilio";
 
 import { env } from "../../config/env.js";
 import { firebaseStorage } from "../../config/firebase.js";
@@ -28,6 +29,13 @@ import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
 const MOCK_CASHFREE_OTP = "123456";
+const OTP_EXPIRES_IN_SECONDS = 600;
+const OTP_PROVIDERS = Object.freeze({
+  MOCK: "mock",
+  TWILIO_VERIFY: "twilio_verify"
+});
+
+let twilioClient = null;
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
@@ -197,10 +205,42 @@ const isMobileMatch = (user, mobile) => {
 
 const maskMobile = (mobile) => `${mobile.slice(0, 2)}****${mobile.slice(-4)}`;
 
+const getTwilioClient = () => {
+  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioVerifyServiceSid) {
+    throw new Error("Twilio Verify configuration is missing");
+  }
+
+  if (!twilioClient) {
+    twilioClient = twilio(env.twilioAccountSid, env.twilioAuthToken);
+  }
+
+  return twilioClient;
+};
+
+const normalizeMobileForTwilio = (mobile) => {
+  const value = String(mobile || "").trim().replace(/[^\d+]/g, "");
+
+  if (value.startsWith("+")) {
+    return value;
+  }
+
+  const countryCode = String(env.twilioDefaultCountryCode || "+91").startsWith("+")
+    ? String(env.twilioDefaultCountryCode || "+91")
+    : `+${env.twilioDefaultCountryCode}`;
+  const countryDigits = countryCode.replace(/\D/g, "");
+  const digits = value.replace(/\D/g, "").replace(/^0+/, "");
+
+  if (digits.startsWith(countryDigits) && digits.length > 10) {
+    return `+${digits}`;
+  }
+
+  return `${countryCode}${digits}`;
+};
+
 const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
   const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
   const otpHash = await bcrypt.hash(MOCK_CASHFREE_OTP, 12);
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
   const providerReferenceId = `mock_otp_ref_${crypto.randomBytes(8).toString("hex")}`;
 
   await OtpRecord.create({
@@ -210,10 +250,11 @@ const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType })
     verificationSessionId,
     enrollmentTokenId: enrollmentToken?._id,
     userId: user._id,
+    provider: OTP_PROVIDERS.MOCK,
     providerReferenceId,
     expiresAt,
     providerResponse: {
-      provider: "mock",
+      provider: OTP_PROVIDERS.MOCK,
       mode: "mock",
       status: "OTP_SENT",
       flowType
@@ -223,8 +264,73 @@ const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType })
   return {
     verificationSessionId,
     providerReferenceId,
-    expiresInSeconds: 600
+    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
   };
+};
+
+const sendTwilioVerifyOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
+  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
+  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
+  const to = normalizeMobileForTwilio(mobile);
+  const verification = await getTwilioClient()
+    .verify.v2.services(env.twilioVerifyServiceSid)
+    .verifications.create({ to, channel: "sms" });
+
+  await OtpRecord.create({
+    mobile,
+    purpose,
+    verificationSessionId,
+    enrollmentTokenId: enrollmentToken?._id,
+    userId: user._id,
+    provider: OTP_PROVIDERS.TWILIO_VERIFY,
+    providerReferenceId: verification.sid,
+    expiresAt,
+    providerResponse: {
+      provider: OTP_PROVIDERS.TWILIO_VERIFY,
+      status: verification.status,
+      channel: verification.channel,
+      to,
+      flowType
+    }
+  });
+
+  return {
+    verificationSessionId,
+    providerReferenceId: verification.sid,
+    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
+  };
+};
+
+const sendOtp = async (payload) => {
+  if (env.otpProvider === OTP_PROVIDERS.TWILIO_VERIFY) {
+    return sendTwilioVerifyOtp(payload);
+  }
+
+  return sendMockOtp(payload);
+};
+
+const verifyOtpCode = async ({ otpRecord, otp }) => {
+  if (otpRecord.provider === OTP_PROVIDERS.TWILIO_VERIFY) {
+    const to = otpRecord.providerResponse?.to || normalizeMobileForTwilio(otpRecord.mobile);
+    const verificationCheck = await getTwilioClient()
+      .verify.v2.services(env.twilioVerifyServiceSid)
+      .verificationChecks.create({ to, code: otp });
+
+    otpRecord.providerResponse = {
+      ...(otpRecord.providerResponse || {}),
+      checkStatus: verificationCheck.status,
+      checkSid: verificationCheck.sid,
+      checkedAt: new Date()
+    };
+
+    return verificationCheck.status === "approved";
+  }
+
+  if (!otpRecord.otpHash) {
+    return false;
+  }
+
+  return bcrypt.compare(otp, otpRecord.otpHash);
 };
 
 const getDeviceSyncState = async (device) => {
@@ -302,7 +408,7 @@ export const getConsentTerms = async (req, res) => {
 };
 
 /**
- * Initiate mocked OTP and let the backend decide the caller's onboarding branch.
+ * Initiate OTP and let the backend decide the caller's onboarding branch.
  * Sample body: { "mobile": "9876543210", "enrollmentToken": "optional" }
  */
 export const initiateConsentOtp = async (req, res) => {
@@ -341,7 +447,7 @@ export const initiateConsentOtp = async (req, res) => {
           return sendError(res, 400, "Active consent version not found");
         }
 
-        const otp = await sendMockOtp({
+        const otp = await sendOtp({
           mobile,
           purpose: OTP_PURPOSES.AADHAAR_CONSENT,
           user,
@@ -373,7 +479,7 @@ export const initiateConsentOtp = async (req, res) => {
       }
 
       if (!user.isDeviceLinked) {
-        const otp = await sendMockOtp({
+        const otp = await sendOtp({
           mobile,
           purpose: OTP_PURPOSES.ONBOARDING_RESUME,
           user,
@@ -398,7 +504,7 @@ export const initiateConsentOtp = async (req, res) => {
       return sendError(res, 400, "Valid enrollment token or registered linked device is required");
     }
 
-    const otp = await sendMockOtp({
+    const otp = await sendOtp({
       mobile,
       purpose: OTP_PURPOSES.DEVICE_LOGIN,
       user,
@@ -419,7 +525,7 @@ export const initiateConsentOtp = async (req, res) => {
 };
 
 /**
- * Verify mocked OTP and return the next app step.
+ * Verify OTP and return the next app step.
  * Sample body: { "mobile": "9876543210", "verificationSessionId": "otp_...", "otp": "123456", "enrollmentToken": "optional" }
  */
 export const verifyConsentOtp = async (req, res) => {
@@ -444,7 +550,7 @@ export const verifyConsentOtp = async (req, res) => {
     }
 
     otpRecord.attempts += 1;
-    const otpMatches = await bcrypt.compare(req.body.otp, otpRecord.otpHash);
+    const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });
 
     if (!otpMatches) {
       await otpRecord.save();

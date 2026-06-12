@@ -15,6 +15,7 @@ import { EnrollmentToken } from "../../models/EnrollmentToken.js";
 import { Payment } from "../../models/Payment.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { Tenant } from "../../models/Tenant.js";
+import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
@@ -299,6 +300,20 @@ export const registerBorrower = async (req, res) => {
 
     session.startTransaction();
 
+    const creditedTenant = await Tenant.findOneAndUpdate(
+      { _id: tenant._id, creditBalance: { $gte: 1 } },
+      { $inc: { creditBalance: -1 } },
+      { new: false, session }
+    );
+
+    if (!creditedTenant) {
+      await session.abortTransaction();
+      return sendError(res, 402, "Insufficient credits to create borrower");
+    }
+
+    const balanceBefore = Number(creditedTenant.creditBalance || 0);
+    const balanceAfter = balanceBefore - 1;
+
     const users = await User.create(
       [
         {
@@ -319,7 +334,24 @@ export const registerBorrower = async (req, res) => {
     );
 
     const user = users[0];
-    
+
+    await TenantCreditLedger.create(
+      [
+        {
+          tenantId: tenant._id,
+          type: TENANT_CREDIT_LEDGER_TYPES.BORROWER_CREATION,
+          delta: -1,
+          balanceBefore,
+          balanceAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          userId: user._id,
+          reason: "Borrower created",
+          metadata: { loanId: user.loanId }
+        }
+      ],
+      { session, ordered: true }
+    );
 
     const installments = generateInstallments(req.body);
 
@@ -362,6 +394,24 @@ export const registerBorrower = async (req, res) => {
       { session }
     );
 
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_CONSUMED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: user._id,
+        reason: "Borrower created",
+        metadata: {
+          loanId: user.loanId,
+          delta: -1,
+          balanceBefore,
+          balanceAfter
+        }
+      },
+      { session }
+    );
+
     await session.commitTransaction();
 
     return sendSuccess(res, 201, "Borrower registered successfully", {
@@ -376,7 +426,10 @@ export const registerBorrower = async (req, res) => {
       emiScheduleTenantId: schedules[0].tenantId,
       enrollmentToken: enrollmentTokens[0].token,
       enrollmentTokenTenantId: enrollmentTokens[0].tenantId,
-      tokenExpiresAt: enrollmentTokens[0].expiresAt
+      tokenExpiresAt: enrollmentTokens[0].expiresAt,
+      credits: {
+        remaining: balanceAfter
+      }
     });
   } catch (error) {
     if (session.inTransaction()) {
@@ -519,6 +572,9 @@ export const getDashboard = async (req, res) => {
     return sendSuccess(res, 200, "Dashboard fetched successfully", {
       totalBorrowers,
       borrowersRegisteredToday,
+      credits: {
+        available: Number(tenant.creditBalance || 0)
+      },
       enrollmentTokens: {
         active: activeEnrollmentTokens,
         consumed: consumedEnrollmentTokens,

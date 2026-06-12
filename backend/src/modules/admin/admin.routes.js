@@ -5,6 +5,7 @@ import { requireRole } from "../../middleware/requireRole.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import {
   acknowledgeRiskFlag,
+  adjustTenantCredits,
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
@@ -64,6 +65,7 @@ adminRoutes.post("/tenants", createTenant);
 adminRoutes.get("/tenants/:id", getTenantById);
 adminRoutes.patch("/tenants/:id", updateTenant);
 adminRoutes.patch("/tenants/:id/status", updateTenantStatus);
+adminRoutes.post("/tenants/:id/credits/adjust", adjustTenantCredits);
 
 adminRoutes.get("/accounts", listAdminAccounts);
 adminRoutes.post("/accounts", createAdminAccount);

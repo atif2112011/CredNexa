@@ -77,6 +77,11 @@ const tenantSchema = new mongoose.Schema(
       pincode: String
     },
     qrCodes: [qrCodeSchema],
+    creditBalance: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
     isActive: {
       type: Boolean,
       default: true

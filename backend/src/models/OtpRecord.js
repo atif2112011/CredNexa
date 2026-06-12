@@ -8,8 +8,7 @@ const otpRecordSchema = new mongoose.Schema(
       trim: true
     },
     otpHash: {
-      type: String,
-      required: true
+      type: String
     },
     purpose: {
       type: String,
@@ -31,7 +30,7 @@ const otpRecordSchema = new mongoose.Schema(
     },
     provider: {
       type: String,
-      default: "cashfree_mock"
+      default: "mock"
     },
     providerReferenceId: String,
     verified: {

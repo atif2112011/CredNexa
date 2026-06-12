@@ -16,6 +16,7 @@ import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
+import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
@@ -744,6 +745,101 @@ export const updateTenantStatus = async (req, res) => {
     return sendSuccess(res, 200, "Tenant status updated successfully", tenant);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Adjust tenant credits after offline/manual payment handling.
+ * Sample body: { "delta": 25, "reason": "Credits purchased manually" }
+ */
+export const adjustTenantCredits = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Invalid tenant ID");
+    }
+
+    const delta = Number(req.body.delta);
+    const reason = String(req.body.reason || "").trim();
+
+    if (!Number.isInteger(delta) || delta === 0) {
+      return sendError(res, 400, "delta must be a non-zero integer");
+    }
+
+    if (!reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    session.startTransaction();
+
+    const tenant = await Tenant.findById(req.params.id).session(session);
+    if (!tenant) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Tenant not found");
+    }
+
+    const balanceBefore = Number(tenant.creditBalance || 0);
+    const balanceAfter = balanceBefore + delta;
+
+    if (balanceAfter < 0) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Credit adjustment cannot make balance negative");
+    }
+
+    tenant.creditBalance = balanceAfter;
+    await tenant.save({ session });
+
+    const ledgerEntries = await TenantCreditLedger.create(
+      [
+        {
+          tenantId: tenant._id,
+          type: TENANT_CREDIT_LEDGER_TYPES.ADMIN_ADJUSTMENT,
+          delta,
+          balanceBefore,
+          balanceAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          reason,
+          metadata: { source: "super_admin" }
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDITS_ADJUSTED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        reason,
+        metadata: {
+          delta,
+          balanceBefore,
+          balanceAfter,
+          ledgerEntryId: ledgerEntries[0]._id
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Tenant credits adjusted successfully", {
+      tenantId: tenant._id,
+      credits: {
+        previous: balanceBefore,
+        delta,
+        current: balanceAfter
+      },
+      ledgerEntryId: ledgerEntries[0]._id
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 

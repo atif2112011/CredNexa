@@ -22,6 +22,11 @@ export const env = {
   cookieSecure: process.env.COOKIE_SECURE === "true",
   corsOrigin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : ["http://localhost:3000"],
   vercelDeploy: process.env.VERCEL === "true",
+  otpProvider: (process.env.OTP_PROVIDER || "mock").trim().toLowerCase(),
+  twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
+  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
+  twilioVerifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
+  twilioDefaultCountryCode: process.env.TWILIO_DEFAULT_COUNTRY_CODE || "+91",
   // Firebase configuration
   firebaseApiKey: process.env.FIREBASE_API_KEY,
   firebaseAuthDomain: process.env.FIREBASE_AUTH_DOMAIN,
