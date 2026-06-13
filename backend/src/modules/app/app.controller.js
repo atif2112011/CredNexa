@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import twilio from "twilio";
@@ -15,6 +16,7 @@ import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DeviceEvent } from "../../models/DeviceEvent.js";
+import { DEVICE_INTEGRITY_ACTIONS, DeviceIntegrityChallenge } from "../../models/DeviceIntegrityChallenge.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EnrollmentToken } from "../../models/EnrollmentToken.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
@@ -37,6 +39,7 @@ const OTP_PROVIDERS = Object.freeze({
 });
 
 let twilioClient = null;
+let playIntegrityClient = null;
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
@@ -56,6 +59,10 @@ const signUserAccessToken = (user) => {
 
 const hashPayload = (payload) => {
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+};
+
+const createRequestHash = (payload) => {
+  return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("base64url");
 };
 
 const normalizeName = (name = "") => {
@@ -350,6 +357,133 @@ const verifyOtpCode = async ({ otpRecord, otp }) => {
   }
 
   return bcrypt.compare(otp, otpRecord.otpHash);
+};
+
+const getPlayIntegrityClient = async () => {
+  if (playIntegrityClient) {
+    return playIntegrityClient;
+  }
+
+  const scopes = ["https://www.googleapis.com/auth/playintegrity"];
+  const authOptions = { scopes };
+
+  if (env.playIntegrityServiceAccountJson) {
+    const credentials = JSON.parse(env.playIntegrityServiceAccountJson);
+    if (credentials.private_key) {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
+    }
+    authOptions.credentials = credentials;
+  } else if (env.firebaseAdminProjectId && env.firebaseAdminClientEmail && env.firebaseAdminPrivateKey) {
+    authOptions.credentials = {
+      project_id: env.firebaseAdminProjectId,
+      client_email: env.firebaseAdminClientEmail,
+      private_key: env.firebaseAdminPrivateKey.replace(/\\n/g, "\n")
+    };
+  }
+
+  const auth = new google.auth.GoogleAuth(authOptions);
+  const authClient = await auth.getClient();
+  playIntegrityClient = google.playintegrity({ version: "v1", auth: authClient });
+
+  return playIntegrityClient;
+};
+
+const decodePlayIntegrityToken = async ({ integrityToken }) => {
+  const client = await getPlayIntegrityClient();
+  const response = await client.v1.decodeIntegrityToken({
+    packageName: env.playIntegrityPackageName,
+    requestBody: { integrityToken }
+  });
+
+  return response.data?.tokenPayloadExternal || {};
+};
+
+const getPlayIntegritySummary = (verdict = {}) => {
+  const requestDetails = verdict.requestDetails || {};
+  const appIntegrity = verdict.appIntegrity || {};
+  const deviceIntegrity = verdict.deviceIntegrity || {};
+  const accountDetails = verdict.accountDetails || {};
+
+  return {
+    requestHash: requestDetails.requestHash || requestDetails.nonce,
+    packageName: requestDetails.requestPackageName,
+    timestampMillis: requestDetails.timestampMillis,
+    appIntegrity: appIntegrity.appRecognitionVerdict,
+    deviceIntegrity: deviceIntegrity.deviceRecognitionVerdict || [],
+    appLicensingVerdict: accountDetails.appLicensingVerdict
+  };
+};
+
+const hasRequiredDeviceIntegrity = (deviceIntegrity = []) => {
+  const required = env.playIntegrityRequiredDeviceVerdict || "MEETS_DEVICE_INTEGRITY";
+  return deviceIntegrity.includes(required) || deviceIntegrity.includes("MEETS_STRONG_INTEGRITY");
+};
+
+const hasHighRiskLocalSignal = (localSignals = {}) => {
+  return Boolean(
+    localSignals.debuggable ||
+      localSignals.isRooted ||
+      localSignals.isTampered ||
+      localSignals.rootIndicators?.length ||
+      localSignals.hookingIndicators?.length
+  );
+};
+
+const isPlayIntegrityTimestampValid = (timestampMillis) => {
+  if (!timestampMillis) return false;
+  const timestamp = Number(timestampMillis);
+  if (!Number.isFinite(timestamp)) return false;
+  const ageMs = Math.abs(Date.now() - timestamp);
+  return ageMs <= env.playIntegrityChallengeTtlSeconds * 1000;
+};
+
+const evaluatePlayIntegrityVerdict = ({ challenge, summary, localSignals = {} }) => {
+  if (summary.requestHash !== challenge.requestHash) {
+    return { decision: "block", integrityStatus: "failed", reasonCode: "REQUEST_HASH_MISMATCH" };
+  }
+
+  if (summary.packageName !== env.playIntegrityPackageName) {
+    return { decision: "block", integrityStatus: "failed", reasonCode: "PACKAGE_NAME_MISMATCH" };
+  }
+
+  if (!isPlayIntegrityTimestampValid(summary.timestampMillis)) {
+    return { decision: "retry", integrityStatus: "temporary_failure", reasonCode: "TOKEN_TIMESTAMP_INVALID" };
+  }
+
+  if (env.playIntegrityRequirePlayRecognizedApp && summary.appIntegrity !== "PLAY_RECOGNIZED") {
+    return { decision: "manual_review", integrityStatus: "failed", reasonCode: "APP_INTEGRITY_UNRECOGNIZED" };
+  }
+
+  if (!hasRequiredDeviceIntegrity(summary.deviceIntegrity)) {
+    return { decision: "block", integrityStatus: "failed", reasonCode: "DEVICE_INTEGRITY_FAILED" };
+  }
+
+  if (hasHighRiskLocalSignal(localSignals)) {
+    return { decision: "block", integrityStatus: "failed", reasonCode: "HIGH_RISK_LOCAL_SIGNAL" };
+  }
+
+  return { decision: "allow", integrityStatus: "passed" };
+};
+
+const applyObserveModeDecision = (decision) => {
+  if (["enforce", "enforcement"].includes(env.deviceIntegrityMode) || decision.decision === "allow") {
+    return decision;
+  }
+
+  return {
+    decision: "allow",
+    integrityStatus: "observed_failure",
+    reasonCode: decision.reasonCode,
+    observedDecision: decision.decision
+  };
+};
+
+const sendIntegrityDecision = (res, statusCode, success, message, data) => {
+  return res.status(statusCode).json({
+    success,
+    message,
+    data
+  });
 };
 
 const getDeviceSyncState = async (device) => {
@@ -685,6 +819,234 @@ export const verifyConsentOtp = async (req, res) => {
         tempUnlockExpiresAt: device.tempUnlockExpiresAt
       },
       ...(await getDeviceSyncState(device))
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Create a short-lived Play Integrity challenge for the authenticated app session.
+ * Sample body: { "action": "ONBOARDING_PRE_REGISTRATION", "enrollmentToken": "optional", "deviceContext": {} }
+ */
+export const createIntegrityChallenge = async (req, res) => {
+  try {
+    const action = req.body.action || DEVICE_INTEGRITY_ACTIONS.ONBOARDING_PRE_REGISTRATION;
+
+    if (!Object.values(DEVICE_INTEGRITY_ACTIONS).includes(action)) {
+      return sendError(res, 400, "Valid integrity action is required");
+    }
+
+    const user = await User.findById(req.auth.id);
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    if (req.body.mobile && !isMobileMatch(user, req.body.mobile)) {
+      return sendError(res, 400, "Mobile does not match registered borrower");
+    }
+
+    let enrollmentToken = null;
+    if (req.body.enrollmentToken) {
+      enrollmentToken = await EnrollmentToken.findOne({
+        token: req.body.enrollmentToken,
+        userId: user._id,
+        consumedAt: null,
+        cancelledAt: null,
+        expiresAt: { $gt: new Date() }
+      });
+
+      if (!enrollmentToken) {
+        return sendError(res, 400, "Valid enrollment token not found");
+      }
+    }
+
+    const now = new Date();
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    const expiresAt = new Date(now.getTime() + env.playIntegrityChallengeTtlSeconds * 1000);
+    const requestHash = createRequestHash({
+      nonce,
+      userId: user._id.toString(),
+      tenantId: user.tenantId.toString(),
+      enrollmentTokenId: enrollmentToken?._id?.toString() || null,
+      action,
+      issuedAt: now.toISOString()
+    });
+
+    const challenge = await DeviceIntegrityChallenge.create({
+      userId: user._id,
+      tenantId: user.tenantId,
+      enrollmentTokenId: enrollmentToken?._id,
+      action,
+      requestHash,
+      nonce,
+      deviceContext: req.body.deviceContext || {},
+      expiresAt
+    });
+
+    return sendSuccess(res, 200, "Integrity challenge created successfully", {
+      challengeId: challenge._id,
+      requestHash: challenge.requestHash,
+      expiresAt: challenge.expiresAt,
+      action: challenge.action
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Verify Play Integrity token for a previously issued challenge.
+ * Sample body: { "challengeId": "665f...", "integrityToken": "...", "action": "ONBOARDING_PRE_REGISTRATION", "localSignals": {} }
+ */
+export const verifyIntegrity = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["challengeId", "integrityToken", "action"])) {
+      return sendError(res, 400, "Challenge ID, integrity token, and action are required");
+    }
+
+    if (!mongoose.isValidObjectId(req.body.challengeId)) {
+      return sendError(res, 400, "Valid challenge ID is required");
+    }
+
+    if (!Object.values(DEVICE_INTEGRITY_ACTIONS).includes(req.body.action)) {
+      return sendError(res, 400, "Valid integrity action is required");
+    }
+
+    const challenge = await DeviceIntegrityChallenge.findOne({
+      _id: req.body.challengeId,
+      userId: req.auth.id,
+      action: req.body.action
+    });
+
+    if (!challenge) {
+      return sendError(res, 400, "Valid integrity challenge not found");
+    }
+
+    if (challenge.consumedAt) {
+      return sendError(res, 400, "Integrity challenge has already been used");
+    }
+
+    if (new Date(challenge.expiresAt) <= new Date()) {
+      challenge.integrityStatus = "temporary_failure";
+      challenge.reasonCode = "CHALLENGE_EXPIRED";
+      await challenge.save();
+      return sendIntegrityDecision(res, 400, false, "Integrity challenge expired. Please retry.", {
+        decision: "retry",
+        integrityStatus: "temporary_failure",
+        reasonCode: "CHALLENGE_EXPIRED",
+        retryAfterSeconds: 0
+      });
+    }
+
+    const localSignals = req.body.localSignals || {};
+    let verdict;
+
+    try {
+      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken });
+    } catch (error) {
+      console.error("Play Integrity verification failed", {
+        challengeId: challenge._id,
+        userId: challenge.userId,
+        action: challenge.action,
+        status: error.status,
+        code: error.code,
+        message: error.message
+      });
+
+      const retryDecision = {
+        decision: "retry",
+        integrityStatus: "temporary_failure",
+        reasonCode: "PLAY_INTEGRITY_VERIFICATION_UNAVAILABLE"
+      };
+      const finalDecision = applyObserveModeDecision(retryDecision);
+
+      challenge.decision = finalDecision.decision;
+      challenge.integrityStatus = finalDecision.integrityStatus;
+      challenge.reasonCode = finalDecision.reasonCode;
+      challenge.verifiedAt = new Date();
+      challenge.verificationSummary = {
+        mode: env.deviceIntegrityMode,
+        observedDecision: finalDecision.observedDecision,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        },
+        localSignals
+      };
+
+      if (!["enforce", "enforcement"].includes(env.deviceIntegrityMode)) {
+        challenge.consumedAt = new Date();
+        await challenge.save();
+        return sendSuccess(res, 200, "Device integrity observed successfully", {
+          decision: "allow",
+          integrityStatus: finalDecision.integrityStatus,
+          reasonCode: finalDecision.reasonCode,
+          nextStep: NEXT_STEPS.SHOW_CONSENT
+        });
+      }
+
+      await challenge.save();
+      return sendIntegrityDecision(res, 503, false, "Unable to verify device security. Please try again.", {
+        decision: "retry",
+        integrityStatus: "temporary_failure",
+        reasonCode: retryDecision.reasonCode,
+        retryAfterSeconds: 30
+      });
+    }
+
+    const summary = getPlayIntegritySummary(verdict);
+    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals });
+    const finalDecision = applyObserveModeDecision(evaluatedDecision);
+    const verifiedAt = new Date();
+
+    challenge.consumedAt = verifiedAt;
+    challenge.verifiedAt = verifiedAt;
+    challenge.decision = finalDecision.decision;
+    challenge.integrityStatus = finalDecision.integrityStatus;
+    challenge.reasonCode = finalDecision.reasonCode;
+    challenge.verificationSummary = {
+      mode: env.deviceIntegrityMode,
+      observedDecision: finalDecision.observedDecision,
+      requiredLevel: env.playIntegrityRequiredDeviceVerdict,
+      packageName: summary.packageName,
+      requestHashMatched: summary.requestHash === challenge.requestHash,
+      appIntegrity: summary.appIntegrity,
+      deviceIntegrity: summary.deviceIntegrity,
+      appLicensingVerdict: summary.appLicensingVerdict,
+      localSignals
+    };
+    await challenge.save();
+
+    if (finalDecision.decision === "allow") {
+      return sendSuccess(res, 200, "Device integrity verified successfully", {
+        decision: "allow",
+        integrityStatus: finalDecision.integrityStatus,
+        reasonCode: finalDecision.reasonCode,
+        requiredLevel: env.playIntegrityRequiredDeviceVerdict,
+        deviceIntegrity: summary.deviceIntegrity,
+        appIntegrity: summary.appIntegrity,
+        verifiedAt,
+        nextStep: NEXT_STEPS.SHOW_CONSENT
+      });
+    }
+
+    if (finalDecision.decision === "retry") {
+      return sendIntegrityDecision(res, 400, false, "Unable to verify device security. Please try again.", {
+        decision: "retry",
+        integrityStatus: finalDecision.integrityStatus,
+        reasonCode: finalDecision.reasonCode,
+        retryAfterSeconds: 30
+      });
+    }
+
+    return sendIntegrityDecision(res, 400, false, "Device security verification failed. Please contact support.", {
+      decision: finalDecision.decision,
+      integrityStatus: finalDecision.integrityStatus,
+      reasonCode: finalDecision.reasonCode,
+      nextStep: "DEVICE_INTEGRITY_FAILED"
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

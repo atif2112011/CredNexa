@@ -7,6 +7,7 @@ import {
   acceptConsent,
   acknowledgeDeviceCommand,
   createUnlockRequest,
+  createIntegrityChallenge,
   getActiveUnlockRequest,
   getAppDashboard,
   getConsentTerms,
@@ -22,6 +23,7 @@ import {
   reportSecurityEvent,
   submitPayment,
   syncDevice,
+  verifyIntegrity,
   verifyConsentOtp,
   registerDevice
 } from "./app.controller.js";
@@ -32,6 +34,8 @@ appRoutes.post("/testing/access-token", generateTestUserAccessToken);
 appRoutes.get("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", initiateConsentOtp);
 appRoutes.post("/consent/verify-otp", verifyConsentOtp);
+appRoutes.post("/integrity/challenge", verifyJwt, requireTokenType("user"), createIntegrityChallenge);
+appRoutes.post("/integrity/verify", verifyJwt, requireTokenType("user"), verifyIntegrity);
 appRoutes.post("/consent/accept", verifyJwt, requireTokenType("user"), acceptConsent);
 
 appRoutes.post("/device/register", verifyJwt, requireTokenType("user"), registerDevice);
