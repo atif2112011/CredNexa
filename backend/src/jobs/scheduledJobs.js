@@ -49,6 +49,12 @@ const EMI_CRON_CONFIG = Object.freeze({
       text: "Your EMI is due in 5 days. Please complete the payment soon."
     }
   },
+  graceReminderIntervalMs: 12 * 60 * 60 * 1000,
+  graceReminderNotification: {
+    title: "EMI overdue",
+    text: "Your EMI is overdue. Please pay before the grace period ends to avoid device restrictions."
+  },
+  graceReason: "EMI overdue within grace period",
   lockReason: "EMI overdue beyond DPD and grace period"
 });
 
@@ -274,6 +280,8 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
   const result = {
     scannedSchedules: schedules.length,
     remindersQueued: [],
+    gracePolicyCommandsQueued: [],
+    graceRemindersQueued: [],
     devicesLocked: [],
     skippedTempUnlock: [],
     skippedAlreadyLocked: []
@@ -360,6 +368,144 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
 
     if (scheduleChanged || schedule.isModified()) {
       await schedule.save();
+    }
+
+    const isLocked = device.state === DEVICE_STATES.LOCKED;
+    const hasActiveTempUnlock =
+      device.state === DEVICE_STATES.TEMP_UNLOCK && device.tempUnlockExpiresAt && new Date(device.tempUnlockExpiresAt) > now;
+
+    if (!isLocked && !hasActiveTempUnlock && gracePeriodDays > 0) {
+      const graceInstallment = unpaidInstallments.find((installment) => {
+        const graceStartedAt = addDays(installment.dueDate, dpd);
+        const graceExpiresAt = addDays(installment.dueDate, dpd + gracePeriodDays);
+        return graceStartedAt <= now && graceExpiresAt > now;
+      });
+
+      if (graceInstallment) {
+        const graceStartedAt = addDays(graceInstallment.dueDate, dpd);
+        const graceExpiresAt = addDays(graceInstallment.dueDate, dpd + gracePeriodDays);
+        let activeDevice = device;
+
+        if (device.state !== DEVICE_STATES.GRACE_PERIOD || device.currentPolicyKey !== DEVICE_POLICY_KEYS.EMI_GRACE) {
+          const gracePolicy = await DevicePolicy.findOne({
+            tenantId: device.tenantId,
+            policyKey: DEVICE_POLICY_KEYS.EMI_GRACE,
+            isActive: true
+          }).lean();
+
+          if (gracePolicy) {
+            const updatedGraceDevice = await Device.findOneAndUpdate(
+              {
+                _id: device._id,
+                state: { $ne: DEVICE_STATES.LOCKED },
+                $or: [
+                  { state: { $ne: DEVICE_STATES.TEMP_UNLOCK } },
+                  { tempUnlockExpiresAt: { $lte: now } },
+                  { tempUnlockExpiresAt: null }
+                ]
+              },
+              {
+                $set: {
+                  state: DEVICE_STATES.GRACE_PERIOD,
+                  currentPolicyKey: DEVICE_POLICY_KEYS.EMI_GRACE,
+                  currentPolicyId: gracePolicy._id,
+                  stateUpdatedAt: now
+                },
+                $inc: { desiredPolicyVersion: 1 }
+              },
+              { new: true }
+            );
+
+            if (updatedGraceDevice) {
+              activeDevice = updatedGraceDevice;
+              const existingGracePolicyCommand = await DeviceCommand.findOne({
+                deviceId: updatedGraceDevice._id,
+                commandType: "POLICY_UPDATE",
+                status: { $in: ["pending", "sent"] },
+                "payload.policyKey": DEVICE_POLICY_KEYS.EMI_GRACE,
+                "payload.installmentId": graceInstallment._id.toString()
+              }).lean();
+
+              if (!existingGracePolicyCommand) {
+                const graceCommand = await DeviceCommand.create({
+                  deviceId: updatedGraceDevice._id,
+                  tenantId: updatedGraceDevice.tenantId,
+                  commandType: "POLICY_UPDATE",
+                  triggeredBy: "auto_policy",
+                  payload: {
+                    targetState: DEVICE_STATES.GRACE_PERIOD,
+                    policyKey: DEVICE_POLICY_KEYS.EMI_GRACE,
+                    policyVersion: updatedGraceDevice.desiredPolicyVersion,
+                    reason: EMI_CRON_CONFIG.graceReason,
+                    installmentId: graceInstallment._id.toString(),
+                    installmentNumber: graceInstallment.installmentNumber,
+                    dueDate: graceInstallment.dueDate,
+                    graceStartedAt,
+                    graceExpiresAt,
+                    dpd,
+                    gracePeriodDays
+                  }
+                });
+
+                result.gracePolicyCommandsQueued.push({
+                  deviceId: updatedGraceDevice._id,
+                  commandId: graceCommand._id,
+                  installmentId: graceInstallment._id
+                });
+              }
+            }
+          }
+        }
+
+        const lastGraceReminder = activeDevice.graceReminderHistory
+          ?.filter((item) => item.installmentId?.toString() === graceInstallment._id.toString())
+          .sort((a, b) => new Date(b.sentAt || 0) - new Date(a.sentAt || 0))[0];
+        const reminderDue =
+          !lastGraceReminder ||
+          new Date(lastGraceReminder.sentAt).getTime() <= now.getTime() - EMI_CRON_CONFIG.graceReminderIntervalMs;
+
+        if (reminderDue && activeDevice.fcmToken) {
+          const reminderCommand = await DeviceCommand.create({
+            deviceId: activeDevice._id,
+            tenantId: activeDevice.tenantId,
+            commandType: "NOTIFICATION",
+            triggeredBy: "auto_policy",
+            payload: {
+              notificationType: "GRACE_PERIOD_REMINDER",
+              title: EMI_CRON_CONFIG.graceReminderNotification.title,
+              text: EMI_CRON_CONFIG.graceReminderNotification.text,
+              installmentId: graceInstallment._id.toString(),
+              installmentNumber: graceInstallment.installmentNumber,
+              dueDate: graceInstallment.dueDate,
+              graceStartedAt,
+              graceExpiresAt,
+              outstandingAmount: getInstallmentOutstanding(graceInstallment)
+            }
+          });
+
+          await Device.updateOne(
+            { _id: activeDevice._id },
+            {
+              $push: {
+                graceReminderHistory: {
+                  installmentId: graceInstallment._id,
+                  sentAt: now,
+                  graceStartedAt,
+                  graceExpiresAt,
+                  commandId: reminderCommand._id
+                }
+              }
+            }
+          );
+
+          result.graceRemindersQueued.push({
+            deviceId: activeDevice._id,
+            commandId: reminderCommand._id,
+            installmentId: graceInstallment._id,
+            graceExpiresAt
+          });
+        }
+      }
     }
 
     if (!lockOnGraceExpiry) continue;

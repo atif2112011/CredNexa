@@ -582,6 +582,20 @@ Per-tenant configurable policy for lock, unlock, and escalation behavior. Every 
     autoEscalateOnSLABreach: { type: Boolean, default: true }
   },
 
+  // Device security risk rules
+  riskRules: {
+    autoLockOnCriticalSecurityRisk: { type: Boolean, default: true },
+    autoLockTypes: {
+      type: [String],
+      default: [
+        'ROOT_DETECTED',
+        'TAMPER_DETECTED',
+        'DEVICE_INTEGRITY_COMPROMISED',
+        'APP_INTEGRITY_COMPROMISED'
+      ]
+    }
+  },
+
   updatedBy: { type: ObjectId, ref: 'accounts' },
   updatedAt: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
@@ -899,7 +913,7 @@ Notification records sent to borrowers and lender dashboard users.
     enum: [
       'EMI_REMINDER',
       'OVERDUE_WARNING',
-      'GRACE_PERIOD_START',
+      'GRACE_PERIOD_REMINDER',
       'DEVICE_LOCKED',
       'UNLOCK_SUCCESS',
       'UNLOCK_REQUEST_RECEIVED',
@@ -1000,7 +1014,7 @@ Risk monitoring signals surfaced to super admin.
 
 ## 6. API Routes
 
-### Base URL: `/api/v1`
+### Base URL: `/api`
 
 ### Auth Middleware Applied To All Protected Routes:
 - `verifyJWT` — validates Bearer token; resolves to either `accounts` or `users` collection depending on token type
@@ -1275,16 +1289,23 @@ The current borrower simulation returns only a borrower access token after conse
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/app/security/event` | Report root/SIM-change/tamper event (UC-28, UC-29, UC-30) |
+| POST | `/app/security/event` | Report root/tamper/restriction/integrity compromise event. Creates a `RiskFlag`; critical configured risks can auto-lock the device. |
 | POST | `/app/sync` | Full state sync on reconnect (UC-24, UC-25, UC-26, UC-27) |
 
 **Request — POST `/app/security/event`**
 ```json
 {
-  "eventType": "ROOT_DETECTED",
-  "details": { "method": "supersu_binary" }
+  "type": "ROOT_DETECTED",
+  "severity": "critical",
+  "message": "Root indicators detected",
+  "metadata": {
+    "source": "APP_STARTUP",
+    "rootIndicators": ["/system/xbin/su"]
+  }
 }
 ```
+
+Critical risk event types in `tenantPolicies.riskRules.autoLockTypes` queue a backend `LOCK` command and use existing FCM command delivery. Default auto-lock types are `ROOT_DETECTED`, `TAMPER_DETECTED`, `DEVICE_INTEGRITY_COMPROMISED`, and `APP_INTEGRITY_COMPROMISED`.
 
 ---
 
@@ -1342,6 +1363,7 @@ The current borrower simulation returns only a borrower access token after conse
 | GET | `/partner/dashboard` | Partner-wide tenant, account, borrower, device, and case summary |
 | GET | `/partner/tenants` | List tenants under the authenticated partner |
 | POST | `/partner/tenants` | Create tenant under the authenticated partner and copy centralized default policies |
+| POST | `/partner/tenants?app=true` | Partner app creation flow: create tenant, create default `tenant_admin`, link `adminAccountId`, and return one-time credentials |
 | GET | `/partner/accounts` | List `tenant_admin` accounts under partner-owned tenants |
 | POST | `/partner/accounts` | Create `tenant_admin` account for a partner-owned tenant |
 | PATCH | `/partner/accounts/:accountId` | Update tenant admin profile/scope within partner-owned tenants |
@@ -1352,7 +1374,7 @@ The current borrower simulation returns only a borrower access token after conse
 | POST | `/partner/escalations/:caseId/temp-unlock` | Resolve partner escalation with temporary unlock |
 | POST | `/partner/escalations/:caseId/reject` | Reject partner escalation with note |
 
-**Partner tenant creation rule:** request body must not include `channelPartnerId`, `tenantPolicy`, or `devicePolicies`. The backend derives partner scope from JWT and copies defaults from `DEFAULT_TENANT_POLICY` and `DEFAULT_DEVICE_POLICIES`.
+**Partner tenant creation rule:** request body must not include `channelPartnerId`, `tenantPolicy`, or `devicePolicies`. The backend derives partner scope from JWT and copies defaults from `DEFAULT_TENANT_POLICY` and `DEFAULT_DEVICE_POLICIES`. For the Partner App, use `POST /partner/tenants?app=true` so the backend creates and returns the default tenant admin credentials in the same response.
 
 **Partner escalation rule:** partner can act only on `ESCALATED_PARTNER` cases scoped to their channel partner.
 
@@ -2144,8 +2166,8 @@ Sends an in-app notification to the borrower (EMI reminder, device locked alert,
 }
 ```
 
-**`notificationType` values (from `notifications.type` enum):**
-`EMI_REMINDER`, `OVERDUE_WARNING`, `GRACE_PERIOD_START`, `DEVICE_LOCKED`, `UNLOCK_SUCCESS`, `UNLOCK_REQUEST_RECEIVED`, `ESCALATION_UPDATE`, `TEMP_UNLOCK_APPROVED`, `TEMP_UNLOCK_EXPIRING`, `CASE_RESOLVED`, `PAYMENT_CONFIRMED`, `PAYMENT_APPROVAL_REQUIRED`, `CASE_ESCALATED_TO_PARTNER`, `CASE_ESCALATED_TO_ADMIN`
+**`notificationType` values (from notification payloads):**
+`EMI_REMINDER`, `OVERDUE_WARNING`, `GRACE_PERIOD_REMINDER`, `DEVICE_LOCKED`, `UNLOCK_SUCCESS`, `UNLOCK_REQUEST_RECEIVED`, `ESCALATION_UPDATE`, `TEMP_UNLOCK_APPROVED`, `TEMP_UNLOCK_EXPIRING`, `CASE_RESOLVED`, `PAYMENT_CONFIRMED`, `PAYMENT_APPROVAL_REQUIRED`, `CASE_ESCALATED_TO_PARTNER`, `CASE_ESCALATED_TO_ADMIN`
 
 **Stored in:** `notifications` (`channel: 'fcm'`)
 
@@ -2182,8 +2204,7 @@ Sent for tamper events, consent violations, or fraud signals. The app logs the e
 
 | Job | Frequency | Purpose |
 |---|---|---|
-| **SLA Escalation Checker** | Every 5 minutes | Two-tier check: (1) `PENDING_TENANT` cases past `slaDeadline` → `ESCALATED_PARTNER` + notify CP; (2) `ESCALATED_PARTNER` cases past `partnerSlaDeadline` → `ESCALATED_ADMIN` + notify super admin |
-| **Temp Unlock Expiry** | Every 1 minute | Query `TEMP_UNLOCK` devices past `tempUnlockExpiresAt`, re-evaluate and relock |
-| **Command Retry** | Every 10 minutes | Retry `pending` device commands that haven't been delivered |
-| **EMI DPD Calculator** | Daily at midnight | Recalculate `dpd` on all active `emiSchedules`, trigger auto-lock policy evaluation |
-| **Risk Flag Generator** | Every 30 minutes | Detect override volume spikes, repeated SLA breaches, create `riskFlags` |
+| **FCM Delivery Job** | Every 5 minutes | Delivers pending/failed `DeviceCommand` records through FCM |
+| **Temp Unlock Expiry** | Every 10 minutes | Query `TEMP_UNLOCK` devices past `tempUnlockExpiresAt`, re-evaluate and relock |
+| **SLA Escalation Checker** | Every 30 minutes | Two-tier check: (1) `PENDING_TENANT` cases past `slaDeadline` → `ESCALATED_PARTNER`; (2) `ESCALATED_PARTNER` cases past `partnerSlaDeadline` → `ESCALATED_ADMIN` |
+| **EMI Policy Job** | Every 30 minutes | Sends upcoming EMI reminders, transitions devices into `GRACE_PERIOD`, sends 12-hour `GRACE_PERIOD_REMINDER`, and locks after DPD + grace |

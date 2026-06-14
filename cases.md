@@ -23,7 +23,7 @@ Mock OTP is always:
 ### 1. Generate Enrollment QR
 
 ```http
-POST /api/v1/distributor/enrollment/qr
+POST /api/distributor/enrollment/qr
 Authorization: Bearer <tenantAdminAccessToken>
 Content-Type: application/json
 
@@ -55,7 +55,7 @@ Expected response:
 ### 2. Initiate OTP
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -84,7 +84,7 @@ Expected response:
 ### 3. Verify OTP
 
 ```http
-POST /api/v1/app/consent/verify-otp
+POST /api/app/consent/verify-otp
 Content-Type: application/json
 
 {
@@ -122,7 +122,7 @@ Expected response:
 ### 4. Fetch Consent Terms
 
 ```http
-GET /api/v1/app/consent/terms
+GET /api/app/consent/terms
 ```
 
 Expected response:
@@ -145,7 +145,7 @@ Expected response:
 ### 5. Accept Consent
 
 ```http
-POST /api/v1/app/consent/accept
+POST /api/app/consent/accept
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -180,7 +180,7 @@ Expected response:
 ### 6. Register Device
 
 ```http
-POST /api/v1/app/device/register
+POST /api/app/device/register
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -226,7 +226,7 @@ Expected response:
 ### 7. Fetch Current Policy
 
 ```http
-GET /api/v1/app/device/policy
+GET /api/app/device/policy
 Authorization: Bearer <borrowerUserAccessToken>
 ```
 
@@ -266,7 +266,7 @@ State:
 ### 1. Initiate OTP Again
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -295,7 +295,7 @@ Expected response:
 ### 2. Verify OTP Again
 
 ```http
-POST /api/v1/app/consent/verify-otp
+POST /api/app/consent/verify-otp
 Content-Type: application/json
 
 {
@@ -340,7 +340,7 @@ State:
 ### 1. Initiate OTP Again
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -369,7 +369,7 @@ Expected response:
 ### 2. Verify OTP
 
 ```http
-POST /api/v1/app/consent/verify-otp
+POST /api/app/consent/verify-otp
 Content-Type: application/json
 
 {
@@ -423,7 +423,7 @@ State:
 ### 1. Initiate Returning Device OTP
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -451,7 +451,7 @@ Expected response:
 ### 2. Verify Returning Device OTP
 
 ```http
-POST /api/v1/app/consent/verify-otp
+POST /api/app/consent/verify-otp
 Content-Type: application/json
 
 {
@@ -501,7 +501,7 @@ Expected response:
 Then immediately call:
 
 ```http
-POST /api/v1/app/device/sync
+POST /api/app/device/sync
 Authorization: Bearer <borrowerUserAccessToken>
 ```
 
@@ -515,7 +515,7 @@ State:
 - Mobile may exist, but the user has no linked device.
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -542,7 +542,7 @@ State:
 - Entered mobile does not match borrower mobile or Aadhaar-linked mobile.
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -570,7 +570,7 @@ State:
 - Consent was not accepted.
 
 ```http
-POST /api/v1/app/device/register
+POST /api/app/device/register
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -603,7 +603,7 @@ State:
 - Enrollment token is consumed.
 
 ```http
-POST /api/v1/app/device/register
+POST /api/app/device/register
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 

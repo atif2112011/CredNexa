@@ -158,6 +158,7 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
 
   let remainingAmount = Number(payment.amount);
   const matchedInstallments = [];
+  const paidInstallmentIds = [];
 
   for (const installment of schedule.installments) {
     if (remainingAmount <= 0) break;
@@ -173,6 +174,7 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
     if (installment.paidAmount >= Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0)) {
       installment.status = "paid";
       installment.paidAt = new Date();
+      paidInstallmentIds.push(installment._id);
     } else {
       installment.status = "partial";
     }
@@ -189,6 +191,13 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
   }, 0);
 
   await schedule.save({ session });
+  if (paidInstallmentIds.length) {
+    await Device.updateOne(
+      { userId: payment.userId, tenantId: payment.tenantId },
+      { $pull: { graceReminderHistory: { installmentId: { $in: paidInstallmentIds } } } },
+      { session }
+    );
+  }
   payment.emiScheduleId = schedule._id;
   payment.matchedInstallments = matchedInstallments;
   payment.metadata = {
@@ -1876,6 +1885,11 @@ export const approveTenantUnlockRequest = async (req, res) => {
         installment.waivedAt = new Date();
         installment.waiveReason = unlockRequest.caseId;
         await schedule.save({ session });
+        await Device.updateOne(
+          { _id: device._id },
+          { $pull: { graceReminderHistory: { installmentId: installment._id } } },
+          { session }
+        );
       }
     }
 

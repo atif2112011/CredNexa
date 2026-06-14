@@ -2,7 +2,7 @@
 
 > **Purpose:** Operational flows for the Admin Dashboard used by EMI Shield super admins.
 > Login is already covered by `POST /auth/login`; these flows start after a valid `super_admin` access token exists.
-> **Base URL:** `https://api.emishield.in/api/v1`
+> **Base URL:** `https://api.emishield.in/api`
 
 ---
 

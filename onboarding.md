@@ -4,12 +4,12 @@
 
 This document matches the onboarding flow that is currently implemented and tested in the backend. It covers the Tenant App flow used by `tenant_admin` accounts and the Shield App flow used on the borrower's financed device.
 
-**Base URL:** `http://localhost:<PORT>/api/v1`
+**Base URL:** `http://localhost:<PORT>/api`
 
 In production this becomes the deployed API host, for example:
 
 ```text
-https://api.emishield.in/api/v1
+https://api.emishield.in/api
 ```
 
 ---
@@ -93,7 +93,7 @@ The tenant must have the `distribute` capability because distributor routes requ
 ## Step 1 - Tenant Admin Login
 
 ```http
-POST /api/v1/auth/login
+POST /api/auth/login
 Content-Type: application/json
 
 {
@@ -120,7 +120,7 @@ Authorization: Bearer <tenantAdminAccessToken>
 ## Step 2 - Check Tenant Dashboard
 
 ```http
-GET /api/v1/distributor/dashboard
+GET /api/distributor/dashboard
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -139,7 +139,7 @@ This is useful before and after onboarding to confirm counts change correctly.
 ## Step 3 - Register Borrower And EMI Details
 
 ```http
-POST /api/v1/distributor/users/register
+POST /api/distributor/users/register
 Authorization: Bearer <tenantAdminAccessToken>
 Content-Type: application/json
 
@@ -184,7 +184,7 @@ USER_REGISTERED
 ## Step 4 - Generate Enrollment QR
 
 ```http
-POST /api/v1/distributor/enrollment/qr
+POST /api/distributor/enrollment/qr
 Authorization: Bearer <tenantAdminAccessToken>
 Content-Type: application/json
 
@@ -268,7 +268,7 @@ No borrower, tenant, or loan identifiers are exposed in the QR.
 After QR provisioning, the Shield App asks for the borrower's mobile number and starts the OTP flow. The app can send the QR-provided `enrollmentToken` when it has one.
 
 ```http
-POST /api/v1/app/consent/initiate
+POST /api/app/consent/initiate
 Content-Type: application/json
 
 {
@@ -310,7 +310,7 @@ For testing, use:
 ## Step 7 - Verify Mock OTP
 
 ```http
-POST /api/v1/app/consent/verify-otp
+POST /api/app/consent/verify-otp
 Content-Type: application/json
 
 {
@@ -396,7 +396,7 @@ Important:
 The Shield App fetches the current consent version after OTP verification returns `nextStep: "SHOW_CONSENT"`.
 
 ```http
-GET /api/v1/app/consent/terms
+GET /api/app/consent/terms
 ```
 
 Expected result:
@@ -416,7 +416,7 @@ The borrower must accept the consent checkbox before device registration.
 Use the borrower user access token from OTP verification.
 
 ```http
-POST /api/v1/app/consent/accept
+POST /api/app/consent/accept
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -475,7 +475,7 @@ CONSENT_COMPLETED
 Use the borrower user access token from consent acceptance.
 
 ```http
-POST /api/v1/app/device/register
+POST /api/app/device/register
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -538,7 +538,7 @@ ACTIVATION_COMPLETE
 ## Step 11 - Fetch Current Device Policy
 
 ```http
-GET /api/v1/app/device/policy
+GET /api/app/device/policy
 Authorization: Bearer <borrowerUserAccessToken>
 ```
 
@@ -572,7 +572,7 @@ Shield App action:
 ## Step 11A - Device Ping
 
 ```http
-POST /api/v1/app/device/ping
+POST /api/app/device/ping
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -595,7 +595,7 @@ Backend actions:
 ## Step 11B - Device Sync
 
 ```http
-POST /api/v1/app/device/sync
+POST /api/app/device/sync
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -619,7 +619,7 @@ Backend actions:
 After the app applies a command locally:
 
 ```http
-POST /api/v1/app/device/command/ack
+POST /api/app/device/command/ack
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -641,7 +641,7 @@ Backend actions:
 ## Step 11D - Security Event
 
 ```http
-POST /api/v1/app/security/event
+POST /api/app/security/event
 Authorization: Bearer <borrowerUserAccessToken>
 Content-Type: application/json
 
@@ -668,7 +668,7 @@ Backend actions:
 ### Track enrollment status
 
 ```http
-GET /api/v1/distributor/enrollments/<enrollmentToken>/status
+GET /api/distributor/enrollments/<enrollmentToken>/status
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -691,7 +691,7 @@ Possible statuses:
 ### View borrower detail
 
 ```http
-GET /api/v1/distributor/users/<userId>
+GET /api/distributor/users/<userId>
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -707,7 +707,7 @@ Expected response includes:
 ### View device inventory
 
 ```http
-GET /api/v1/distributor/devices
+GET /api/distributor/devices
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -719,7 +719,7 @@ Expected response:
 ### View device detail
 
 ```http
-GET /api/v1/distributor/devices/<deviceId>
+GET /api/distributor/devices/<deviceId>
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -738,7 +738,7 @@ Expected response includes:
 Use this only before the device is registered.
 
 ```http
-POST /api/v1/distributor/enrollment/<oldEnrollmentToken>/regenerate
+POST /api/distributor/enrollment/<oldEnrollmentToken>/regenerate
 Authorization: Bearer <tenantAdminAccessToken>
 ```
 
@@ -823,7 +823,7 @@ For account tokens:
 3. Client calls:
 
 ```http
-POST /api/v1/auth/refresh-token
+POST /api/auth/refresh-token
 ```
 
 4. The server validates the HTTP-only refresh cookie.
@@ -865,14 +865,14 @@ In this implementation:
 ### Borrower fetches active QR
 
 ```http
-GET /api/v1/app/payment/qr
+GET /api/app/payment/qr
 Authorization: Bearer <borrowerUserAccessToken>
 ```
 
 ### Borrower submits payment
 
 ```http
-POST /api/v1/app/payment/submit
+POST /api/app/payment/submit
 Authorization: Bearer <borrowerUserAccessToken>
 
 {
@@ -885,7 +885,7 @@ Authorization: Bearer <borrowerUserAccessToken>
 ### Tenant approves payment
 
 ```http
-POST /api/v1/distributor/payments/:paymentId/approve
+POST /api/distributor/payments/:paymentId/approve
 Authorization: Bearer <tenantAdminAccessToken>
 
 {
@@ -898,7 +898,7 @@ This marks EMI installments paid, queues an `UNLOCK` command, and the FCM worker
 ### Borrower creates unlock request
 
 ```http
-POST /api/v1/app/unlock-request
+POST /api/app/unlock-request
 Authorization: Bearer <borrowerUserAccessToken>
 
 {
@@ -912,8 +912,8 @@ Authorization: Bearer <borrowerUserAccessToken>
 Tenant reviews it from:
 
 ```http
-GET /api/v1/distributor/unlock-requests
-POST /api/v1/distributor/unlock-requests/:caseId/approve
-POST /api/v1/distributor/unlock-requests/:caseId/temp-unlock
-POST /api/v1/distributor/unlock-requests/:caseId/reject
+GET /api/distributor/unlock-requests
+POST /api/distributor/unlock-requests/:caseId/approve
+POST /api/distributor/unlock-requests/:caseId/temp-unlock
+POST /api/distributor/unlock-requests/:caseId/reject
 ```

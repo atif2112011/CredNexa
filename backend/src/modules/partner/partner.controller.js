@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import mongoose from "mongoose";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
@@ -33,6 +34,10 @@ const buildPagination = (page, limit, total) => ({
 });
 
 const buildRegex = (value) => new RegExp(String(value).trim(), "i");
+
+const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
+
+const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
@@ -233,6 +238,7 @@ export const createPartnerTenant = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
+    const shouldCreateTenantAdmin = isTruthyQueryParam(req.query.app);
     const channelPartner = await ensurePartnerAccess(req, res);
     if (!channelPartner) return null;
 
@@ -267,6 +273,33 @@ export const createPartnerTenant = async (req, res) => {
       }
     }
 
+    let tenantAdminInput = null;
+    let tenantAdminPassword = null;
+
+    if (shouldCreateTenantAdmin) {
+      tenantAdminInput = req.body.tenantAdmin || {};
+      const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
+        .trim()
+        .toLowerCase();
+      const requestedTemporaryPassword = tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
+
+      if (!tenantAdminEmail) {
+        return sendError(res, 400, "Tenant admin email is required when app=true");
+      }
+
+      const existingAccount = await Account.findOne({ email: tenantAdminEmail }).lean();
+      if (existingAccount) {
+        return sendError(res, 400, "Account with this email already exists");
+      }
+
+      tenantAdminInput = {
+        name: tenantAdminInput.name || req.body.adminName || `${req.body.name} Admin`,
+        email: tenantAdminEmail,
+        mobile: tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone
+      };
+      tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
+    }
+
     session.startTransaction();
 
     const tenants = await Tenant.create(
@@ -287,6 +320,7 @@ export const createPartnerTenant = async (req, res) => {
       { session, ordered: true }
     );
     const tenant = tenants[0];
+    let createdTenantAdmin = null;
 
     const tenantPolicies = await TenantPolicy.create(
       [
@@ -308,6 +342,45 @@ export const createPartnerTenant = async (req, res) => {
       })),
       { session, ordered: true }
     );
+
+    if (shouldCreateTenantAdmin) {
+      const passwordHash = await bcrypt.hash(tenantAdminPassword, 12);
+      const tenantAdminAccounts = await Account.create(
+        [
+          {
+            name: tenantAdminInput.name,
+            email: tenantAdminInput.email,
+            mobile: tenantAdminInput.mobile,
+            role: ACCOUNT_ROLES.TENANT_ADMIN,
+            tenantId: tenant._id,
+            channelPartnerId: channelPartner._id,
+            passwordHash,
+            createdBy: req.auth.id
+          }
+        ],
+        { session, ordered: true }
+      );
+
+      createdTenantAdmin = tenantAdminAccounts[0];
+      tenant.adminAccountId = createdTenantAdmin._id;
+      await tenant.save({ session });
+
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+          actorId: req.auth.id,
+          tenantId: tenant._id,
+          channelPartnerId: channelPartner._id,
+          metadata: {
+            accountId: createdTenantAdmin._id,
+            role: createdTenantAdmin.role,
+            email: createdTenantAdmin.email,
+            source: "partner_tenant_create_app"
+          }
+        },
+        { session }
+      );
+    }
 
     await createAuditLog(
       {
@@ -346,7 +419,24 @@ export const createPartnerTenant = async (req, res) => {
     return sendSuccess(res, 201, "Partner tenant created successfully", {
       tenant,
       tenantPolicy: tenantPolicies[0],
-      devicePolicies
+      devicePolicies,
+      ...(createdTenantAdmin
+        ? {
+            tenantAdmin: {
+              accountId: createdTenantAdmin._id,
+              name: createdTenantAdmin.name,
+              email: createdTenantAdmin.email,
+              mobile: createdTenantAdmin.mobile,
+              role: createdTenantAdmin.role,
+              tenantId: createdTenantAdmin.tenantId,
+              channelPartnerId: createdTenantAdmin.channelPartnerId
+            },
+            credentials: {
+              email: createdTenantAdmin.email,
+              temporaryPassword: tenantAdminPassword
+            }
+          }
+        : {})
     });
   } catch (error) {
     if (session.inTransaction()) {

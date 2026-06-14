@@ -486,6 +486,113 @@ const sendIntegrityDecision = (res, statusCode, success, message, data) => {
   });
 };
 
+const DEFAULT_RISK_AUTO_LOCK_TYPES = [
+  "ROOT_DETECTED",
+  "TAMPER_DETECTED",
+  "DEVICE_INTEGRITY_COMPROMISED",
+  "APP_INTEGRITY_COMPROMISED"
+];
+const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
+
+const enforceRiskAutoLock = async ({ device, riskFlag, eventType, severity }) => {
+  const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId }).lean();
+  const riskRules = tenantPolicy?.riskRules || {};
+  const autoLockEnabled = riskRules.autoLockOnCriticalSecurityRisk !== false;
+  const autoLockTypes = riskRules.autoLockTypes?.length ? riskRules.autoLockTypes : DEFAULT_RISK_AUTO_LOCK_TYPES;
+
+  if (!autoLockEnabled || severity !== "critical" || !autoLockTypes.includes(eventType)) {
+    return { queued: false, reason: "RISK_RULE_NOT_MATCHED" };
+  }
+
+  if (device.state === DEVICE_STATES.LOCKED) {
+    return { queued: false, reason: "DEVICE_ALREADY_LOCKED" };
+  }
+
+  const policy = await DevicePolicy.findOne({
+    tenantId: device.tenantId,
+    policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+    isActive: true
+  }).lean();
+
+  if (!policy) {
+    return { queued: false, reason: "EMI_LOCKED_POLICY_NOT_FOUND" };
+  }
+
+  const existingCommand = await DeviceCommand.findOne({
+    deviceId: device._id,
+    commandType: "LOCK",
+    status: { $in: ["pending", "sent"] },
+    "payload.source": "risk_auto_lock",
+    "payload.riskFlagId": riskFlag._id.toString()
+  }).lean();
+
+  if (existingCommand) {
+    return { queued: false, reason: "LOCK_COMMAND_ALREADY_EXISTS", commandId: existingCommand._id };
+  }
+
+  const lockedDevice = await Device.findOneAndUpdate(
+    {
+      _id: device._id,
+      state: { $ne: DEVICE_STATES.LOCKED }
+    },
+    {
+      $set: {
+        state: DEVICE_STATES.LOCKED,
+        currentPolicyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+        currentPolicyId: policy._id,
+        stateUpdatedAt: new Date()
+      },
+      $inc: { desiredPolicyVersion: 1 },
+      $unset: { tempUnlockExpiresAt: "" }
+    },
+    { new: true }
+  );
+
+  if (!lockedDevice) {
+    return { queued: false, reason: "DEVICE_LOCK_CONDITION_FAILED" };
+  }
+
+  const command = await DeviceCommand.create({
+    deviceId: lockedDevice._id,
+    tenantId: lockedDevice.tenantId,
+    commandType: "LOCK",
+    triggeredBy: "auto_policy",
+    payload: {
+      source: "risk_auto_lock",
+      policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+      policyVersion: lockedDevice.desiredPolicyVersion,
+      reason: `Critical security risk: ${eventType}`,
+      riskFlagId: riskFlag._id.toString(),
+      riskType: eventType,
+      severity
+    }
+  });
+
+  await createAuditLog({
+    eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
+    actorCollection: "system",
+    tenantId: lockedDevice.tenantId,
+    userId: lockedDevice.userId,
+    deviceId: lockedDevice._id,
+    reason: `Critical security risk: ${eventType}`,
+    metadata: {
+      source: "risk_auto_lock",
+      riskFlagId: riskFlag._id,
+      commandId: command._id,
+      riskType: eventType,
+      severity
+    }
+  });
+
+  return {
+    queued: true,
+    commandId: command._id,
+    deviceState: lockedDevice.state,
+    policyKey: lockedDevice.currentPolicyKey,
+    policyVersion: lockedDevice.desiredPolicyVersion
+  };
+};
+
 const getDeviceSyncState = async (device) => {
   const [policy, pendingCommands] = await Promise.all([
     DevicePolicy.findOne({ tenantId: device.tenantId, policyKey: device.currentPolicyKey, isActive: true }).lean(),
@@ -1832,6 +1939,9 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
       if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
       if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
+      if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
+        device.state = command.payload.targetState;
+      }
       device.lastPolicyAppliedAt = new Date();
       device.stateUpdatedAt = new Date();
       await device.save();
@@ -1874,6 +1984,10 @@ export const reportSecurityEvent = async (req, res) => {
     }
 
     const severity = req.body.severity || "medium";
+    if (!RISK_SEVERITIES.includes(severity)) {
+      return sendError(res, 400, "Invalid security event severity");
+    }
+
     if (["ROOT_DETECTED", "TAMPER_DETECTED"].includes(req.body.type)) {
       device.isRooted = req.body.type === "ROOT_DETECTED" ? true : device.isRooted;
       device.isTampered = req.body.type === "TAMPER_DETECTED" ? true : device.isTampered;
@@ -1899,6 +2013,13 @@ export const reportSecurityEvent = async (req, res) => {
       metadata: req.body.metadata || {}
     });
 
+    const autoLock = await enforceRiskAutoLock({
+      device,
+      riskFlag,
+      eventType: req.body.type,
+      severity
+    });
+
     await createAuditLog({
       eventType: AUDIT_EVENTS.DEVICE_SECURITY_EVENT_RECEIVED,
       actorId: req.auth.id,
@@ -1906,12 +2027,13 @@ export const reportSecurityEvent = async (req, res) => {
       tenantId: device.tenantId,
       userId: req.auth.id,
       deviceId: device._id,
-      metadata: { riskFlagId: riskFlag._id, type: req.body.type, severity }
+      metadata: { riskFlagId: riskFlag._id, type: req.body.type, severity, autoLock }
     });
 
     return sendSuccess(res, 201, "Security event recorded", {
       riskFlagId: riskFlag._id,
-      status: riskFlag.status
+      status: riskFlag.status,
+      autoLock
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

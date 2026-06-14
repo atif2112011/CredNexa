@@ -1,8 +1,8 @@
-﻿# EMI Shield — End-to-End Flows
+# EMI Shield — End-to-End Flows
 
 > **Purpose:** Step-by-step flows for every actor from initial partner setup through device onboarding.
 > Each step maps to the exact API call, the data it needs, and what the backend does.
-> **Base URL for all calls:** `https://api.emishield.in/api/v1`
+> **Base URL for all calls:** `https://api.emishield.in/api`
 
 ---
 
@@ -747,33 +747,53 @@ A device state change can be triggered by:
 
 | Trigger source | Example | `triggeredBy` value |
 |---|---|---|
-| Scheduler (auto) | EMI DPD Calculator detects unpaid EMI → lock device | `auto_policy` |
+| Scheduler (auto) | EMI policy job detects grace/lock threshold | `auto_policy` |
 | Scheduler (auto) | Temp Unlock Expiry — `tempUnlockExpiresAt` passed | `temp_unlock_expiry` |
 | Payment webhook | Payment validated → unlock device | `payment_unlock` |
 | Tenant admin (manual) | Partner App: Grant temp unlock | `manual_tenant` |
 | Super Admin (override) | Admin Panel: Force unlock with reason | `super_admin` |
 
-For this example we trace: **EMI DPD Calculator fires at midnight — a device transitions GRACE_PERIOD → LOCKED.**
+For this example we trace: **EMI policy job transitions a device through GRACE_PERIOD and then LOCKED if unpaid.**
 
 ---
 
 ### Step 5.2 — Backend: Update Device State + Create Command
 
-**Executed by:** EMI DPD Calculator scheduled job (or equivalent trigger)
+**Executed by:** EMI Policy scheduled job (every 30 minutes)
 
 ```
 [Server — internal, no HTTP call]
 
 1. Query:
-   emiSchedules where status = 'overdue'
-   AND dpd > tenantPolicies.gracePeriodDays
-   AND devices.state = 'GRACE_PERIOD'
+   emiSchedules with unpaid installments
+   AND dueDate is within the reminder/overdue scan window
 
 2. For each matching device:
-   a. UPDATE devices:
+   a. If now is within dueDate + dpd through dueDate + dpd + gracePeriodDays:
+      UPDATE devices:
+      { state: 'GRACE_PERIOD', policyKey: 'EMI_GRACE', policyVersion: N+1 }
+
+      INSERT deviceCommands:
+      {
+        commandType: 'POLICY_UPDATE',
+        triggeredBy: 'auto_policy',
+        payload: { targetState: 'GRACE_PERIOD', policyKey: 'EMI_GRACE', policyVersion: N+1 }
+      }
+
+      Every 12 hours until grace expires:
+      INSERT deviceCommands:
+      {
+        commandType: 'NOTIFICATION',
+        payload: { notificationType: 'GRACE_PERIOD_REMINDER', ... }
+      }
+
+      Store sent timestamps in devices.graceReminderHistory.
+
+   b. If now is after dueDate + dpd + gracePeriodDays:
+      UPDATE devices:
       { state: 'LOCKED', policyKey: 'EMI_LOCKED', policyVersion: N+1 }
 
-   b. INSERT deviceCommands:
+   c. INSERT deviceCommands:
       {
         deviceId:    <ObjectId>,
         userId:      <ObjectId>,
@@ -784,7 +804,7 @@ For this example we trace: **EMI DPD Calculator fires at midnight — a device t
         status:      'pending'
       }
 
-   c. INSERT auditLogs:
+   d. INSERT auditLogs:
       { event: 'DEVICE_LOCKED', actorType: 'system', ... }
 ```
 

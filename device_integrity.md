@@ -264,8 +264,8 @@ Request body to send to the backend:
 
 ```json
 {
-  "type": "DEVICE_INTEGRITY_FAILED",
-  "severity": "high",
+  "type": "DEVICE_INTEGRITY_COMPROMISED",
+  "severity": "critical",
   "message": "Play Integrity verdict did not meet the required device integrity level",
   "metadata": {
     "source": "APP_CRON",
@@ -279,7 +279,7 @@ Request body to send to the backend:
 
 Required fields:
 
-- `type`: Stable event/risk identifier, such as `ROOT_DETECTED`, `TAMPER_DETECTED`, or `DEVICE_INTEGRITY_FAILED`.
+- `type`: Stable event/risk identifier, such as `ROOT_DETECTED`, `TAMPER_DETECTED`, `DEVICE_INTEGRITY_COMPROMISED`, or `APP_INTEGRITY_COMPROMISED`.
 - `message`: Human-readable summary for support/admin review.
 
 Optional fields:
@@ -292,6 +292,7 @@ Backend behavior:
 - Finds the registered device from the authenticated user token.
 - Creates a `DeviceEvent` with `eventType: "security"`.
 - Creates a `RiskFlag` using `type`, `severity`, `message`, and `metadata`.
+- If `severity` is `critical` and `type` is configured in `tenantPolicies.riskRules.autoLockTypes`, backend queues a `LOCK` command and the existing FCM command worker delivers the policy update.
 - Marks `device.isRooted = true` when `type` is `ROOT_DETECTED`.
 - Marks `device.isTampered = true` when `type` is `TAMPER_DETECTED`.
 - Writes a device security audit log.
@@ -332,8 +333,8 @@ Response:
 
 ```json
 {
-  "type": "DEVICE_INTEGRITY_FAILED",
-  "severity": "high",
+  "type": "DEVICE_INTEGRITY_COMPROMISED",
+  "severity": "critical",
   "message": "Play Integrity verdict failed during periodic device check",
   "metadata": {
     "source": "APP_CRON",

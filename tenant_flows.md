@@ -2,7 +2,7 @@
 
 > **Purpose:** Flows for the Tenant App used by `tenant_admin` to onboard borrowers and track device activation.
 > These flows focus only on onboarding new users and registering financed devices.
-> **Base URL:** `https://api.emishield.in/api/v1`
+> **Base URL:** `https://api.emishield.in/api`
 
 ---
 

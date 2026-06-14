@@ -58,7 +58,7 @@
 - TEMP_UNLOCK expires while no overdue EMI exists (scheduler re-evaluates → ACTIVE if paid)
 
 **Triggered out of ACTIVE:**
-- EMI DPD Calculator detects EMI is overdue → `GRACE_PERIOD`
+- EMI policy job detects the installment is inside the configured grace window → `GRACE_PERIOD`
 
 **Device enforcement (`EMI_PAID` policy):**
 - `lockMode: false`
@@ -83,7 +83,7 @@
 | `devices.policyKey` | `EMI_GRACE` |
 
 **Triggered into GRACE_PERIOD from:**
-- `ACTIVE`: EMI DPD Calculator detects `dpd > 0` and device is within configured grace window
+- `ACTIVE`: EMI policy job detects `dueDate + dpd <= now < dueDate + dpd + gracePeriodDays`
 
 **Triggered out of GRACE_PERIOD:**
 - Payment validated before grace window closes → `ACTIVE`
@@ -101,7 +101,11 @@
 - Pay Now button prominently shown
 - All other app functions work normally
 
-**FCM sent:** `NOTIFICATION` type — `notificationType: GRACE_PERIOD_START`
+**Backend commands/FCM:**
+- `POLICY_UPDATE` command with `commandType: POLICY_UPDATE`, `targetState: GRACE_PERIOD`, and `policyKey: EMI_GRACE`
+- `NOTIFICATION` command with `notificationType: GRACE_PERIOD_REMINDER`
+- Grace reminder notifications repeat every 12 hours until grace expires
+- `devices.graceReminderHistory[]` stores each reminder timestamp and command id so the cron does not spam reminders
 
 ---
 
@@ -267,7 +271,7 @@
 | From | To | Trigger | Actor |
 |---|---|---|---|
 | *(registration complete)* | `ACTIVE` | Device registered + consent complete | System |
-| `ACTIVE` | `GRACE_PERIOD` | EMI DPD Calculator detects overdue EMI | Scheduler (daily midnight) |
+| `ACTIVE` | `GRACE_PERIOD` | EMI policy job detects active grace window | Scheduler (every 30 minutes) |
 | `GRACE_PERIOD` | `ACTIVE` | Tenant approves payment before grace closes | System (tenant approval) |
 | `GRACE_PERIOD` | `LOCKED` | Grace window closes, EMI unpaid | Scheduler (daily midnight) |
 | `LOCKED` | `UNLOCK_PENDING` | Tenant approves payment, instant unlock policy | System (tenant approval via Partner App) |
@@ -286,25 +290,29 @@
 
 ## 4. Scheduler-Triggered Transitions
 
-### 4.1 EMI DPD Calculator — Daily at Midnight
+### 4.1 EMI Policy Job — Every 30 Minutes
 
 **What it does:**
-1. Queries all `emiSchedules` where `status: overdue` or `dpd > 0`
+1. Queries schedules with unpaid installments due within the reminder/overdue window.
 2. For each overdue device:
    - Recalculates `dpd` (days past due)
-   - If `devices.state === 'ACTIVE'` and `dpd > 0` → transition to `GRACE_PERIOD`
-   - If `devices.state === 'GRACE_PERIOD'` and grace window has closed → transition to `LOCKED`
+   - If the installment is inside `dueDate + dpd` through `dueDate + dpd + gracePeriodDays` → transition to `GRACE_PERIOD`
+   - Sends `GRACE_PERIOD_REMINDER` every 12 hours while grace is active
+   - If grace window has closed and EMI is still unpaid → transition to `LOCKED`
+   - Skips grace state/reminders when the device is already `LOCKED`
+   - Skips grace state/reminders when `TEMP_UNLOCK` is active and not expired
 3. For each newly LOCKED device:
    - Updates `devices.state`, `devices.policyKey`, increments `devices.policyVersion`
    - Creates `deviceCommands` record (`commandType: LOCK`, `triggeredBy: auto_policy`)
    - Sends FCM `POLICY_UPDATE` to `devices.fcmToken`
-   - Creates `notifications` record (`type: DEVICE_LOCKED`)
    - Writes `auditLogs` entry
 
 **Grace window:**
-- Configured in `tenantPolicies.gracePeriodDays`
-- Default: 3 days after EMI due date
+- Configured in `tenantPolicies.lockRules.gracePeriodDays`
+- Default: 7 days after configured DPD
 - Configurable per tenant from Partner App
+- Reminder timestamps are stored in `devices.graceReminderHistory`
+- `graceReminderHistory` is cleared for an installment when that installment is paid or waived
 
 ### 4.2 Temp Unlock Expiry — Every 1 Minute
 
@@ -397,8 +405,8 @@ Each state transition sends one or more FCM messages to the target device. The b
 
 | Transition | FCM `type` | `notificationType` / `commandType` | User-visible? |
 |---|---|---|---|
-| ACTIVE → GRACE_PERIOD | `POLICY_UPDATE` | commandType: `LOCK` (partial) | No (silent) |
-| ACTIVE → GRACE_PERIOD | `NOTIFICATION` | `GRACE_PERIOD_START` | Yes — warning banner |
+| ACTIVE → GRACE_PERIOD | `POLICY_UPDATE` | commandType: `POLICY_UPDATE`, policyKey: `EMI_GRACE` | No (silent) |
+| ACTIVE/GRACE_PERIOD → GRACE_PERIOD | `NOTIFICATION` | `GRACE_PERIOD_REMINDER` every 12 hours | Yes — warning banner/reminder |
 | GRACE_PERIOD → LOCKED | `POLICY_UPDATE` | commandType: `LOCK` | No (silent) |
 | GRACE_PERIOD → LOCKED | `NOTIFICATION` | `DEVICE_LOCKED` | Yes — lock screen |
 | LOCKED → TEMP_UNLOCK | `POLICY_UPDATE` | commandType: `TEMP_UNLOCK` | No (silent) |

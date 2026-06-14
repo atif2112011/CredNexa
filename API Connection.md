@@ -2,7 +2,7 @@
 
 > **For:** Android App Developers  
 > **Purpose:** Maps every app use case (UC-1 to UC-32) to the exact API calls required, the request payloads to send, and how to handle the response.  
-> **Base URL:** `https://api.emishield.in/api/v1`  
+> **Base URL:** `https://api.emishield.in/api`  
 > **Auth:** All `/app/*` and `/device/*` routes require `Authorization: Bearer <accessToken>` (tokenType: `user`)
 
 ---
@@ -676,7 +676,7 @@ Authorization: Bearer <accessToken>
 | `COMMAND` | Lock/unlock command issued | See UC-26 — verify + execute + ack |
 | `EMI_REMINDER` | EMI due soon | Show local notification |
 | `OVERDUE_WARNING` | EMI is overdue | Show warning notification |
-| `GRACE_PERIOD_START` | Grace period started | Show notification + banner |
+| `GRACE_PERIOD_REMINDER` | Grace period active / reminder | Show notification + banner |
 | `DEVICE_LOCKED` | Device has been locked | Apply lock if not already |
 | `UNLOCK_SUCCESS` | Device unlocked | Remove lock screen |
 | `UNLOCK_REQUEST_RECEIVED` | Server received your unlock request | Show notification |

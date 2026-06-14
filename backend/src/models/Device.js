@@ -49,6 +49,23 @@ const deviceSchema = new mongoose.Schema(
       ref: "Account"
     },
     tempUnlockExpiresAt: Date,
+    graceReminderHistory: [
+      {
+        installmentId: {
+          type: mongoose.Schema.Types.ObjectId
+        },
+        sentAt: {
+          type: Date,
+          required: true
+        },
+        graceStartedAt: Date,
+        graceExpiresAt: Date,
+        commandId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "DeviceCommand"
+        }
+      }
+    ],
     currentPolicyKey: {
       type: String,
       enum: Object.values(DEVICE_POLICY_KEYS),

@@ -251,12 +251,11 @@ See `architecture.md` Section 6 for all routes with request/response examples.
 
 | Prefix | Who Uses It | Auth |
 |---|---|---|
-| `/api/v1/auth` | Everyone | Public (OTP) / Credential |
-| `/api/v1/app` | Borrowers (Android app) | `tokenType: user` JWT |
-| `/api/v1/distributor` | `tenant_admin` with `distribute` capability | `tokenType: account` |
-| `/api/v1/partner` | `partner_admin` for partner dashboard, tenant onboarding, tenant admin accounts, and partner escalations | `tokenType: account` + `role: partner_admin` |
-| `/api/v1/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
-| `/api/v1/device` | Android app (device sync) | `tokenType: user` JWT (device-bound) |
+| `/api/auth` | Everyone | Public / Credential |
+| `/api/app` | Borrowers (Android app) | `tokenType: user` JWT |
+| `/api/distributor` | `tenant_admin` with `distribute` capability | `tokenType: account` |
+| `/api/partner` | `partner_admin` for partner dashboard, tenant onboarding, tenant admin accounts, and partner escalations | `tokenType: account` + `role: partner_admin` |
+| `/api/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
 
 ---
 
@@ -292,12 +291,10 @@ The backend needs these cron jobs running continuously:
 
 | Job | Frequency | What It Does |
 |---|---|---|
-| SLA Escalation Checker | Every 5 min | Auto-escalates `PENDING_TENANT` unlock requests past their `slaDeadline` |
-| Temp Unlock Expiry | Every 1 min | Re-locks `TEMP_UNLOCK` devices past their `tempUnlockExpiresAt` |
-| Command Retry | Every 10 min | Retries `pending` device commands not yet delivered |
-| EMI DPD Calculator | Daily midnight | Recalculates `dpd` on all schedules, triggers auto-lock policy evaluation |
-| Risk Flag Generator | Every 30 min | Detects override spikes, repeated SLA breaches, generates `riskFlags` |
-| Payment Validation Retry | Every 15 min | Retries `mismatch` / stuck `pending` payment validations |
+| FCM Delivery Job | Every 5 min | Delivers queued `DeviceCommand` records through FCM |
+| Temp Unlock Expiry | Every 10 min | Re-locks `TEMP_UNLOCK` devices past their `tempUnlockExpiresAt` |
+| SLA Escalation Checker | Every 30 min | Auto-escalates unlock requests past tenant/partner SLA deadlines |
+| EMI Policy Job | Every 30 min | Sends upcoming EMI reminders, transitions devices into `GRACE_PERIOD`, sends 12-hour grace reminders, and locks after DPD + grace |
 
 ---
 

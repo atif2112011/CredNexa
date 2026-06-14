@@ -37,6 +37,18 @@ const tenantPolicySchema = new mongoose.Schema(
       partnerEscalationSlaHours: { type: Number, default: 48 },
       autoEscalateOnSLABreach: { type: Boolean, default: true }
     },
+    riskRules: {
+      autoLockOnCriticalSecurityRisk: { type: Boolean, default: true },
+      autoLockTypes: {
+        type: [String],
+        default: [
+          "ROOT_DETECTED",
+          "TAMPER_DETECTED",
+          "DEVICE_INTEGRITY_COMPROMISED",
+          "APP_INTEGRITY_COMPROMISED"
+        ]
+      }
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account"

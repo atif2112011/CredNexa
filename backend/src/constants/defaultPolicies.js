@@ -21,6 +21,15 @@ export const DEFAULT_TENANT_POLICY = Object.freeze({
     slaHours: 24,
     partnerEscalationSlaHours: 48,
     autoEscalateOnSLABreach: true
+  },
+  riskRules: {
+    autoLockOnCriticalSecurityRisk: true,
+    autoLockTypes: [
+      "ROOT_DETECTED",
+      "TAMPER_DETECTED",
+      "DEVICE_INTEGRITY_COMPROMISED",
+      "APP_INTEGRITY_COMPROMISED"
+    ]
   }
 });
 

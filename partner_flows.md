@@ -2,7 +2,7 @@
 
 > **Purpose:** Flows for the Partner App used by `partner_admin` accounts.
 > A partner can onboard tenants under their own channel partner and resolve escalated cases from those tenants.
-> **Base URL:** `https://api.emishield.in/api/v1`
+> **Base URL:** `https://api.emishield.in/api`
 
 ---
 
@@ -13,8 +13,8 @@
 | Partner Admin Login | `POST /auth/login` | Available |
 | Partner Dashboard | `GET /partner/dashboard` | Available |
 | Tenant List | `GET /partner/tenants` | Available |
-| Create Tenant | `POST /partner/tenants` | Available |
-| Tenant Admin Account Management | `/partner/accounts/*` | Available |
+| Create Tenant | `POST /partner/tenants?app=true` | Available |
+| Tenant Admin Account Management | `/partner/accounts/*` | Backend available; Partner App should not expose separate CRUD screens |
 | Partner Escalation Queue | `GET /partner/escalations` | Available |
 | Partner Escalation Detail | `GET /partner/escalations/:caseId` | Available |
 | Resolve Partner Escalation | `/partner/escalations/:caseId/*` | Available |
@@ -118,7 +118,7 @@ Authorization: Bearer <partnerAdminToken>
 > **Outcome:** Partner creates a tenant under their own channel partner.
 
 ```http
-POST /partner/tenants
+POST /partner/tenants?app=true
 Authorization: Bearer <partnerAdminToken>
 
 Body:
@@ -135,6 +135,12 @@ Body:
     "city": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302001"
+  },
+  "tenantAdmin": {
+    "name": "Priya Sharma",
+    "email": "priya@bharatjaipur.in",
+    "mobile": "9800000011",
+    "temporaryPassword": "optional"
   }
 }
 ```
@@ -151,7 +157,10 @@ Body:
 4. Creates `tenants`.
 5. Copies centralized `DEFAULT_TENANT_POLICY` into `tenantPolicies`.
 6. Copies centralized `DEFAULT_DEVICE_POLICIES` into `devicePolicies`.
-7. Writes audit logs.
+7. Because `app=true`, creates the default `tenant_admin` account.
+8. Links `tenants.adminAccountId`.
+9. Returns one-time tenant admin credentials in `credentials`.
+10. Writes audit logs.
 
 **API status:** Available.
 
