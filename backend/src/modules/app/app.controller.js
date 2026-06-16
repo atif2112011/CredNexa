@@ -466,6 +466,8 @@ const evaluatePlayIntegrityVerdict = ({ challenge, summary, localSignals = {} })
 };
 
 const applyObserveModeDecision = (decision) => {
+  // DEVICE_INTEGRITY_MODE=observe records failed verdicts but lets the app continue;
+  // DEVICE_INTEGRITY_MODE=enforce returns the real block/retry/manual_review decision.
   if (["enforce", "enforcement"].includes(env.deviceIntegrityMode) || decision.decision === "allow") {
     return decision;
   }
