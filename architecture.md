@@ -227,8 +227,8 @@ Dashboard login credentials for all non-borrower actors: super admins, partner a
 {
   _id: ObjectId,
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  mobile: { type: String },
+  email: { type: String, partialUnique: true }, // optional for partner self-signup accounts
+  mobile: { type: String, index: true },
   passwordHash: { type: String, required: true },
 
   role: {
@@ -1357,13 +1357,16 @@ Critical risk event types in `tenantPolicies.riskRules.autoLockTypes` queue a ba
 
 ### 6.4 Partner Admin Routes (`/partner`)
 
-> Requires `tokenType: account` + `role: partner_admin`.
-> Partner scope is always derived from `req.auth.channelPartnerId`.
+Signup routes are public. Operational partner routes require `tokenType: account` + `role: partner_admin`.
+Partner scope is always derived from `req.auth.channelPartnerId`.
 
 #### Implemented Partner App Routes
 
 | Method | Route | Description |
 |---|---|---|
+| POST | `/partner/signup/initiate-otp` | Public partner signup OTP initiation; mock OTP is `123456` |
+| POST | `/partner/signup/verify-otp` | Public partner signup OTP verification |
+| POST | `/partner/signup/complete?createAccount=true` | Public partner signup completion; creates `ChannelPartner` and optional `partner_admin` account |
 | GET | `/partner/dashboard` | Partner-wide tenant, account, borrower, device, and case summary |
 | GET | `/partner/tenants` | List tenants under the authenticated partner |
 | POST | `/partner/tenants` | Create tenant under the authenticated partner and copy centralized default policies |

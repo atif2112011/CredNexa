@@ -254,7 +254,7 @@ See `architecture.md` Section 6 for all routes with request/response examples.
 | `/api/auth` | Everyone | Public / Credential |
 | `/api/app` | Borrowers (Android app) | `tokenType: user` JWT |
 | `/api/distributor` | `tenant_admin` with `distribute` capability | `tokenType: account` |
-| `/api/partner` | `partner_admin` for partner dashboard, tenant onboarding, tenant admin accounts, and partner escalations | `tokenType: account` + `role: partner_admin` |
+| `/api/partner` | Public partner signup plus `partner_admin` dashboard, tenant onboarding, tenant admin accounts, and partner escalations | Signup public; operational routes require `tokenType: account` + `role: partner_admin` |
 | `/api/admin` | Super admin only | `tokenType: account` + `role: super_admin` |
 
 ---

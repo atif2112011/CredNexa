@@ -971,14 +971,17 @@ export const createIntegrityChallenge = async (req, res) => {
 export const verifyIntegrity = async (req, res) => {
   try {
     if (!hasRequiredFields(req.body, ["challengeId", "integrityToken", "action"])) {
+      console.error("[verifyIntegrity] Missing required fields", { body: req.body });
       return sendError(res, 400, "Challenge ID, integrity token, and action are required");
     }
 
     if (!mongoose.isValidObjectId(req.body.challengeId)) {
+      console.error("[verifyIntegrity] Invalid challenge ID", { challengeId: req.body.challengeId });
       return sendError(res, 400, "Valid challenge ID is required");
     }
 
     if (!Object.values(DEVICE_INTEGRITY_ACTIONS).includes(req.body.action)) {
+      console.error("[verifyIntegrity] Invalid integrity action", { action: req.body.action });
       return sendError(res, 400, "Valid integrity action is required");
     }
 
@@ -989,10 +992,12 @@ export const verifyIntegrity = async (req, res) => {
     });
 
     if (!challenge) {
+      console.error("[verifyIntegrity] Valid integrity challenge not found", { challengeId: req.body.challengeId, userId: req.auth.id, action: req.body.action });
       return sendError(res, 400, "Valid integrity challenge not found");
     }
 
     if (challenge.consumedAt) {
+      console.error("[verifyIntegrity] Integrity challenge has already been used", { challengeId: challenge._id });
       return sendError(res, 400, "Integrity challenge has already been used");
     }
 
@@ -1102,6 +1107,7 @@ export const verifyIntegrity = async (req, res) => {
     }
 
     if (finalDecision.decision === "retry") {
+      console.error("[verifyIntegrity] Retry decision issued", { challengeId: challenge._id });
       return sendIntegrityDecision(res, 400, false, "Unable to verify device security. Please try again.", {
         decision: "retry",
         integrityStatus: finalDecision.integrityStatus,
@@ -1109,7 +1115,7 @@ export const verifyIntegrity = async (req, res) => {
         retryAfterSeconds: 30
       });
     }
-
+    console.error("[verifyIntegrity] Device integrity verification failed", { challengeId: challenge._id });
     return sendIntegrityDecision(res, 400, false, "Device security verification failed. Please contact support.", {
       decision: finalDecision.decision,
       integrityStatus: finalDecision.integrityStatus,
@@ -1117,6 +1123,7 @@ export const verifyIntegrity = async (req, res) => {
       nextStep: "DEVICE_INTEGRITY_FAILED"
     });
   } catch (error) {
+    console.error("[verifyIntegrity] Internal server error", { error });
     return sendError(res, 500, error.message || "Internal server error");
   }
 };

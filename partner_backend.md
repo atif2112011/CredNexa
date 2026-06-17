@@ -6,7 +6,9 @@ Base URL:
 /api
 ```
 
-Partner APIs require an account access token from `/api/auth/login`.
+Partner signup endpoints under `/api/partner/signup/*` are public.
+
+Operational Partner APIs require an account access token from `/api/auth/login`.
 
 ```http
 Authorization: Bearer <accessToken>
@@ -39,19 +41,93 @@ Errors use:
 }
 ```
 
-## 1. Partner Login
+## 1. Partner Signup
+
+### Initiate OTP
+
+```http
+POST /api/partner/signup/initiate-otp
+```
+
+```json
+{
+  "mobile": "9876543210"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "OTP sent successfully",
+  "data": {
+    "verificationSessionId": "otp_...",
+    "otpSent": true,
+    "expiresInSeconds": 600
+  }
+}
+```
+
+OTP is mocked as `123456` for now.
+
+### Verify OTP
+
+```http
+POST /api/partner/signup/verify-otp
+```
+
+```json
+{
+  "mobile": "9876543210",
+  "verificationSessionId": "otp_...",
+  "otp": "123456"
+}
+```
+
+### Complete Signup
+
+```http
+POST /api/partner/signup/complete?createAccount=true
+```
+
+```json
+{
+  "name": "Ramesh Kumar",
+  "mobile": "9876543210",
+  "type": "independent",
+  "verificationSessionId": "otp_...",
+  "password": "Pass@123",
+  "email": "optional@example.com"
+}
+```
+
+Allowed `type` values: `nbfc_group`, `retail_chain_group`, `independent`.
+
+`email` is optional. `password` is required when `createAccount=true`.
+
+## 2. Partner Login
 
 ```http
 POST /api/auth/login
 ```
 
-Use partner admin email/password.
+Use partner admin email/password or mobile/password.
 
 ### Request
 
 ```json
 {
   "email": "partner-admin@example.com",
+  "password": "Password@123"
+}
+```
+
+Mobile login:
+
+```json
+{
+  "identifier": "9876543210",
   "password": "Password@123"
 }
 ```
@@ -66,12 +142,13 @@ Use partner admin email/password.
     "accessToken": "jwt-access-token",
     "tokenType": "account",
     "account": {
-      "id": "accountId",
-      "name": "Partner Admin",
-      "email": "partner-admin@example.com",
-      "role": "partner_admin",
-      "tenantId": null,
-      "channelPartnerId": "channelPartnerId"
+        "id": "accountId",
+        "name": "Partner Admin",
+        "email": "partner-admin@example.com",
+        "mobile": "9876543210",
+        "role": "partner_admin",
+        "tenantId": null,
+        "channelPartnerId": "channelPartnerId"
     }
   }
 }
@@ -84,18 +161,18 @@ Refresh token is set as an HTTP-only cookie.
 ```json
 {
   "success": false,
-  "error": "Email and password are required"
+  "error": "Email or identifier and password are required"
 }
 ```
 
 ```json
 {
   "success": false,
-  "error": "Invalid email or password"
+  "error": "Invalid credentials"
 }
 ```
 
-## 2. Get Logged-In Profile
+## 3. Get Logged-In Profile
 
 ```http
 GET /api/auth/me
@@ -126,7 +203,7 @@ Use for Profile screen and session validation.
 }
 ```
 
-## 3. Refresh Session
+## 4. Refresh Session
 
 ```http
 POST /api/auth/refresh-token
@@ -160,7 +237,7 @@ No body required.
 }
 ```
 
-## 4. Logout
+## 5. Logout
 
 ```http
 POST /api/auth/logout
@@ -182,7 +259,7 @@ No body required.
 }
 ```
 
-## 5. Partner Dashboard
+## 6. Partner Dashboard
 
 ```http
 GET /api/partner/dashboard
@@ -255,7 +332,7 @@ Shows tenants, borrowers, devices, open cases, partner escalations, and recent e
 }
 ```
 
-## 6. Tenant List
+## 7. Tenant List
 
 ```http
 GET /api/partner/tenants
@@ -321,7 +398,7 @@ GET /api/partner/tenants?status=active&capability=lend&search=pune&page=1&limit=
 }
 ```
 
-## 7. Create Tenant
+## 8. Create Tenant
 
 ```http
 POST /api/partner/tenants?app=true
@@ -459,7 +536,7 @@ If `tenantAdmin.temporaryPassword` or root `temporaryPassword` is not sent, back
 }
 ```
 
-## 8. Escalation List
+## 9. Escalation List
 
 ```http
 GET /api/partner/escalations
@@ -521,7 +598,7 @@ Shows partner escalation queue.
 }
 ```
 
-## 9. Escalation Detail
+## 10. Escalation Detail
 
 ```http
 GET /api/partner/escalations/:caseId
@@ -596,7 +673,7 @@ Shows borrower, tenant, device, evidence image, reference text/details, command 
 }
 ```
 
-## 10. Temporary Unlock Escalation
+## 11. Temporary Unlock Escalation
 
 ```http
 POST /api/partner/escalations/:caseId/temp-unlock
@@ -670,7 +747,7 @@ Used from Resolve Escalation. Requires `durationHours` and `note`.
 }
 ```
 
-## 11. Reject Escalation
+## 12. Reject Escalation
 
 ```http
 POST /api/partner/escalations/:caseId/reject

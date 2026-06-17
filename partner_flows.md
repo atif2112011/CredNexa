@@ -10,6 +10,9 @@
 
 | Flow | Required API | Status |
 |---|---|---|
+| Partner Signup OTP | `POST /partner/signup/initiate-otp` | Available |
+| Partner Signup Verify OTP | `POST /partner/signup/verify-otp` | Available |
+| Partner Signup Complete | `POST /partner/signup/complete?createAccount=true` | Available |
 | Partner Admin Login | `POST /auth/login` | Available |
 | Partner Dashboard | `GET /partner/dashboard` | Available |
 | Tenant List | `GET /partner/tenants` | Available |
@@ -23,17 +26,71 @@
 
 ## Scope Rules
 
-1. Partner APIs require `tokenType: account` and `role: partner_admin`.
-2. `channelPartnerId` is always resolved from the partner admin JWT.
-3. Partner requests must not send `channelPartnerId` to choose scope.
-4. Partner-created tenants automatically belong to the authenticated partner.
-5. Partner-created tenants receive centralized default `tenantPolicies` and all default `devicePolicies`.
-6. Partner account APIs can create and manage only `tenant_admin` accounts for tenants under that partner.
-7. Partner escalation APIs can act only on cases with `status: ESCALATED_PARTNER`.
+1. Partner signup APIs under `/partner/signup/*` are public.
+2. Operational Partner APIs require `tokenType: account` and `role: partner_admin`.
+3. `channelPartnerId` is always resolved from the partner admin JWT.
+4. Partner requests must not send `channelPartnerId` to choose scope.
+5. Partner-created tenants automatically belong to the authenticated partner.
+6. Partner-created tenants receive centralized default `tenantPolicies` and all default `devicePolicies`.
+7. Partner account APIs can create and manage only `tenant_admin` accounts for tenants under that partner.
+8. Partner escalation APIs can act only on cases with `status: ESCALATED_PARTNER`.
 
 ---
 
-## Flow PA-1 - Partner Admin Login
+## Flow PA-1 - Partner Signup
+
+> **Actor:** New Partner  
+> **Outcome:** Partner verifies mobile, creates a channel partner, and gets a `partner_admin` account.
+
+```http
+POST /partner/signup/initiate-otp
+
+Body:
+{
+  "mobile": "9876543210"
+}
+```
+
+The OTP is mocked as `123456`.
+
+```http
+POST /partner/signup/verify-otp
+
+Body:
+{
+  "mobile": "9876543210",
+  "verificationSessionId": "otp_...",
+  "otp": "123456"
+}
+```
+
+```http
+POST /partner/signup/complete?createAccount=true
+
+Body:
+{
+  "name": "Ramesh Kumar",
+  "mobile": "9876543210",
+  "type": "independent",
+  "verificationSessionId": "otp_...",
+  "password": "Pass@123",
+  "email": "optional@example.com"
+}
+```
+
+**Backend actions:**
+1. Validates mobile OTP.
+2. Validates unique phone number.
+3. Validates partner type: `nbfc_group`, `retail_chain_group`, or `independent`.
+4. Creates `channelPartners`.
+5. Creates linked `partner_admin` account when `createAccount=true`.
+6. Links `channelPartners.adminAccountId`.
+
+**API status:** Available.
+
+---
+
+## Flow PA-2 - Partner Admin Login
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner admin receives an account access token scoped to their channel partner.
@@ -43,13 +100,13 @@ POST /auth/login
 
 Body:
 {
-  "email": "partneradmin@example.com",
+  "identifier": "9876543210",
   "password": "Welcome@123"
 }
 ```
 
 **Backend actions:**
-1. Validates email and password.
+1. Validates email/password or mobile/password.
 2. Confirms account is active and role is `partner_admin`.
 3. Returns access token with `channelPartnerId`.
 4. Sets refresh token as HTTP-only cookie.
@@ -62,7 +119,7 @@ Body:
 
 ---
 
-## Flow PA-2 - Partner Dashboard
+## Flow PA-3 - Partner Dashboard
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner admin sees the operational health of all tenants under the partner.
@@ -92,7 +149,7 @@ Authorization: Bearer <partnerAdminToken>
 
 ---
 
-## Flow PA-3 - Tenant List
+## Flow PA-4 - Tenant List
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner admin can browse tenants under their channel partner.
@@ -112,7 +169,7 @@ Authorization: Bearer <partnerAdminToken>
 
 ---
 
-## Flow PA-4 - Create Tenant
+## Flow PA-5 - Create Tenant
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner creates a tenant under their own channel partner.
@@ -166,7 +223,7 @@ Body:
 
 ---
 
-## Flow PA-5 - Tenant Admin Account Management
+## Flow PA-6 - Tenant Admin Account Management
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner can create, list, update, activate, and deactivate `tenant_admin` accounts for partner-owned tenants.
@@ -231,7 +288,7 @@ Body:
 
 ---
 
-## Flow PA-6 - Partner Escalation Queue
+## Flow PA-7 - Partner Escalation Queue
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner sees cases escalated from tenants under their channel partner.
@@ -252,7 +309,7 @@ Authorization: Bearer <partnerAdminToken>
 
 ---
 
-## Flow PA-7 - Partner Escalation Detail
+## Flow PA-8 - Partner Escalation Detail
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner reviews evidence and history before resolving a case.
@@ -279,7 +336,7 @@ Authorization: Bearer <partnerAdminToken>
 
 ---
 
-## Flow PA-8 - Resolve Partner Escalation
+## Flow PA-9 - Resolve Partner Escalation
 
 > **Actor:** Partner Admin  
 > **Outcome:** Partner resolves a case with full unlock, temporary unlock, or rejection.

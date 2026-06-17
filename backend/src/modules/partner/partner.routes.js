@@ -5,37 +5,46 @@ import { requireRole } from "../../middleware/requireRole.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import {
+  completePartnerSignup,
   createPartnerTenant,
   createTenantAdminAccount,
   getPartnerDashboard,
   getPartnerEscalationByCaseId,
   getPartnerTenants,
+  initiatePartnerSignupOtp,
   listPartnerAccounts,
   listPartnerEscalations,
   rejectPartnerEscalation,
   tempUnlockPartnerEscalation,
   unlockPartnerEscalation,
   updatePartnerAccount,
-  updatePartnerAccountStatus
+  updatePartnerAccountStatus,
+  verifyPartnerSignupOtp
 } from "./partner.controller.js";
 
 export const partnerRoutes = Router();
 
-partnerRoutes.use(verifyJwt);
-partnerRoutes.use(requireTokenType("account"));
-partnerRoutes.use(requireRole(ACCOUNT_ROLES.PARTNER_ADMIN));
+const requirePartnerAdmin = [
+  verifyJwt,
+  requireTokenType("account"),
+  requireRole(ACCOUNT_ROLES.PARTNER_ADMIN)
+];
 
-partnerRoutes.get("/dashboard", getPartnerDashboard);
-partnerRoutes.get("/tenants", getPartnerTenants);
-partnerRoutes.post("/tenants", createPartnerTenant);
+partnerRoutes.post("/signup/initiate-otp", initiatePartnerSignupOtp);
+partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
+partnerRoutes.post("/signup/complete", completePartnerSignup);
 
-partnerRoutes.get("/accounts", listPartnerAccounts);
-partnerRoutes.post("/accounts", createTenantAdminAccount);
-partnerRoutes.patch("/accounts/:accountId", updatePartnerAccount);
-partnerRoutes.patch("/accounts/:accountId/status", updatePartnerAccountStatus);
+partnerRoutes.get("/dashboard", ...requirePartnerAdmin, getPartnerDashboard);
+partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
+partnerRoutes.post("/tenants", ...requirePartnerAdmin, createPartnerTenant);
 
-partnerRoutes.get("/escalations", listPartnerEscalations);
-partnerRoutes.get("/escalations/:caseId", getPartnerEscalationByCaseId);
-partnerRoutes.post("/escalations/:caseId/unlock", unlockPartnerEscalation);
-partnerRoutes.post("/escalations/:caseId/temp-unlock", tempUnlockPartnerEscalation);
-partnerRoutes.post("/escalations/:caseId/reject", rejectPartnerEscalation);
+partnerRoutes.get("/accounts", ...requirePartnerAdmin, listPartnerAccounts);
+partnerRoutes.post("/accounts", ...requirePartnerAdmin, createTenantAdminAccount);
+partnerRoutes.patch("/accounts/:accountId", ...requirePartnerAdmin, updatePartnerAccount);
+partnerRoutes.patch("/accounts/:accountId/status", ...requirePartnerAdmin, updatePartnerAccountStatus);
+
+partnerRoutes.get("/escalations", ...requirePartnerAdmin, listPartnerEscalations);
+partnerRoutes.get("/escalations/:caseId", ...requirePartnerAdmin, getPartnerEscalationByCaseId);
+partnerRoutes.post("/escalations/:caseId/unlock", ...requirePartnerAdmin, unlockPartnerEscalation);
+partnerRoutes.post("/escalations/:caseId/temp-unlock", ...requirePartnerAdmin, tempUnlockPartnerEscalation);
+partnerRoutes.post("/escalations/:caseId/reject", ...requirePartnerAdmin, rejectPartnerEscalation);

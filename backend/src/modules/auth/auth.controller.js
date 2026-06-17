@@ -35,15 +35,19 @@ const signRefreshToken = (payload) => {
 
 export const loginAccount = async (req, res) => {
   try {
-    if (!hasRequiredFields(req.body, ["email", "password"])) {
-      return sendError(res, 400, "Email and password are required");
+    if (!hasRequiredFields(req.body, ["password"]) || (!req.body.email && !req.body.identifier)) {
+      return sendError(res, 400, "Email or identifier and password are required");
     }
 
-    const { email, password } = req.body;
-    const account = await Account.findOne({ email: email.toLowerCase(), isActive: true });
+    const { email, identifier, password } = req.body;
+    const loginIdentifier = String(email || identifier).trim();
+    const identifierFilter = loginIdentifier.includes("@")
+      ? { email: loginIdentifier.toLowerCase() }
+      : { mobile: loginIdentifier };
+    const account = await Account.findOne({ ...identifierFilter, isActive: true });
 
     if (!account) {
-      return sendError(res, 401, "Invalid email or password");
+      return sendError(res, 401, "Invalid credentials");
     }
 
     const passwordMatches = await bcrypt.compare(password, account.passwordHash);
@@ -68,6 +72,7 @@ export const loginAccount = async (req, res) => {
         id: account._id,
         name: account.name,
         email: account.email,
+        mobile: account.mobile,
         role: account.role,
         tenantId: account.tenantId,
         channelPartnerId: account.channelPartnerId
@@ -132,6 +137,7 @@ export const getCurrentAccount = async (req, res) => {
         id: account._id,
         name: account.name,
         email: account.email,
+        mobile: account.mobile,
         role: account.role,
         tenantId: account.tenantId,
         channelPartnerId: account.channelPartnerId

@@ -13,6 +13,7 @@ import { ChannelPartner } from "../../models/ChannelPartner.js";
 import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
+import { OtpRecord } from "../../models/OtpRecord.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
@@ -38,6 +39,41 @@ const buildRegex = (value) => new RegExp(String(value).trim(), "i");
 const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
 
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
+
+const PARTNER_SIGNUP_OTP = "123456";
+const PARTNER_SIGNUP_OTP_EXPIRY_SECONDS = 10 * 60;
+const PARTNER_SIGNUP_PURPOSE = "partner_signup";
+const CHANNEL_PARTNER_TYPES = ["nbfc_group", "retail_chain_group", "independent"];
+
+const normalizeMobile = (mobile) => String(mobile || "").trim();
+const normalizeEmail = (email) => {
+  const value = String(email || "").trim().toLowerCase();
+  return value || undefined;
+};
+const isValidIndianMobile = (mobile) => /^\d{10}$/.test(normalizeMobile(mobile));
+const isValidEmail = (email) => !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const isValidPassword = (password) => {
+  const value = String(password || "");
+  return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
+};
+
+const ensurePartnerSignupUnique = async ({ mobile, email }) => {
+  const [accountByMobile, partnerByMobile, accountByEmail] = await Promise.all([
+    Account.findOne({ mobile }).lean(),
+    ChannelPartner.findOne({ contactPhone: mobile }).lean(),
+    email ? Account.findOne({ email }).lean() : null
+  ]);
+
+  if (accountByMobile || partnerByMobile) {
+    return "Phone number is already used";
+  }
+
+  if (accountByEmail) {
+    return "Account with this email already exists";
+  }
+
+  return null;
+};
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
@@ -65,6 +101,248 @@ const ensurePartnerAccess = async (req, res) => {
 const validateTenantBelongsToPartner = async (tenantId, channelPartnerId) => {
   if (!isValidObjectId(tenantId)) return null;
   return Tenant.findOne({ _id: tenantId, channelPartnerId });
+};
+
+export const initiatePartnerSignupOtp = async (req, res) => {
+  try {
+    const mobile = normalizeMobile(req.body.mobile);
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Valid 10 digit mobile number is required");
+    }
+
+    const duplicateError = await ensurePartnerSignupUnique({ mobile });
+    if (duplicateError) {
+      return sendError(res, 400, duplicateError);
+    }
+
+    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
+    const otpHash = await bcrypt.hash(PARTNER_SIGNUP_OTP, 12);
+
+    await OtpRecord.create({
+      mobile,
+      otpHash,
+      purpose: PARTNER_SIGNUP_PURPOSE,
+      verificationSessionId,
+      provider: "mock",
+      maxAttempts: 3,
+      expiresAt: new Date(Date.now() + PARTNER_SIGNUP_OTP_EXPIRY_SECONDS * 1000),
+      providerResponse: { mock: true }
+    });
+
+    return sendSuccess(res, 200, "OTP sent successfully", {
+      verificationSessionId,
+      otpSent: true,
+      expiresInSeconds: PARTNER_SIGNUP_OTP_EXPIRY_SECONDS
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const verifyPartnerSignupOtp = async (req, res) => {
+  try {
+    const mobile = normalizeMobile(req.body.mobile);
+
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId", "otp"])) {
+      return sendError(res, 400, "Mobile, verificationSessionId, and otp are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Valid 10 digit mobile number is required");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: PARTNER_SIGNUP_PURPOSE,
+      verified: false
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (otpRecord.expiresAt < new Date()) {
+      return sendError(res, 400, "OTP expired");
+    }
+
+    if (otpRecord.attempts >= otpRecord.maxAttempts) {
+      return sendError(res, 429, "Maximum OTP attempts exceeded");
+    }
+
+    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    if (!otpMatches) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return sendError(res, 400, "Invalid OTP");
+    }
+
+    otpRecord.verified = true;
+    otpRecord.providerResponse = {
+      ...otpRecord.providerResponse,
+      verifiedAt: new Date()
+    };
+    await otpRecord.save();
+
+    return sendSuccess(res, 200, "OTP verified successfully", {
+      verified: true,
+      verificationSessionId: otpRecord.verificationSessionId
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const completePartnerSignup = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const createAccount = isTruthyQueryParam(req.query.createAccount);
+    const name = String(req.body.name || "").trim();
+    const mobile = normalizeMobile(req.body.mobile);
+    const email = normalizeEmail(req.body.email);
+    const type = String(req.body.type || "").trim();
+
+    if (!hasRequiredFields({ name, mobile, type, verificationSessionId: req.body.verificationSessionId }, [
+      "name",
+      "mobile",
+      "type",
+      "verificationSessionId"
+    ])) {
+      return sendError(res, 400, "Name, mobile, type, and verificationSessionId are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Valid 10 digit mobile number is required");
+    }
+
+    if (!CHANNEL_PARTNER_TYPES.includes(type)) {
+      return sendError(res, 400, "Invalid partner type");
+    }
+
+    if (!isValidEmail(email)) {
+      return sendError(res, 400, "Invalid email");
+    }
+
+    if (createAccount && !isValidPassword(req.body.password)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: PARTNER_SIGNUP_PURPOSE,
+      verified: true
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "OTP verification is required before signup");
+    }
+
+    if (otpRecord.expiresAt < new Date()) {
+      return sendError(res, 400, "OTP expired");
+    }
+
+    const duplicateError = await ensurePartnerSignupUnique({ mobile, email });
+    if (duplicateError) {
+      return sendError(res, 400, duplicateError);
+    }
+
+    session.startTransaction();
+
+    const partners = await ChannelPartner.create(
+      [
+        {
+          name,
+          type,
+          contactPhone: mobile,
+          contactEmail: email,
+          isActive: true
+        }
+      ],
+      { session, ordered: true }
+    );
+    const channelPartner = partners[0];
+    let account = null;
+
+    if (createAccount) {
+      const passwordHash = await bcrypt.hash(req.body.password, 12);
+      const accounts = await Account.create(
+        [
+          {
+            name,
+            email,
+            mobile,
+            role: ACCOUNT_ROLES.PARTNER_ADMIN,
+            channelPartnerId: channelPartner._id,
+            passwordHash,
+            isActive: true
+          }
+        ],
+        { session, ordered: true }
+      );
+      account = accounts[0];
+      channelPartner.adminAccountId = account._id;
+      await channelPartner.save({ session });
+
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+          actorCollection: "system",
+          channelPartnerId: channelPartner._id,
+          metadata: { accountId: account._id, role: account.role, source: "partner_self_signup" }
+        },
+        { session }
+      );
+    }
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.CHANNEL_PARTNER_CREATED,
+        actorCollection: "system",
+        channelPartnerId: channelPartner._id,
+        metadata: { name: channelPartner.name, type: channelPartner.type, source: "partner_self_signup" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Partner signup completed successfully", {
+      channelPartner: {
+        id: channelPartner._id,
+        name: channelPartner.name,
+        type: channelPartner.type,
+        contactPhone: channelPartner.contactPhone,
+        contactEmail: channelPartner.contactEmail,
+        adminAccountId: channelPartner.adminAccountId,
+        isActive: channelPartner.isActive
+      },
+      account: account
+        ? {
+            id: account._id,
+            name: account.name,
+            mobile: account.mobile,
+            email: account.email,
+            role: account.role,
+            channelPartnerId: account.channelPartnerId
+          }
+        : null
+    });
+  } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
+    if (error?.code === 11000) {
+      return sendError(res, 400, "Phone number or email is already used");
+    }
+
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
 };
 
 const applyPartnerEscalationCommand = async ({
