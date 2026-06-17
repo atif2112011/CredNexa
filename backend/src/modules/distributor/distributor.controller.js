@@ -21,6 +21,7 @@ import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
+import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
 const addMonths = (date, months) => {
@@ -1286,19 +1287,31 @@ export const listQrCodes = async (req, res) => {
 
 /**
  * Add tenant payment QR code.
- * Sample body: { "label": "PhonePe Business QR", "imageUrl": "https://storage.example.com/qr.png", "activate": true }
+ * Multipart fields: label, activate, qrImage
+ * JSON fallback: { "label": "PhonePe Business QR", "imageUrl": "https://storage.example.com/qr.png", "activate": true }
  */
 export const addQrCode = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    if (!hasRequiredFields(req.body, ["label", "imageUrl"])) {
-      return sendError(res, 400, "QR label and imageUrl are required");
+    if (!hasRequiredFields(req.body, ["label"]) || (!req.file && !req.body.imageUrl)) {
+      return sendError(res, 400, "QR label and qrImage are required");
     }
 
-    const shouldActivate = req.body.activate === true || !tenant.qrCodes?.length;
+    const shouldActivate = req.body.activate === true || req.body.activate === "true" || !tenant.qrCodes?.length;
     const tenantDocument = await Tenant.findById(tenant._id);
+    const qrCodeId = new mongoose.Types.ObjectId();
+    const uploadedImage = req.file
+      ? await uploadImageToFirebase({
+          file: req.file,
+          folder: "tenant-payment-qr-codes",
+          recordId: qrCodeId,
+          userId: req.auth.id,
+          tenantId: tenant._id,
+          metadata: { qrCodeId: qrCodeId.toString() }
+        })
+      : null;
 
     if (shouldActivate) {
       tenantDocument.qrCodes.forEach((qrCode) => {
@@ -1307,8 +1320,13 @@ export const addQrCode = async (req, res) => {
     }
 
     tenantDocument.qrCodes.push({
+      _id: qrCodeId,
       label: req.body.label,
-      imageUrl: req.body.imageUrl,
+      imageUrl: uploadedImage?.imageUrl || req.body.imageUrl,
+      imageStoragePath: uploadedImage?.storagePath,
+      imageMimeType: uploadedImage?.mimeType,
+      imageSize: uploadedImage?.size,
+      imageUploadedAt: uploadedImage?.uploadedAt,
       isActive: shouldActivate,
       uploadedBy: req.auth.id
     });

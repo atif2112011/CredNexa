@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
+import { parseTenantQrImageUpload } from "../../middleware/parsePaymentProofUpload.js";
 import {
   activateQrCode,
   addQrCode,
@@ -56,7 +57,7 @@ distributorRoutes.post("/devices/:id/lock", lockTenantDevice);
 distributorRoutes.post("/devices/:id/unlock", unlockTenantDevice);
 distributorRoutes.post("/devices/:id/temp-unlock", tempUnlockTenantDevice);
 distributorRoutes.get("/qr-codes", listQrCodes);
-distributorRoutes.post("/qr-codes", addQrCode);
+distributorRoutes.post("/qr-codes", parseTenantQrImageUpload, addQrCode);
 distributorRoutes.patch("/qr-codes/:qrId/activate", activateQrCode);
 distributorRoutes.delete("/qr-codes/:qrId", deleteQrCode);
 distributorRoutes.get("/payments/approval-requests", listPaymentApprovalRequests);

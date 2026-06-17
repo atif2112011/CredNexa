@@ -4,6 +4,7 @@ import { sendError } from "../utils/apiResponse.js";
 
 export const PAYMENT_PROOF_FIELD_NAME = "proofImage";
 export const UNLOCK_REQUEST_IMAGE_FIELD_NAME = "image";
+export const TENANT_QR_IMAGE_FIELD_NAME = "qrImage";
 export const MAX_PAYMENT_PROOF_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -81,4 +82,9 @@ export const parsePaymentProofUpload = createImageUploadParser({
 export const parseUnlockRequestImageUpload = createImageUploadParser({
   fieldName: UNLOCK_REQUEST_IMAGE_FIELD_NAME,
   label: "Unlock request image"
+});
+
+export const parseTenantQrImageUpload = createImageUploadParser({
+  fieldName: TENANT_QR_IMAGE_FIELD_NAME,
+  label: "Tenant QR image"
 });

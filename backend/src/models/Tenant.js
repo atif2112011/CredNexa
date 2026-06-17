@@ -14,6 +14,19 @@ const qrCodeSchema = new mongoose.Schema(
       required: true,
       trim: true
     },
+    imageStoragePath: {
+      type: String,
+      trim: true
+    },
+    imageMimeType: {
+      type: String,
+      trim: true
+    },
+    imageSize: {
+      type: Number,
+      min: 0
+    },
+    imageUploadedAt: Date,
     isActive: {
       type: Boolean,
       default: false

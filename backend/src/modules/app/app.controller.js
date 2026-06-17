@@ -1,13 +1,11 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import twilio from "twilio";
 
 import { env } from "../../config/env.js";
-import { firebaseStorage } from "../../config/firebase.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { AuditLog } from "../../models/AuditLog.js";
@@ -28,6 +26,7 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { OtpRecord } from "../../models/OtpRecord.js";
 import { User } from "../../models/User.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
+import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
 const MOCK_CASHFREE_OTP = "123456";
@@ -126,46 +125,6 @@ const getCurrentDueInstallment = (installments = [], now = new Date()) => {
     .filter((installment) => ["pending", "partial", "overdue"].includes(installment.status))
     .filter((installment) => installment.dueDate && new Date(installment.dueDate) <= dueCutoff)
     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
-};
-
-const getImageExtension = (mimeType) => {
-  if (mimeType === "image/jpeg") return "jpg";
-  if (mimeType === "image/png") return "png";
-  if (mimeType === "image/webp") return "webp";
-  return "bin";
-};
-
-const uploadImageToFirebase = async ({ file, folder, recordId, userId, tenantId, metadata = {} }) => {
-  if (!file) return null;
-
-  const extension = getImageExtension(file.mimetype);
-  const storagePath = [
-    folder,
-    tenantId.toString(),
-    userId.toString(),
-    `${recordId.toString()}-${Date.now()}.${extension}`
-  ].join("/");
-  const storageRef = ref(firebaseStorage, storagePath);
-
-  await uploadBytes(storageRef, file.buffer, {
-    contentType: file.mimetype,
-    customMetadata: {
-      userId: userId.toString(),
-      tenantId: tenantId.toString(),
-      ...metadata
-    }
-  });
-
-  const imageUrl = await getDownloadURL(storageRef);
-
-  return {
-    imageUrl,
-    storagePath,
-    mimeType: file.mimetype,
-    originalName: file.originalname,
-    size: file.size,
-    uploadedAt: new Date()
-  };
 };
 
 const uploadPaymentProofImage = async ({ file, paymentId, userId, tenantId }) =>

@@ -1332,18 +1332,17 @@ Authorization: Bearer <tenantAdminJwt>
 Content-Type: multipart/form-data
 
 Fields:
-  image: <QR image file, PNG/JPG, max 2MB>
+  qrImage: <QR image file, JPEG/PNG/WebP, max 5 MB>
   label: "PhonePe Business QR"
+  activate: true
 ```
 
 **Backend actions:**
-1. Validate image type and size
-2. Upload image to S3 → get imageUrl
-3. Append to 	enants.qrCodes:
-   `
-   { label: 'PhonePe Business QR', imageUrl, isActive: false, uploadedBy }
-   `
-4. If this is the tenant's first QR code, auto-set isActive: true
+1. Validate image type, size, and magic-byte signature
+2. Upload image to Firebase Storage → get `imageUrl`
+3. Append to `tenants.qrCodes`:
+   `{ label, imageUrl, imageStoragePath, imageMimeType, imageSize, imageUploadedAt, isActive, uploadedBy }`
+4. If this is the tenant's first QR code, auto-set `isActive: true`
 
 #### Set Active QR
 

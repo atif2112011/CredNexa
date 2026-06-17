@@ -363,7 +363,11 @@ A tenant's `capabilities` array determines its permissions:
   qrCodes: [{
     _id: { type: ObjectId, auto: true },
     label: { type: String, required: true },     // e.g. "HDFC UPI", "PhonePe"
-    imageUrl: { type: String, required: true },  // S3/storage URL
+    imageUrl: { type: String, required: true },  // Firebase Storage download URL
+    imageStoragePath: String,
+    imageMimeType: String,
+    imageSize: Number,
+    imageUploadedAt: Date,
     isActive: { type: Boolean, default: false },
     uploadedBy: { type: ObjectId, ref: 'accounts' },
     createdAt: { type: Date, default: Date.now }
@@ -1255,7 +1259,7 @@ The current borrower simulation returns only a borrower access token after conse
 **Backend actions:**
 1. Validate JWT, extract `userId`, `deviceId`, `tenantId`
 2. Check no active (`PENDING_TENANT` or `ESCALATED_*`) case already exists for this device — return `409` if one is open
-3. Upload image to S3 if provided → get `imageUrl`
+3. Upload image to Firebase Storage if provided → get `imageUrl`
 4. Resolve `channelPartnerId` from `tenants` document
 5. Create `unlockRequests` document:
    ```
@@ -1508,7 +1512,7 @@ These routes are still planned for tenant-side lending/payment operations and ar
 | Method | Route | Description |
 |---|---|---|
 | GET | `/distributor/qr-codes` | List all QR codes for this tenant |
-| POST | `/distributor/qr-codes` | Add a new QR code image URL |
+| POST | `/distributor/qr-codes` | Upload and add a new QR code image |
 | PATCH | `/distributor/qr-codes/:qrId/activate` | Set this QR as active (deactivates all others) |
 | DELETE | `/distributor/qr-codes/:qrId` | Delete a QR code (blocked if `isActive: true`) |
 
@@ -1516,13 +1520,15 @@ These routes are still planned for tenant-side lending/payment operations and ar
 
 | Field | Type | Description |
 |---|---|---|
-| `imageUrl` | String | Hosted QR code image URL |
+| `qrImage` | File | JPEG, PNG, or WebP QR image, max 5 MB |
 | `label` | String | Human-readable label, e.g. "HDFC UPI" |
+| `activate` | Boolean | Optional. If true, this QR becomes active |
 
 **Backend actions — POST `/distributor/qr-codes`:**
-1. Validates label and hosted `imageUrl`
-2. Appends to `tenants.qrCodes` array: `{ label, imageUrl, isActive, uploadedBy }`
-3. If this is the first QR code, sets `isActive: true` automatically
+1. Validates label and image upload type/size/signature
+2. Uploads the QR image to Firebase Storage
+3. Appends to `tenants.qrCodes` array: `{ label, imageUrl, imageStoragePath, imageMimeType, imageSize, imageUploadedAt, isActive, uploadedBy }`
+4. If this is the first QR code, sets `isActive: true` automatically
 
 **Backend actions — PATCH `/distributor/qr-codes/:qrId/activate`:**
 1. Sets all `tenants.qrCodes[].isActive` → `false`
@@ -1537,6 +1543,10 @@ These routes are still planned for tenant-side lending/payment operations and ar
       "_id": "<ObjectId>",
       "label": "HDFC UPI",
       "imageUrl": "https://storage.emishield.in/qr/tenant123_hdfc.png",
+      "imageStoragePath": "tenant-payment-qr-codes/<tenantId>/<accountId>/<qrId>-1718000000000.png",
+      "imageMimeType": "image/png",
+      "imageSize": 128000,
+      "imageUploadedAt": "2026-06-17T10:00:00.000Z",
       "isActive": true,
       "uploadedBy": "<accountId>",
       "createdAt": "2024-01-10T10:00:00.000Z"

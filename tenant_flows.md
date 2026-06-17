@@ -331,14 +331,16 @@ Authorization: Bearer <tenantAdminToken>
 ```http
 POST /distributor/qr-codes
 Authorization: Bearer <tenantAdminToken>
+Content-Type: multipart/form-data
 
-Body:
-{
-  "label": "PhonePe Business QR",
-  "imageUrl": "https://storage.example.com/tenant/phonepe-qr.png",
-  "activate": true
-}
+Fields:
+- label: PhonePe Business QR
+- activate: true
+- qrImage: <JPEG, PNG, or WebP image file, max 5 MB>
 ```
+
+The backend uploads `qrImage` to Firebase Storage and stores the resulting `imageUrl`.
+`imageUrl` is still accepted as a JSON fallback for older clients, but the Tenant App should use image upload.
 
 ### Activate QR Code
 
@@ -358,6 +360,7 @@ Authorization: Bearer <tenantAdminToken>
 - The first QR is activated automatically.
 - Activating one QR deactivates all others.
 - The active QR cannot be deleted.
+- QR image uploads accept only JPEG, PNG, and WebP files up to 5 MB.
 
 **API status:** Available.
 

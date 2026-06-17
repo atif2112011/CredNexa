@@ -307,7 +307,7 @@ export const createPartnerTenant = async (req, res) => {
         {
           name: req.body.name,
           type: req.body.type,
-          capabilities: [],
+          capabilities: ["lend","distribute"],
           channelPartnerId: channelPartner._id,
           parentTenantId: req.body.parentTenantId || null,
           supportPhone: req.body.supportPhone,
