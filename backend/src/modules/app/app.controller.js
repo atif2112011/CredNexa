@@ -36,6 +36,7 @@ const OTP_PROVIDERS = Object.freeze({
   MOCK: "mock",
   TWILIO_VERIFY: "twilio_verify"
 });
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 let twilioClient = null;
 let playIntegrityClient = null;
@@ -103,6 +104,31 @@ const buildLoanDetails = (user, schedule) => ({
 const getInstallmentOutstanding = (installment) => {
   const totalPayable = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
   return Math.max(totalPayable - Number(installment.paidAmount || 0), 0);
+};
+
+const isInstallmentUnpaid = (installment) => ["pending", "partial", "overdue"].includes(installment.status);
+
+const addDays = (date, days) => new Date(new Date(date).getTime() + Number(days || 0) * DAY_IN_MS);
+
+const getScheduledLockAt = async (device) => {
+  const [schedule, tenantPolicy] = await Promise.all([
+    EmiSchedule.findOne({ userId: device.userId, tenantId: device.tenantId }).lean(),
+    TenantPolicy.findOne({ tenantId: device.tenantId }).lean()
+  ]);
+
+  const lockRules = tenantPolicy?.lockRules || {};
+  if (lockRules.lockOnGraceExpiry === false) return null;
+
+  const unpaidInstallment = schedule?.installments
+    ?.filter((installment) => isInstallmentUnpaid(installment) && installment.dueDate)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
+
+  if (!unpaidInstallment) return null;
+
+  const dpd = Number(lockRules.dpd ?? 30);
+  const gracePeriodDays = Number(lockRules.gracePeriodDays ?? 7);
+
+  return addDays(unpaidInstallment.dueDate, dpd + gracePeriodDays);
 };
 
 const buildInstallmentSummary = (installment) => ({
@@ -1866,8 +1892,12 @@ export const syncDevice = async (req, res) => {
       payload: req.body
     });
 
+    const [syncState, scheduledLockAt] = await Promise.all([getDeviceSyncState(device), getScheduledLockAt(device)]);
+
     return sendSuccess(res, 200, "Device sync completed", {
-      ...(await getDeviceSyncState(device))
+      serverTime: new Date(),
+      scheduledLockAt,
+      ...syncState
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
