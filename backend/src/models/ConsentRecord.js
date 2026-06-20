@@ -48,7 +48,10 @@ const consentRecordSchema = new mongoose.Schema(
       name: String,
       dob: String,
       address: String,
-      aadhaarLinkedMobile: String
+      aadhaarLinkedMobile: String,
+      mobile: String,
+      email: String,
+      verificationMethod: String
     },
     payloadHash: {
       type: String,

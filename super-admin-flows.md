@@ -110,6 +110,7 @@ Body:
   "supportPhone": "9800000002",
   "supportEmail": "support@bharatpune.in",
   "supportWhatsapp": "9800000002",
+  "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "12, MG Road",
     "city": "Pune",
@@ -123,7 +124,7 @@ Body:
 1. Validates channel partner exists and is active
 2. Validates tenant `type`, `capabilities`, and `parentTenantId` rules
 3. Starts a MongoDB transaction
-4. Creates `tenants`
+4. Creates `tenants` with `isAdhaarVerificationEnabled` defaulting to `false` when omitted
 5. Copies centralized `DEFAULT_TENANT_POLICY` into one `tenantPolicies` document
 6. Copies centralized `DEFAULT_DEVICE_POLICIES` into five `devicePolicies` documents
 7. Uses the same default policy templates for every tenant, regardless of tenant capabilities

@@ -403,7 +403,7 @@ Tenant Admin (Distributor App)
 
 > **Actor:** Borrower, using their new (factory-reset) device
 > **Prerequisite:** Distributor App is showing the QR code (from Flow 3, Step 3.3)
-> **Outcome:** Shield App is installed as Device Owner, borrower consent is captured (Aadhaar OTP), device is registered, and the initial EMI policy is enforced.
+> **Outcome:** Shield App is installed as Device Owner, borrower consent is captured through the tenant-configured OTP flow, device is registered, and the initial EMI policy is enforced.
 
 ---
 
@@ -465,9 +465,9 @@ GET /app/consent/terms
 
 ---
 
-### Step 4.4 — Initiate Aadhaar OTP
+### Step 4.4 — Initiate Consent OTP
 
-After the borrower ticks the consent checkbox, the app initiates Aadhaar OTP verification via the backend. The backend proxies the call to the third-party Aadhaar provider — the app never contacts the provider directly.
+After the borrower ticks the consent checkbox, the app initiates consent OTP verification via the backend. If the tenant has `isAdhaarVerificationEnabled: true`, the backend uses the Aadhaar-backed branch. Otherwise it sends a normal mobile OTP and skips Aadhaar profile matching.
 
 ```
 POST /app/consent/initiate
@@ -476,14 +476,15 @@ POST /app/consent/initiate
 Body:
 {
   "enrollmentToken": "TEMP_TOKEN_ABC123",
-  "aadhaarLinkedMobile": "9876543210"
+  "mobile": "9876543210"
 }
 ```
 
 **Backend actions:**
 1. Validates the `enrollmentToken` (exists, not expired, not yet consumed)
-2. Calls the Aadhaar OTP provider to send an OTP to the borrower's Aadhaar-linked mobile
-3. Stores the provider's `verificationSessionId` internally
+2. Reads the borrower's tenant and checks `isAdhaarVerificationEnabled`
+3. Sends Aadhaar-backed OTP only when enabled; otherwise sends normal mobile OTP
+4. Stores the provider's `verificationSessionId` internally
 
 **Response:**
 ```json
@@ -499,9 +500,9 @@ Body:
 
 ---
 
-### Step 4.5 — Confirm Consent + Verify Aadhaar OTP
+### Step 4.5 — Confirm Consent + Verify OTP
 
-The borrower enters the OTP received on their Aadhaar-linked mobile. The app submits it along with consent confirmation.
+The borrower enters the OTP. Aadhaar profile checks happen only for tenants with `isAdhaarVerificationEnabled: true`.
 
 ```
 POST /app/consent/confirm
@@ -518,9 +519,9 @@ Body:
 ```
 
 **Backend actions:**
-1. Calls the Aadhaar provider to verify the OTP using `verificationSessionId`
-2. Stores the provider-returned verified identity (`name`, `dob`, `address`) as `verifiedProfile` on the `users` record
-3. Creates an immutable `consentRecords` document with the `aadhaarVerificationRef` from the provider
+1. Verifies the OTP using `verificationSessionId`
+2. Stores Aadhaar provider identity only when Aadhaar verification is enabled; otherwise stores a mobile-OTP verified profile snapshot
+3. Creates an immutable `consentRecords` document with an Aadhaar or mobile-OTP verification reference
 4. Marks the `enrollmentToken` as consumed (cannot be reused)
 5. Issues a JWT (`tokenType: user`) for the borrower
 
@@ -646,7 +647,7 @@ Borrower (new device)
         │
         ├── GET  /app/consent/terms              →  consent document fetched
         │
-        ├── POST /app/consent/initiate           →  Aadhaar OTP sent (via backend proxy)
+        ├── POST /app/consent/initiate           →  tenant-configured consent OTP sent
         │       (enrollmentToken + mobile)
         │
         ├── POST /app/consent/confirm            →  OTP verified
@@ -693,7 +694,7 @@ Tenant Admin
 [Borrower App — Android]
 Borrower
   4.3  GET  /app/consent/terms
-  4.4  POST /app/consent/initiate       →  Aadhaar OTP sent
+  4.4  POST /app/consent/initiate       →  tenant-configured consent OTP sent
   4.5  POST /app/consent/confirm        →  consentRecords + JWT issued
   4.6  POST /app/device/register        →  devices + auditLogs
   4.7  [Local] DevicePolicyManager      →  policy enforced, FCM service started

@@ -419,6 +419,7 @@ Use `app=true` for the partner app tenant creation flow.
   "supportPhone": "9800000002",
   "supportEmail": "support@tenant.in",
   "supportWhatsapp": "9800000002",
+  "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "MI Road",
     "city": "Jaipur",
@@ -481,6 +482,7 @@ If `tenantAdmin.temporaryPassword` or root `temporaryPassword` is not sent, back
       "supportPhone": "9800000002",
       "supportEmail": "support@tenant.in",
       "supportWhatsapp": "9800000002",
+      "isAdhaarVerificationEnabled": false,
       "address": {
         "street": "MI Road",
         "city": "Jaipur",

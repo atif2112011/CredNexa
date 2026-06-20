@@ -57,6 +57,23 @@ const signUserAccessToken = (user) => {
   });
 };
 
+const signUserRefreshToken = (user) => {
+  return jwt.sign(buildUserPayload(user), env.jwtRefreshSecret, {
+    expiresIn: env.jwtRefreshExpiresIn
+  });
+};
+
+const getUserRefreshCookieOptions = () => ({
+  httpOnly: true,
+  secure: env.cookieSecure,
+  sameSite: env.cookieSecure ? "none" : "lax",
+  path: "/api/app"
+});
+
+const setUserRefreshCookie = (res, user) => {
+  res.cookie(env.refreshCookieName, signUserRefreshToken(user), getUserRefreshCookieOptions());
+};
+
 const hashPayload = (payload) => {
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 };
@@ -76,6 +93,13 @@ const buildMockCashfreeProfile = (user) => ({
   dob: "1990-01-01",
   address: "Mock Aadhaar address",
   aadhaarLinkedMobile: user.aadhaarLinkedMobile
+});
+
+const buildMobileOtpVerifiedProfile = (user) => ({
+  name: user.name,
+  mobile: user.mobile,
+  email: user.email,
+  verificationMethod: "mobile_otp"
 });
 
 const buildUserDetails = (user) => ({
@@ -174,6 +198,7 @@ const uploadUnlockRequestImage = async ({ file, caseId, userId, tenantId }) =>
   });
 
 const OTP_PURPOSES = Object.freeze({
+  CONSENT: "consent",
   AADHAAR_CONSENT: "aadhaar_consent",
   ONBOARDING_RESUME: "onboarding_resume",
   DEVICE_LOGIN: "device_login"
@@ -618,6 +643,8 @@ export const generateTestUserAccessToken = async (req, res) => {
       return sendError(res, 404, "Active user not found");
     }
 
+    setUserRefreshCookie(res, user);
+
     return sendSuccess(res, 200, "Test user access token generated successfully", {
       accessToken: signUserAccessToken(user),
       tokenType: "user",
@@ -633,6 +660,37 @@ export const generateTestUserAccessToken = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const refreshUserAccessToken = async (req, res) => {
+  try {
+    const refreshToken = req.cookies?.[env.refreshCookieName];
+
+    if (!refreshToken) {
+      return sendError(res, 401, "Refresh token is required");
+    }
+
+    const payload = jwt.verify(refreshToken, env.jwtRefreshSecret);
+
+    if (!payload?.id || payload.tokenType !== "user") {
+      return sendError(res, 401, "Invalid refresh token");
+    }
+
+    const user = await User.findById(payload.id).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 401, "Invalid refresh token");
+    }
+
+    return sendSuccess(res, 200, "Access token refreshed successfully", {
+      accessToken: signUserAccessToken(user),
+      tokenType: "user",
+      expiresIn: env.jwtAccessExpiresIn
+    });
+  } catch (error) {
+    res.clearCookie(env.refreshCookieName, getUserRefreshCookieOptions());
+    return sendError(res, 401, "Invalid or expired refresh token");
   }
 };
 
@@ -683,20 +741,28 @@ export const initiateConsentOtp = async (req, res) => {
         return sendError(res, 400, "Active user not found");
       }
 
-      if (!isMobileMatch(user, mobile)) {
-        return sendError(res, 400, "Aadhaar Mobile does not match registered borrower");
-      }
+      const tenant = await Tenant.findById(user.tenantId).lean();
+      const isAdhaarVerificationEnabled = tenant?.isAdhaarVerificationEnabled === true;
 
       if (!user.consentRecordId) {
+        if (isAdhaarVerificationEnabled && !isMobileMatch(user, mobile)) {
+          return sendError(res, 400, "Aadhaar Mobile does not match registered borrower");
+        }
+
+        if (!isAdhaarVerificationEnabled && mobile !== user.mobile) {
+          return sendError(res, 400, "Mobile does not match registered borrower");
+        }
+
         const consentVersion = await ConsentVersion.findOne({ isCurrent: true }).lean();
 
         if (!consentVersion) {
           return sendError(res, 400, "Active consent version not found");
         }
 
+        const consentOtpPurpose = isAdhaarVerificationEnabled ? OTP_PURPOSES.AADHAAR_CONSENT : OTP_PURPOSES.CONSENT;
         const otp = await sendOtp({
           mobile,
-          purpose: OTP_PURPOSES.AADHAAR_CONSENT,
+          purpose: consentOtpPurpose,
           user,
           enrollmentToken,
           flowType: FLOW_TYPES.ONBOARDING_CONSENT
@@ -711,7 +777,8 @@ export const initiateConsentOtp = async (req, res) => {
           metadata: {
             verificationSessionId: otp.verificationSessionId,
             providerReferenceId: otp.providerReferenceId,
-            flowType: FLOW_TYPES.ONBOARDING_CONSENT
+            flowType: FLOW_TYPES.ONBOARDING_CONSENT,
+            isAdhaarVerificationEnabled
           }
         });
 
@@ -726,6 +793,10 @@ export const initiateConsentOtp = async (req, res) => {
       }
 
       if (!user.isDeviceLinked) {
+        if (!isMobileMatch(user, mobile)) {
+          return sendError(res, 400, "Mobile does not match registered borrower");
+        }
+
         const otp = await sendOtp({
           mobile,
           purpose: OTP_PURPOSES.ONBOARDING_RESUME,
@@ -810,11 +881,15 @@ export const verifyConsentOtp = async (req, res) => {
       return sendError(res, 400, "Active user not found");
     }
 
-    if (!isMobileMatch(user, req.body.mobile)) {
+    if (otpRecord.purpose === OTP_PURPOSES.CONSENT && req.body.mobile !== user.mobile) {
       return sendError(res, 400, "Mobile does not match registered borrower");
     }
 
-    if ([OTP_PURPOSES.AADHAAR_CONSENT, OTP_PURPOSES.ONBOARDING_RESUME].includes(otpRecord.purpose)) {
+    if (otpRecord.purpose !== OTP_PURPOSES.CONSENT && !isMobileMatch(user, req.body.mobile)) {
+      return sendError(res, 400, "Mobile does not match registered borrower");
+    }
+
+    if ([OTP_PURPOSES.CONSENT, OTP_PURPOSES.AADHAAR_CONSENT, OTP_PURPOSES.ONBOARDING_RESUME].includes(otpRecord.purpose)) {
       const enrollmentToken = await EnrollmentToken.findOne({
         _id: otpRecord.enrollmentTokenId,
         consumedAt: null,
@@ -827,7 +902,8 @@ export const verifyConsentOtp = async (req, res) => {
       }
     }
 
-    const verifiedProfile = buildMockCashfreeProfile(user);
+    const verifiedProfile =
+      otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT ? buildMockCashfreeProfile(user) : buildMobileOtpVerifiedProfile(user);
 
     if (otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT && normalizeName(verifiedProfile.name) !== normalizeName(user.name)) {
       return sendError(res, 400, "Aadhaar name does not match registered borrower name");
@@ -842,6 +918,7 @@ export const verifyConsentOtp = async (req, res) => {
     await otpRecord.save();
 
     const accessToken = signUserAccessToken(user);
+    setUserRefreshCookie(res, user);
     const userPayload = {
       id: user._id,
       name: user.name,
@@ -852,7 +929,7 @@ export const verifyConsentOtp = async (req, res) => {
       linkedDeviceId: user.linkedDeviceId
     };
 
-    if (otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT) {
+    if ([OTP_PURPOSES.CONSENT, OTP_PURPOSES.AADHAAR_CONSENT].includes(otpRecord.purpose)) {
       return sendSuccess(res, 200, "OTP verified successfully", {
         accessToken,
         tokenType: "user",
@@ -1177,6 +1254,8 @@ export const acceptConsent = async (req, res) => {
     }
 
     if (user.consentRecordId) {
+      setUserRefreshCookie(res, user);
+
       return sendSuccess(res, 200, "Consent already accepted", {
         consentRecordId: user.consentRecordId,
         consentAccepted: true,
@@ -1196,7 +1275,7 @@ export const acceptConsent = async (req, res) => {
       ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
       OtpRecord.findOne({
         userId: user._id,
-        purpose: OTP_PURPOSES.AADHAAR_CONSENT,
+        purpose: { $in: [OTP_PURPOSES.CONSENT, OTP_PURPOSES.AADHAAR_CONSENT] },
         verified: true,
         expiresAt: { $gt: new Date() }
       }).sort({ updatedAt: -1 }),
@@ -1220,8 +1299,13 @@ export const acceptConsent = async (req, res) => {
       return sendError(res, 400, "Valid enrollment token not found");
     }
 
-    const verifiedProfile = otpRecord.providerResponse?.verifiedProfile || buildMockCashfreeProfile(user);
-    const aadhaarVerificationRef = `cashfree_mock_verified_${crypto.randomBytes(10).toString("hex")}`;
+    const isAdhaarConsent = otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT;
+    const verifiedProfile =
+      otpRecord.providerResponse?.verifiedProfile ||
+      (isAdhaarConsent ? buildMockCashfreeProfile(user) : buildMobileOtpVerifiedProfile(user));
+    const aadhaarVerificationRef = isAdhaarConsent
+      ? `cashfree_mock_verified_${crypto.randomBytes(10).toString("hex")}`
+      : `mobile_otp_verified_${crypto.randomBytes(10).toString("hex")}`;
     const consentPayload = {
       userId: user._id,
       tenantId: user.tenantId,
@@ -1249,7 +1333,7 @@ export const acceptConsent = async (req, res) => {
     );
     const consentRecord = consentRecords[0];
 
-    user.aadhaarVerified = true;
+    user.aadhaarVerified = isAdhaarConsent;
     user.consentRecordId = consentRecord._id;
     await user.save({ session });
 
@@ -1263,13 +1347,16 @@ export const acceptConsent = async (req, res) => {
         metadata: {
           consentRecordId: consentRecord._id,
           consentVersion: consentVersion.version,
-          aadhaarVerificationRef
+          aadhaarVerificationRef,
+          isAdhaarVerificationEnabled: isAdhaarConsent
         }
       },
       { session }
     );
 
     await session.commitTransaction();
+
+    setUserRefreshCookie(res, user);
 
     return sendSuccess(res, 201, "Consent accepted successfully", {
       consentRecordId: consentRecord._id,

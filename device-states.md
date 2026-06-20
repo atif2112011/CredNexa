@@ -101,6 +101,12 @@
 - Pay Now button prominently shown
 - All other app functions work normally
 
+**Sync deadline:**
+- `POST /api/app/device/sync` returns top-level `serverTime` and `scheduledLockAt`.
+- `scheduledLockAt` is calculated by backend as `earliest unpaid EMI dueDate + tenant lockRules.dpd + tenant lockRules.gracePeriodDays`.
+- The backend sends `scheduledLockAt` whenever an unpaid EMI exists and `lockOnGraceExpiry` is enabled, even before the device enters `GRACE_PERIOD`.
+- The Borrower App may cache this deadline for countdown/offline enforcement, but UI state should still be driven by `devices.state` and `currentPolicyKey`.
+
 **Backend commands/FCM:**
 - `POLICY_UPDATE` command with `commandType: POLICY_UPDATE`, `targetState: GRACE_PERIOD`, and `policyKey: EMI_GRACE`
 - `NOTIFICATION` command with `notificationType: GRACE_PERIOD_REMINDER`

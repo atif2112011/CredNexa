@@ -30,6 +30,7 @@ https://api.emishield.in/api
 | Regenerate enrollment QR | `POST /distributor/enrollment/:token/regenerate` | `tenant_admin` access token | Implemented |
 | Initiate onboarding/login OTP | `POST /app/consent/initiate` | Public | Implemented with mock OTP flow |
 | Verify onboarding/login OTP | `POST /app/consent/verify-otp` | Public | Implemented with mock OTP flow |
+| Refresh borrower/user token | `POST /app/refresh-token` | HTTP-only app refresh cookie | Implemented |
 | Fetch consent terms | `GET /app/consent/terms` | Public | Implemented |
 | Accept consent | `POST /app/consent/accept` | Borrower user access token | Implemented |
 | Register device | `POST /app/device/register` | Borrower user access token | Implemented |
@@ -326,7 +327,9 @@ Backend actions:
 1. Validates the OTP session and attempt count.
 2. Verifies the mock OTP.
 3. For onboarding branches, confirms the enrollment token is still valid.
-4. For `ONBOARDING_CONSENT`, verifies the mock Aadhaar profile and returns `nextStep: "SHOW_CONSENT"`.
+4. For `ONBOARDING_CONSENT`, returns `nextStep: "SHOW_CONSENT"`.
+   - If the tenant has `isAdhaarVerificationEnabled: true`, the backend verifies the mock Aadhaar profile.
+   - If the tenant has `isAdhaarVerificationEnabled: false`, the backend uses normal mobile OTP verification and skips Aadhaar profile matching.
 5. For `ONBOARDING_RESUME`, returns `nextStep: "REGISTER_DEVICE"`.
 6. For `DEVICE_LOGIN`, returns the same kind of state/policy/command payload as device sync and `nextStep: "SYNC_DEVICE"`.
 
@@ -432,7 +435,7 @@ Backend actions:
 2. Confirms a verified onboarding consent OTP session exists.
 3. Confirms the enrollment token is still valid and unconsumed.
 4. Creates a `consentRecords` document.
-5. Marks the borrower as Aadhaar verified.
+5. Marks the borrower as Aadhaar verified only when the tenant has Aadhaar verification enabled; otherwise stores mobile-OTP consent proof.
 6. Saves `consentRecordId` on the user.
 7. Writes an audit log.
 8. Issues a borrower user access token.
@@ -459,7 +462,7 @@ Expected response:
 Important:
 
 - The current borrower flow returns an access token.
-- It does not return a borrower refresh token in the tested implementation.
+- It also sets a borrower refresh token as an HTTP-only cookie for `/api/app/refresh-token`.
 - The enrollment token remains usable for recovery until device registration succeeds.
 
 Enrollment status after consent acceptance, before device registration:
@@ -816,25 +819,26 @@ The automatic EMI state scheduler is not implemented yet. Device state currently
 
 ## Access Token Expiry Flow
 
-For account tokens:
+For borrower/user app tokens:
 
 1. Client calls protected API with access token.
 2. If access token is expired, `verifyJwt` returns `401`.
 3. Client calls:
 
 ```http
-POST /api/auth/refresh-token
+POST /api/app/refresh-token
 ```
 
 4. The server validates the HTTP-only refresh cookie.
-5. If valid, server returns a new account access token.
+5. If valid, server returns a new borrower user access token.
 6. Client retries the original request.
 7. If refresh also returns `401`, client clears local token state and redirects to login.
 
 In this implementation:
 
-- Account access token is a JWT.
-- Account refresh token is stored as an HTTP-only cookie.
+- Borrower user access token is a JWT.
+- Account refresh token is stored as an HTTP-only cookie on `/api/auth`.
+- Borrower user refresh token is stored as an HTTP-only cookie on `/api/app`.
 - Borrower user access token is issued after OTP verification and refreshed again after consent acceptance.
 
 ---

@@ -606,6 +606,7 @@ export const createTenant = async (req, res) => {
           supportEmail: req.body.supportEmail,
           supportWhatsapp: req.body.supportWhatsapp,
           address: req.body.address,
+          isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
           createdBy: req.auth.id
         }
       ],

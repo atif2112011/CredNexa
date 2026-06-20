@@ -21,6 +21,7 @@ import {
   initiateConsentOtp,
   pingDevice,
   reportSecurityEvent,
+  refreshUserAccessToken,
   submitPayment,
   syncDevice,
   verifyIntegrity,
@@ -31,6 +32,7 @@ import {
 export const appRoutes = Router();
 
 appRoutes.post("/testing/access-token", generateTestUserAccessToken);
+appRoutes.post("/refresh-token", refreshUserAccessToken);
 appRoutes.get("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", initiateConsentOtp);
 appRoutes.post("/consent/verify-otp", verifyConsentOtp);

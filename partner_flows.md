@@ -187,6 +187,7 @@ Body:
   "supportPhone": "9800000010",
   "supportEmail": "support@bharatjaipur.in",
   "supportWhatsapp": "9800000010",
+  "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "20 MI Road",
     "city": "Jaipur",
@@ -211,7 +212,7 @@ Body:
 1. Validates partner admin.
 2. Reads `channelPartnerId` from JWT.
 3. Validates tenant `type` and `capabilities`.
-4. Creates `tenants`.
+4. Creates `tenants`; Aadhaar verification is disabled by default unless `isAdhaarVerificationEnabled: true` is sent.
 5. Copies centralized `DEFAULT_TENANT_POLICY` into `tenantPolicies`.
 6. Copies centralized `DEFAULT_DEVICE_POLICIES` into `devicePolicies`.
 7. Because `app=true`, creates the default `tenant_admin` account.

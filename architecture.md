@@ -113,7 +113,7 @@ Implemented route groups:
 - `/admin` super admin channel partner, tenant, account, consent, escalation, device, risk, and audit oversight
 - `/partner` partner admin dashboard, tenant creation, tenant admin account management, and partner escalation resolution
 - `/distributor` tenant admin onboarding dashboard, borrower registration, QR generation, enrollment status/detail, device inventory/detail, QR regeneration
-- `/app` consent terms, mocked Cashfree Aadhaar OTP, consent confirmation, device registration, device policy fetch
+- `/app` consent terms, tenant-configured consent OTP, consent confirmation, device registration, device policy fetch
 
 Not implemented yet:
 - Borrower payments, payment approval, and QR payment APIs
@@ -345,6 +345,7 @@ A tenant's `capabilities` array determines its permissions:
   supportPhone: { type: String },
   supportEmail: { type: String },
   supportWhatsapp: { type: String },
+  isAdhaarVerificationEnabled: { type: Boolean, default: false },
 
   address: {
     street: String,
@@ -474,17 +475,20 @@ Immutable consent artefacts per user. Legally critical — never updated, only c
   consentVersionId: { type: ObjectId, ref: 'consentVersions', required: true },
   consentVersion: { type: String, required: true },   // snapshot of version string
 
-  // Aadhaar verification — backend-proxied via third-party service (e.g. Digio, Karza)
-  aadhaarLinkedMobile: { type: String, required: true },
-  aadhaarProvider: { type: String },               // name of the Aadhaar OTP provider used
-  aadhaarVerificationRef: { type: String },         // provider's session / transaction reference ID
+  // Consent verification — Aadhaar-backed only when enabled for the tenant, otherwise mobile OTP
+  aadhaarLinkedMobile: { type: String },
+  aadhaarProvider: { type: String },               // Aadhaar provider name when used
+  aadhaarVerificationRef: { type: String },         // Aadhaar or mobile OTP verification reference
   aadhaarVerifiedAt: { type: Date },
 
-  // Verified identity snapshot returned by the Aadhaar provider (stored for legal defensibility)
+  // Verified identity snapshot returned by Aadhaar provider or mobile OTP flow
   verifiedProfile: {
     name: String,
     dob: String,      // masked — e.g. "**/**/1990"
-    address: String
+    address: String,
+    mobile: String,
+    email: String,
+    verificationMethod: String
   },
 
   // Consent acceptance
@@ -1050,7 +1054,7 @@ The account refresh token is set as an HTTP-only cookie. It is not returned in t
 
 ### 6.2 Borrower App Routes (`/app`)
 
-> All routes require `verifyJWT` + `tokenType: user`
+Most routes require `verifyJWT` + `tokenType: user`. Consent initiation, OTP verification, and refresh-token routes are public/cookie based.
 
 #### Onboarding
 
@@ -1058,15 +1062,16 @@ The account refresh token is set as an HTTP-only cookie. It is not returned in t
 |---|---|---|
 | POST | `/app/check-device` | Check if device IMEI is already registered (UC-1) |
 | GET | `/app/consent/terms` | Fetch current consent document version |
-| POST | `/app/consent/initiate` | Backend initiates Aadhaar OTP via third-party provider; returns `verificationSessionId` |
+| POST | `/app/consent/initiate` | Backend initiates tenant-configured consent OTP; Aadhaar-backed only when tenant enables it |
 | POST | `/app/consent/confirm` | Verify OTP server-side, store verified profile + consent record, issue JWT |
+| POST | `/app/refresh-token` | Refresh borrower/user JWT using HTTP-only app refresh cookie |
 | POST | `/app/device/register` | Register device IMEI + FCM token (UC-4) |
 
 **Request — POST `/app/consent/initiate`** *(no auth required — uses `enrollmentToken`)*
 ```json
 {
   "enrollmentToken": "TEMP_TOKEN_ABC123",
-  "aadhaarLinkedMobile": "9876543210"
+  "mobile": "9876543210"
 }
 ```
 **Response:**
@@ -1717,6 +1722,7 @@ Required validation:
   "supportPhone": "9800000002",
   "supportEmail": "support@bharatpune.in",
   "supportWhatsapp": "9800000002",
+  "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "12, MG Road",
     "city": "Pune",
@@ -2085,7 +2091,7 @@ Write auditLogs (LOCK_TRIGGERED)
 
 | Actor | Collection | Method |
 |---|---|---|
-| Borrower (Android app) | `users` | Mock Cashfree Aadhaar OTP consent confirmation -> JWT (`tokenType: user`) |
+| Borrower (Android app) | `users` | Tenant-configured consent OTP confirmation -> JWT (`tokenType: user`) |
 | Tenant admin | `accounts` | Email+Password -> JWT (`tokenType: account`) + HTTP-only refresh cookie |
 | Partner admin | `accounts` | Email+Password → JWT (`tokenType: account`) |
 | Super admin | `accounts` | Email+Password -> JWT (`tokenType: account`) + HTTP-only refresh cookie |

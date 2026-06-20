@@ -27,11 +27,12 @@
 
 | Token | Issued by | Used for |
 |---|---|---|
-| `accessToken` | `/auth/verify-otp` | All API calls (short-lived, ~15 min) |
-| `refreshToken` | `/auth/verify-otp` | Get a new accessToken when expired |
+| `accessToken` | `/app/consent/verify-otp` or `/app/consent/accept` | All User App API calls (short-lived, ~15 min) |
+| `refreshToken` | HTTP-only cookie set by the same User App auth responses | Get a new user access token when expired |
 
-Store both tokens securely in Android **EncryptedSharedPreferences**.  
-When any API returns `401`, call `POST /auth/refresh-token` before retrying.
+Store the `accessToken` securely in Android **EncryptedSharedPreferences**. The `refreshToken` is HTTP-only and must be preserved by the HTTP client's cookie jar.
+
+When any User App API returns `401`, call `POST /app/refresh-token` before retrying the original request once.
 
 ---
 
@@ -114,7 +115,6 @@ Body:
 ```json
 {
   "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
   "tokenType": "user",
   "user": {
     "id": "...",
@@ -125,12 +125,13 @@ Body:
 ```
 
 **App action:**
-- Store `accessToken` and `refreshToken` in EncryptedSharedPreferences
+- Store `accessToken` in EncryptedSharedPreferences
+- Preserve the HTTP-only refresh cookie in the HTTP client's cookie jar
 - Navigate to Dashboard (UC-7)
 
 ---
 
-### UC-3 — Consent Flow (New User — Aadhaar OTP Backed)
+### UC-3 — Consent Flow (New User — Tenant-Configured OTP)
 
 **Trigger:** First-time user, after UC-1 returned `registered: false`.  
 **This flow is legally mandatory. Do not skip or allow bypassing.**
@@ -155,16 +156,18 @@ GET /app/consent/terms
 
 **App action:** Display the full agreement text. User must scroll to bottom and check a checkbox. Do not allow proceeding until checkbox is ticked.
 
-**Step 2 — Initiate Aadhaar OTP (after user checks checkbox):**
+**Step 2 — Initiate consent OTP (after user checks checkbox):**
 ```
 POST /app/consent/initiate
 Authorization: Bearer <accessToken>
 
 Body:
 {
-  "aadhaarLinkedMobile": "9876543210"
+  "mobile": "9876543210"
 }
 ```
+
+If the tenant has `isAdhaarVerificationEnabled: true`, the backend uses the Aadhaar-backed OTP branch. Otherwise it uses normal mobile OTP and skips Aadhaar profile matching.
 
 **Response:**
 ```json
@@ -275,7 +278,7 @@ Authorization: Bearer <accessToken>
 
 **App action:**
 - `valid: true` → proceed to `GET /app/device/state` (UC-7)
-- `valid: false, reason: token_expired` → call `POST /auth/refresh-token` with `refreshToken`
+- `valid: false, reason: token_expired` → call `POST /app/refresh-token`, then retry once
 - `valid: false, reason: device_invalid` → clear local storage, force re-onboarding
 
 ---
@@ -748,21 +751,31 @@ Use the `data` field in the notification response to deep-link to the relevant s
 **Trigger:** Device reconnects to internet. App's network listener fires.
 
 ```
-POST /device/sync
+POST /app/device/sync
 Authorization: Bearer <accessToken>
 ```
 
 **Response:**
 ```json
 {
+  "serverTime": "2026-06-20T10:00:00.000Z",
+  "scheduledLockAt": "2026-07-22T00:00:00.000Z",
+  "deviceState": "LOCKED",
+  "currentPolicyKey": "EMI_LOCKED",
+  "desiredPolicyVersion": 4,
+  "policy": {
+    "policyKey": "EMI_LOCKED",
+    "restrictions": {
+      "lockMode": true
+    }
+  },
   "pendingCommands": [
     {
       "commandId": "abc123",
       "commandType": "LOCK",
       "payload": { "reason": "EMI overdue 35 days" }
     }
-  ],
-  "deviceState": "LOCKED"
+  ]
 }
 ```
 
@@ -770,6 +783,9 @@ Authorization: Bearer <accessToken>
 - For each command in `pendingCommands` → execute it locally (apply lock/unlock via Device Admin API)
 - After executing each → acknowledge it (UC-26)
 - Update local device state to match `deviceState`
+- Cache `serverTime` and `scheduledLockAt`; `scheduledLockAt` is the backend-authoritative EMI lock deadline.
+- `scheduledLockAt` is calculated from the earliest unpaid EMI as `dueDate + dpd + gracePeriodDays` and can be present before the device enters `GRACE_PERIOD`.
+- If the device is offline and cached `scheduledLockAt` is reached, show the lock screen locally and sync again when the network returns.
 
 ---
 
@@ -780,11 +796,11 @@ Authorization: Bearer <accessToken>
 
 On boot:
 1. Read stored `accessToken` from EncryptedSharedPreferences
-2. If token exists → call `POST /device/sync` (same as UC-24)
+2. If token exists → call `POST /app/device/sync` (same as UC-24)
 3. Apply any pending commands
-4. If the last known state was `LOCKED` → **immediately apply lock** before calling the server (fail-safe)
+4. If the last known state was `LOCKED`, or cached `scheduledLockAt` has already passed → **immediately apply lock** before showing Home
 
-> **Do not wait for the sync response to apply the lock on boot.** Apply it from local state first, then sync to get any updates.
+> **Do not wait for the sync response to apply an already-known lock on boot.** Apply it from local state or cached `scheduledLockAt` first, then sync to get any updates.
 
 ---
 
@@ -998,7 +1014,7 @@ All API errors follow this shape:
 
 | HTTP | Code | What to do |
 |---|---|---|
-| 401 | `TOKEN_EXPIRED` | Call `POST /auth/refresh-token`, retry |
+| 401 | `TOKEN_EXPIRED` | Call `POST /app/refresh-token`, retry once |
 | 401 | `TOKEN_INVALID` | Clear storage, redirect to login |
 | 403 | `CONSENT_INVALID` | Redirect to consent flow (UC-3) |
 | 403 | `DEVICE_LOCKED` | Show lock screen |
@@ -1027,7 +1043,7 @@ UC-2: POST /auth/verify-otp → get accessToken
 UC-3: GET /app/consent/terms  (display agreement)
     │ user checks checkbox
     ▼
-UC-3: POST /app/consent/initiate  (Aadhaar OTP sent)
+UC-3: POST /app/consent/initiate  (tenant-configured consent OTP sent)
     │
     ▼
 UC-3: POST /app/consent/confirm  (OTP + checkbox)
@@ -1059,7 +1075,7 @@ UC-5: GET /app/session/validate
 UC-6: Run device integrity checks locally
     │ issue found?  → POST /app/security/event
     ▼
-UC-24: POST /device/sync  (pick up any pending commands)
+UC-24: POST /app/device/sync  (pick up any pending commands)
     │
     ▼
 UC-7–11: GET /app/device/state → Render correct screen

@@ -14,7 +14,7 @@ EMI Shield is a **device control and compliance SaaS platform** for financed mob
 When a customer buys a device on EMI and stops paying, the lender has no practical way to enforce repayment. EMI Shield installs an agent app on the device at time of purchase. If the customer defaults, the lender can remotely lock the device (restrict it to a lock screen), incentivizing repayment. Once payment is made, the device unlocks automatically.
 
 **What makes it legally and ethically complex:**
-- Device locking in India requires explicit, verifiable borrower consent (Aadhaar-OTP backed)
+- Device locking in India requires explicit, verifiable borrower consent; Aadhaar OTP can be enabled per tenant
 - Emergency calls (112) must always remain accessible — even on a locked device
 - The platform itself is NOT a lender. It is a technology facilitator. All lock/unlock authority sits with the credit originator (tenant), not with EMI Shield
 - Every action must be auditable for legal defensibility
@@ -103,7 +103,7 @@ This is one of the most important decisions in the project — **two completely 
 
 ### `users` — Borrowers (app users)
 - The device purchasers who use the Android app
-- In the current simulation, receive a borrower JWT after mocked Cashfree Aadhaar OTP consent confirmation
+- In the current simulation, receive a borrower JWT after tenant-configured consent OTP confirmation
 - JWT contains `tokenType: "user"`
 - No dashboard access whatsoever
 
@@ -208,7 +208,7 @@ If any step fails, the payment record is retained and surfaced for manual review
 | Mobile App | Native Android (Java/Kotlin) | Boot receiver, FCM, background service, device admin API |
 | Push Notifications | Firebase Cloud Messaging (FCM) | Lock/unlock commands + user notifications |
 | Payments | UPI QR (tenant-managed) | Tenant uploads QR images; borrower scans and pays externally; tenant approves via Partner App |
-| OTP / Aadhaar Verification | Mocked Cashfree Aadhaar OTP in current backend | Consent OTP simulation; real provider can replace mock later |
+| OTP / Aadhaar Verification | Tenant-configured consent OTP; Aadhaar-backed only when enabled | Consent OTP simulation; real provider can replace mock later |
 | File Storage | S3-compatible | QR code image uploads, payment proof documents |
 | Dashboard | React (Web) | Three separate web apps or one with role-based views |
 
@@ -226,7 +226,7 @@ See `architecture.md` Section 5 for full schemas. Here is a quick reference:
 | 4 | `tenants` | Orgs using the product (NBFCs, shops, outlets) — replaces old `lenders` + `distributors` |
 | 5 | `devices` | Device registrations + real-time state |
 | 6 | `consentVersions` | Versioned legal consent documents (managed by super admin) |
-| 7 | `consentRecords` | Immutable per-user consent artefacts (Aadhaar OTP backed) — never updated |
+| 7 | `consentRecords` | Immutable per-user consent artefacts, backed by Aadhaar OTP or mobile OTP per tenant — never updated |
 | 8 | `tenantPolicies` | Per-tenant lock/unlock/escalation config copied from centralized platform defaults |
 | 9 | `emiSchedules` | EMI installment schedules per user/loan |
 | 10 | `payments` | All payment transactions and approval workflow records |
@@ -309,7 +309,7 @@ The Android app is more complex than a typical consumer app because it must:
 5. **Detect tampering** — Checks for root access, APK signature mismatch, emulator environment on every launch. Reports events to `/app/security/event`
 6. **Detect SIM change** — Compares stored SIM serial against current on each launch
 7. **Smart sync** — Combination of FCM push (for instant delivery) and polling `/device/sync` (for reliability)
-8. **Consent flow** — Aadhaar OTP flow must be completed before device is activated. No shortcuts
+8. **Consent flow** — tenant-configured consent OTP flow must be completed before device is activated. No shortcuts
 
 ### App States (maps to device states)
 ```
@@ -332,7 +332,7 @@ The consent flow happens once — at the time of device purchase/activation:
 2. User launches the app for the first time
 3. App displays consent terms (fetched from `consentVersions.current`)
 4. User reads terms, ticks checkbox
-5. App triggers Aadhaar OTP via `POST /app/consent/initiate`
+5. App triggers consent OTP via `POST /app/consent/initiate`
 6. User enters OTP
 7. App calls `POST /app/consent/confirm` — server creates a `consentRecord` (immutable)
 8. Device registration proceeds (`POST /app/device/register`)
@@ -407,7 +407,7 @@ EMI Shield/
 | **Super Admin** | EMI Shield's own operations admin. Platform-wide access, exception-only authority |
 | **DPD** | Days Past Due — how many days overdue the EMI is |
 | **SLA** | The time window a tenant has to action a borrower's unlock request before auto-escalation |
-| **Consent Record** | The immutable legal proof that the borrower agreed to device control. Aadhaar OTP backed |
+| **Consent Record** | The immutable legal proof that the borrower agreed to device control. Aadhaar-backed only when enabled for the tenant |
 | **Device Command** | A LOCK or UNLOCK instruction queued for delivery to the device via FCM |
 | **Unlock Request / Case** | Created when a borrower taps "Request Unlock" on the lock screen |
 | **Escalation** | An unlock request that moves from tenant to partner, then to super admin if SLAs are breached |
