@@ -6,6 +6,7 @@ import { parsePaymentProofUpload, parseUnlockRequestImageUpload } from "../../mi
 import {
   acceptConsent,
   acknowledgeDeviceCommand,
+  checkAppUpdate,
   createUnlockRequest,
   createIntegrityChallenge,
   getActiveUnlockRequest,
@@ -33,6 +34,8 @@ export const appRoutes = Router();
 
 appRoutes.post("/testing/access-token", generateTestUserAccessToken);
 appRoutes.post("/refresh-token", refreshUserAccessToken);
+appRoutes.get("/update/check", checkAppUpdate);
+appRoutes.post("/update/check", checkAppUpdate);
 appRoutes.get("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", initiateConsentOtp);
 appRoutes.post("/consent/verify-otp", verifyConsentOtp);

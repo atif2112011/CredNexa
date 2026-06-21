@@ -13,6 +13,7 @@ import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { EnrollmentToken } from "../../models/EnrollmentToken.js";
 import { Payment } from "../../models/Payment.js";
+import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
@@ -22,7 +23,14 @@ import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
-import { hasRequiredFields } from "../../utils/validators.js";
+import {
+  getEffectiveTenantCreditPerKeyPrice,
+  getOrCreatePayoutConstants,
+  getTenantCreditPurchaseLimits,
+  parseRupeeAmount,
+  roundRupeeAmount
+} from "../../utils/payout.js";
+import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 
 const addMonths = (date, months) => {
   const dueDate = new Date(date);
@@ -84,6 +92,30 @@ const ensureDistributorAccess = async (req, res) => {
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
+};
+
+const buildCreditPurchaseProof = async ({ req, requestId, tenant }) => {
+  if (req.file) {
+    return uploadImageToFirebase({
+      file: req.file,
+      folder: "tenant-credit-purchase-proofs",
+      recordId: requestId,
+      userId: req.auth.id,
+      tenantId: tenant._id,
+      metadata: {
+        tenantId: tenant._id.toString(),
+        creditPurchaseRequestId: requestId.toString()
+      }
+    });
+  }
+
+  const imageUrl = String(req.body.paymentProofImageUrl || "").trim();
+  if (!imageUrl) return null;
+
+  return {
+    imageUrl,
+    uploadedAt: new Date()
+  };
 };
 
 const queueTenantDeviceCommand = async ({ device, commandType, triggeredBy, accountId, payload = {}, session }) => {
@@ -601,6 +633,204 @@ export const getDashboard = async (req, res) => {
       },
       recentEnrollments: recentEnrollmentRows
     });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch tenant credit purchase options.
+ * Sample request: GET /tenant/credits/purchase/options
+ */
+export const getCreditPurchaseOptions = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const payoutConstants = await getOrCreatePayoutConstants();
+    const perKeyPrice = getEffectiveTenantCreditPerKeyPrice(tenant, payoutConstants);
+    const limits = getTenantCreditPurchaseLimits(payoutConstants);
+
+    return sendSuccess(res, 200, "Credit purchase options fetched successfully", {
+      credits: {
+        available: Number(tenant.creditBalance || 0),
+        totalPurchased: Number(tenant.totalCreditsPurchased || 0),
+        lifetimePurchaseAmount: roundRupeeAmount(tenant.lifetimeCreditPurchaseAmount || 0)
+      },
+      pricing: {
+        currency: "INR",
+        perKeyPrice,
+        source: tenant.creditPurchasePerKeyPrice !== undefined && tenant.creditPurchasePerKeyPrice !== null ? "tenant_override" : "default"
+      },
+      limits: {
+        minCredits: limits.min,
+        maxCredits: limits.max,
+        hasMaximumCap: limits.hasMaximumCap
+      },
+      adminPayment: {
+        upiId: payoutConstants.adminCreditPurchaseUpiId,
+        upiName: payoutConstants.adminCreditPurchaseUpiName,
+        qrImageUrl: payoutConstants.adminCreditPurchaseQrImageUrl
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Submit tenant credit purchase request for admin approval.
+ * Multipart fields: requestedCredits, referenceNumber, proofImage
+ * JSON fallback: { "requestedCredits": 10, "referenceNumber": "UTR123", "paymentProofImageUrl": "https://..." }
+ */
+export const submitCreditPurchaseRequest = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const requestedCredits = Number(req.body.requestedCredits);
+    if (!Number.isInteger(requestedCredits) || requestedCredits <= 0) {
+      return sendError(res, 400, "requestedCredits must be a positive integer");
+    }
+
+    if (!req.file && !req.body.paymentProofImageUrl) {
+      return sendError(res, 400, "Payment proof image is required");
+    }
+
+    const existingPendingRequest = await TenantCreditPurchaseRequest.findOne({
+      tenantId: tenant._id,
+      status: TENANT_CREDIT_PURCHASE_STATUSES.PENDING
+    }).lean();
+
+    if (existingPendingRequest) {
+      return sendError(res, 409, "A credit purchase request is already pending approval");
+    }
+
+    const payoutConstants = await getOrCreatePayoutConstants();
+    const limits = getTenantCreditPurchaseLimits(payoutConstants);
+
+    if (requestedCredits < limits.min) {
+      return sendError(res, 400, `Minimum credit purchase is ${limits.min}`);
+    }
+
+    if (limits.hasMaximumCap && requestedCredits > limits.max) {
+      return sendError(res, 400, `Maximum credit purchase is ${limits.max}`);
+    }
+
+    const perKeyPrice = getEffectiveTenantCreditPerKeyPrice(tenant, payoutConstants);
+    const purchaseAmount = roundRupeeAmount(requestedCredits * perKeyPrice);
+    const submittedAmount =
+      req.body.purchaseAmount !== undefined
+        ? parseRupeeAmount(req.body.purchaseAmount)
+        : req.body.amount !== undefined
+          ? parseRupeeAmount(req.body.amount)
+          : null;
+
+    if (submittedAmount !== null && submittedAmount !== purchaseAmount) {
+      return sendError(res, 400, "purchaseAmount must equal requestedCredits * perKeyPrice");
+    }
+
+    const requestId = new mongoose.Types.ObjectId();
+    const paymentProof = await buildCreditPurchaseProof({ req, requestId, tenant });
+
+    const creditPurchaseRequest = await TenantCreditPurchaseRequest.create({
+      _id: requestId,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      requestedCredits,
+      perKeyPrice,
+      purchaseAmount,
+      adminPaymentSnapshot: {
+        upiId: payoutConstants.adminCreditPurchaseUpiId,
+        upiName: payoutConstants.adminCreditPurchaseUpiName,
+        qrImageUrl: payoutConstants.adminCreditPurchaseQrImageUrl,
+        qrStoragePath: payoutConstants.adminCreditPurchaseQrStoragePath
+      },
+      paymentProof,
+      referenceNumber: req.body.referenceNumber,
+      requestedBy: req.auth.id,
+      metadata: {
+        amountFormula: "requestedCredits * perKeyPrice"
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.TENANT_CREDIT_PURCHASE_REQUESTED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      metadata: {
+        creditPurchaseRequestId: creditPurchaseRequest._id,
+        requestedCredits,
+        perKeyPrice,
+        purchaseAmount
+      }
+    });
+
+    return sendSuccess(res, 201, "Credit purchase request submitted successfully", {
+      creditPurchaseRequest
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List tenant credit purchase requests.
+ * Sample request: GET /tenant/credits/purchase/requests?status=PENDING&page=1&limit=20
+ */
+export const listCreditPurchaseRequests = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { tenantId: tenant._id };
+
+    if (req.query.status) {
+      if (!Object.values(TENANT_CREDIT_PURCHASE_STATUSES).includes(req.query.status)) {
+        return sendError(res, 400, "Invalid credit purchase status");
+      }
+      filter.status = req.query.status;
+    }
+
+    const [items, total] = await Promise.all([
+      TenantCreditPurchaseRequest.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      TenantCreditPurchaseRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Credit purchase requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch one tenant credit purchase request.
+ * Sample request: GET /tenant/credits/purchase/requests/665f...
+ */
+export const getCreditPurchaseRequestById = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid credit purchase request ID");
+    }
+
+    const creditPurchaseRequest = await TenantCreditPurchaseRequest.findOne({
+      _id: req.params.requestId,
+      tenantId: tenant._id
+    }).lean();
+
+    if (!creditPurchaseRequest) {
+      return sendError(res, 404, "Credit purchase request not found");
+    }
+
+    return sendSuccess(res, 200, "Credit purchase request fetched successfully", creditPurchaseRequest);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

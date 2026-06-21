@@ -95,6 +95,21 @@ const tenantSchema = new mongoose.Schema(
       default: 0,
       min: 0
     },
+    creditPurchasePerKeyPrice: {
+      type: Number,
+      min: 0
+    },
+    totalCreditsPurchased: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    lifetimeCreditPurchaseAmount: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    lastCreditPurchasedAt: Date,
     isAdhaarVerificationEnabled: {
       type: Boolean,
       default: false

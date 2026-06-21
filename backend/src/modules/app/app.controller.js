@@ -25,6 +25,12 @@ import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { OtpRecord } from "../../models/OtpRecord.js";
 import { User } from "../../models/User.js";
+import {
+  buildUpdateCheckResponse,
+  findPublishedBuild,
+  parsePositiveInteger,
+  validateAppBuildIdentity
+} from "../../services/appUpdate.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { hasRequiredFields } from "../../utils/validators.js";
@@ -87,6 +93,40 @@ const normalizeName = (name = "") => {
 };
 
 const createCaseId = () => `CASE-${new Date().getFullYear()}-${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
+
+/**
+ * Check whether the borrower Android app should show no update, optional update,
+ * or force update. The endpoint intentionally does not require borrower PII or a
+ * user token because it must be callable very early during app startup.
+ */
+export const checkAppUpdate = async (req, res) => {
+  try {
+    const input = req.method === "GET" ? req.query : req.body;
+    const identity = validateAppBuildIdentity(input);
+    if (identity.error) {
+      return sendError(res, 400, identity.error);
+    }
+
+    const currentVersionCode = parsePositiveInteger(input.currentVersionCode);
+    if (!currentVersionCode) {
+      return sendError(res, 400, "currentVersionCode must be a positive integer");
+    }
+
+    const build = await findPublishedBuild(identity.value);
+    if (!build) {
+      return sendError(res, 503, "Published app build is not configured");
+    }
+
+    if (!build.apkUrl?.startsWith("https://")) {
+      return sendError(res, 503, "Published app build APK URL is not valid");
+    }
+
+    const response = buildUpdateCheckResponse({ build, currentVersionCode });
+    return sendSuccess(res, 200, "App update check completed", response);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
 
 const buildMockCashfreeProfile = (user) => ({
   name: user.name,

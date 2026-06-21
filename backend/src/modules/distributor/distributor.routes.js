@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
-import { parseTenantQrImageUpload } from "../../middleware/parsePaymentProofUpload.js";
+import { parsePaymentProofUpload, parseTenantQrImageUpload } from "../../middleware/parsePaymentProofUpload.js";
 import {
   activateQrCode,
   addQrCode,
@@ -12,6 +12,8 @@ import {
   generateEnrollmentQr,
   getBorrowersWithPendingEmis,
   getBorrowersWithOverdueEmis,
+  getCreditPurchaseOptions,
+  getCreditPurchaseRequestById,
   getDashboard,
   getDistributorDeviceById,
   getDistributorDevices,
@@ -21,6 +23,7 @@ import {
   getPaymentById,
   getTenantUnlockRequestByCaseId,
   getUserEmiInstallments,
+  listCreditPurchaseRequests,
   listPaymentApprovalRequests,
   listPendingPayments,
   listQrCodes,
@@ -31,6 +34,7 @@ import {
   rejectPayment,
   rejectTenantUnlockRequest,
   sendUpcomingPaymentCommand,
+  submitCreditPurchaseRequest,
   tempUnlockTenantDevice,
   tempUnlockTenantUnlockRequest,
   unlockTenantDevice
@@ -41,6 +45,10 @@ export const distributorRoutes = Router();
 distributorRoutes.use(verifyJwt);
 distributorRoutes.use(requireTokenType("account"));
 distributorRoutes.get("/dashboard", getDashboard);
+distributorRoutes.get("/credits/purchase/options", getCreditPurchaseOptions);
+distributorRoutes.get("/credits/purchase/requests", listCreditPurchaseRequests);
+distributorRoutes.post("/credits/purchase/requests", parsePaymentProofUpload, submitCreditPurchaseRequest);
+distributorRoutes.get("/credits/purchase/requests/:requestId", getCreditPurchaseRequestById);
 distributorRoutes.post("/users/register", registerBorrower);
 distributorRoutes.post("/enrollment/qr", generateEnrollmentQr);
 distributorRoutes.get("/enrollments/:token/status", getEnrollmentStatusByToken);

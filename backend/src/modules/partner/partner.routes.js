@@ -10,15 +10,20 @@ import {
   createTenantAdminAccount,
   getPartnerDashboard,
   getPartnerEscalationByCaseId,
+  getPartnerPayoutSummary,
   getPartnerTenants,
+  initiateTenantCreationVerification,
   initiatePartnerSignupOtp,
   listPartnerAccounts,
   listPartnerEscalations,
+  listPartnerPayoutRequests,
   rejectPartnerEscalation,
+  requestPartnerPayout,
   tempUnlockPartnerEscalation,
   unlockPartnerEscalation,
   updatePartnerAccount,
   updatePartnerAccountStatus,
+  verifyTenantCreationVerification,
   verifyPartnerSignupOtp
 } from "./partner.controller.js";
 
@@ -35,6 +40,11 @@ partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
 partnerRoutes.post("/signup/complete", completePartnerSignup);
 
 partnerRoutes.get("/dashboard", ...requirePartnerAdmin, getPartnerDashboard);
+partnerRoutes.get("/payout/summary", ...requirePartnerAdmin, getPartnerPayoutSummary);
+partnerRoutes.get("/payout/requests", ...requirePartnerAdmin, listPartnerPayoutRequests);
+partnerRoutes.post("/payout/requests", ...requirePartnerAdmin, requestPartnerPayout);
+partnerRoutes.post("/tenants/initiate-verification", ...requirePartnerAdmin, initiateTenantCreationVerification);
+partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, verifyTenantCreationVerification);
 partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
 partnerRoutes.post("/tenants", ...requirePartnerAdmin, createPartnerTenant);
 

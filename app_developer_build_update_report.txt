@@ -1,0 +1,330 @@
+APP UPDATE AND BUILD MANAGEMENT HANDOFF
+
+Project: EMI Shield / CredNexa Android borrower app
+Package name: com.crednexa.app
+Platform: android
+Supported channels: production, qa
+
+1. WHAT WAS IMPLEMENTED
+
+The backend now has an app build management system.
+
+Super Admin can upload APK builds, save build metadata, publish a build for a channel, and archive old builds.
+
+The Android borrower app can call an update-check API during startup. The API tells the app whether:
+
+- no update is needed
+- an optional update is available
+- a force update is required
+
+The app does not need to send borrower PII for this check.
+
+2. APP UPDATE CHECK API
+
+Primary API:
+
+POST https://cred-nexa-t1o7.vercel.app/api/app/update/check
+
+Compatibility API:
+
+GET https://cred-nexa-t1o7.vercel.app/api/app/update/check
+
+POST request body:
+
+{
+  "platform": "android",
+  "packageName": "com.crednexa.app",
+  "currentVersion": "1.0.12",
+  "currentVersionCode": 12,
+  "channel": "production",
+  "buildType": "release",
+  "deviceOwner": true
+}
+
+Notes:
+
+- channel is optional.
+- If channel is missing, backend uses production.
+- currentVersionCode must be a positive integer.
+- packageName must be com.crednexa.app.
+- platform must be android.
+
+GET example:
+
+https://cred-nexa-t1o7.vercel.app/api/app/update/check?platform=android&packageName=com.crednexa.app&currentVersion=1.0.12&currentVersionCode=12&channel=production&buildType=release
+
+3. RESPONSE: NO UPDATE
+
+{
+  "success": true,
+  "message": "App update check completed",
+  "data": {
+    "platform": "android",
+    "packageName": "com.crednexa.app",
+    "channel": "production",
+    "updateAvailable": false,
+    "forceUpdate": false,
+    "latestVersion": "1.0.15",
+    "latestVersionCode": 15,
+    "minimumSupportedVersionCode": 10,
+    "releaseNotes": "Bug fixes and security improvements",
+    "checksumRequired": true
+  }
+}
+
+App behavior:
+
+- Continue normal startup.
+- Do not show update dialog.
+
+4. RESPONSE: OPTIONAL UPDATE
+
+{
+  "success": true,
+  "message": "App update check completed",
+  "data": {
+    "platform": "android",
+    "packageName": "com.crednexa.app",
+    "channel": "production",
+    "updateAvailable": true,
+    "forceUpdate": false,
+    "latestVersion": "1.0.15",
+    "latestVersionCode": 15,
+    "minimumSupportedVersionCode": 10,
+    "releaseNotes": "Bug fixes and security improvements",
+    "checksumRequired": true,
+    "apkUrl": "https://example.com/crednexa-production-v15.apk",
+    "apkSha256": "64_character_sha256_hex_digest"
+  }
+}
+
+App behavior:
+
+- Show optional update prompt.
+- User may continue if they skip the update.
+- If user accepts, open/download apkUrl.
+- If checksum validation is enabled in the app, validate the downloaded APK using apkSha256.
+
+5. RESPONSE: FORCE UPDATE
+
+{
+  "success": true,
+  "message": "App update check completed",
+  "data": {
+    "platform": "android",
+    "packageName": "com.crednexa.app",
+    "channel": "production",
+    "updateAvailable": true,
+    "forceUpdate": true,
+    "latestVersion": "1.0.15",
+    "latestVersionCode": 15,
+    "minimumSupportedVersionCode": 13,
+    "releaseNotes": "Security update required",
+    "checksumRequired": true,
+    "apkUrl": "https://example.com/crednexa-production-v15.apk",
+    "apkSha256": "64_character_sha256_hex_digest"
+  }
+}
+
+App behavior:
+
+- Block normal app usage.
+- Show force update screen/dialog.
+- User should not be allowed to skip.
+- Download/open apkUrl.
+- Validate apkSha256 if checksum validation is enabled.
+
+6. DECISION LOGIC USED BY BACKEND
+
+If currentVersionCode is less than minimumSupportedVersionCode:
+
+updateAvailable = true
+forceUpdate = true
+
+If currentVersionCode is greater than or equal to minimumSupportedVersionCode but less than latestVersionCode:
+
+updateAvailable = true
+forceUpdate = false
+
+If currentVersionCode is greater than or equal to latestVersionCode:
+
+updateAvailable = false
+forceUpdate = false
+
+7. ADMIN BUILD UPLOAD FLOW
+
+Step 1: Super Admin uploads a build.
+
+Endpoint:
+
+POST https://cred-nexa-t1o7.vercel.app/api/admin/app-builds
+
+Auth:
+
+Authorization: Bearer <SUPER_ADMIN_ACCESS_TOKEN>
+
+Content-Type:
+
+multipart/form-data
+
+Form fields:
+
+apkFile = app-release.apk
+platform = android
+packageName = com.crednexa.app
+channel = production
+versionName = 1.0.15
+versionCode = 15
+minimumSupportedVersionCode = 10
+buildType = release
+checksumRequired = true
+releaseNotes = Bug fixes and security improvements
+
+Example:
+
+curl -X POST "https://cred-nexa-t1o7.vercel.app/api/admin/app-builds" ^
+  -H "Authorization: Bearer <SUPER_ADMIN_ACCESS_TOKEN>" ^
+  -F "apkFile=@./app-release.apk" ^
+  -F "platform=android" ^
+  -F "packageName=com.crednexa.app" ^
+  -F "channel=production" ^
+  -F "versionName=1.0.15" ^
+  -F "versionCode=15" ^
+  -F "minimumSupportedVersionCode=10" ^
+  -F "buildType=release" ^
+  -F "checksumRequired=true" ^
+  -F "releaseNotes=Bug fixes and security improvements"
+
+Backend result:
+
+- APK is uploaded to Firebase Storage.
+- Backend computes apkSha256.
+- Build is saved as draft.
+- Draft build is not served to borrower app until published.
+
+Step 2: Super Admin publishes the build.
+
+Endpoint:
+
+PATCH https://cred-nexa-t1o7.vercel.app/api/admin/app-builds/<buildId>/publish
+
+Example:
+
+curl -X PATCH "https://cred-nexa-t1o7.vercel.app/api/admin/app-builds/<buildId>/publish" ^
+  -H "Authorization: Bearer <SUPER_ADMIN_ACCESS_TOKEN>"
+
+Backend result:
+
+- Selected build becomes published.
+- Previous published build for the same platform + packageName + channel is archived.
+- Borrower app update check now uses the newly published build.
+
+8. ADMIN GET/UPDATE/APIS
+
+List builds:
+
+GET https://cred-nexa-t1o7.vercel.app/api/admin/app-builds
+
+Optional filters:
+
+?channel=production
+?channel=qa
+?status=draft
+?status=published
+?status=archived
+
+Get one build:
+
+GET https://cred-nexa-t1o7.vercel.app/api/admin/app-builds/<buildId>
+
+Update build:
+
+PATCH https://cred-nexa-t1o7.vercel.app/api/admin/app-builds/<buildId>
+
+Archive build:
+
+PATCH https://cred-nexa-t1o7.vercel.app/api/admin/app-builds/<buildId>/archive
+
+9. CHANNEL RULES
+
+production and qa are separate.
+
+A production update check only reads the published production build.
+
+A qa update check only reads the published qa build.
+
+The app should send:
+
+"channel": "production"
+
+for production builds.
+
+The app should send:
+
+"channel": "qa"
+
+for QA builds.
+
+If the app sends no channel, backend assumes production.
+
+10. APP DEVELOPER TEST CHECKLIST
+
+Test these cases:
+
+1. No published build exists.
+2. Published build exists and currentVersionCode is already latest.
+3. Published build exists and currentVersionCode is older, but still supported.
+4. Published build exists and currentVersionCode is below minimumSupportedVersionCode.
+5. channel=production returns production APK.
+6. channel=qa returns QA APK.
+7. apkUrl opens/downloads on the borrower device.
+8. apkSha256 matches the downloaded APK if checksum validation is enabled.
+9. Backend 400/503/500 errors do not crash startup.
+10. Device Owner release build can open/download/install according to app-side installation flow.
+
+11. IMPORTANT SECURITY NOTE
+
+Do not send borrower PII to update-check API.
+
+Do not send:
+
+access token
+refresh token
+cookie value
+Authorization header
+OTP
+mobile number
+IMEI
+Aadhaar
+payment proof
+enrollment token
+FCM token
+
+Safe fields are:
+
+platform
+packageName
+currentVersion
+currentVersionCode
+channel
+buildType
+deviceOwner
+
+12. FIELD NAMES APP SHOULD USE
+
+Use these exact response field names:
+
+updateAvailable
+forceUpdate
+latestVersion
+latestVersionCode
+minimumSupportedVersionCode
+apkUrl
+apkSha256
+releaseNotes
+checksumRequired
+channel
+
+The checksum field name is:
+
+apkSha256

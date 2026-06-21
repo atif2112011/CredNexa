@@ -8,6 +8,7 @@ import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../../constants/tenant.js";
 import { Account } from "../../models/Account.js";
+import { APP_BUILD_STATUSES, AppBuild } from "../../models/AppBuild.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ChannelPartner } from "../../models/ChannelPartner.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
@@ -15,16 +16,39 @@ import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
+import {
+  PARTNER_CREDIT_BALANCE_TYPES,
+  PARTNER_CREDIT_LEDGER_TYPES,
+  PartnerCreditLedger
+} from "../../models/PartnerCreditLedger.js";
+import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/PartnerPayoutRequest.js";
+import { PayoutConstants } from "../../models/PayoutConstants.js";
 import { RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
+import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
+import {
+  publishBuild,
+  uploadBuildApk,
+  validateAppBuildIdentity,
+  validateBuildPayload
+} from "../../services/appUpdate.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
+import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
+import {
+  calculatePartnerCreditAmount,
+  getOrCreatePayoutConstants,
+  getPartnerCreditPercentage,
+  isValidUpiId,
+  parseRupeeAmount,
+  roundRupeeAmount
+} from "../../utils/payout.js";
 
 const getPagination = (query) => {
   const page = Math.max(Number(query.page || 1), 1);
@@ -47,6 +71,131 @@ const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("bas
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
+};
+
+const isValidPercentage = (value) => {
+  const percentage = Number(value);
+  return Number.isFinite(percentage) && percentage >= 0 && percentage <= 100;
+};
+
+const buildPartnerPayoutProof = async ({ req, payoutRequest, channelPartner }) => {
+  if (req.file) {
+    return uploadImageToFirebase({
+      file: req.file,
+      folder: "partner-payout-proofs",
+      recordId: payoutRequest._id,
+      userId: req.auth.id,
+      tenantId: channelPartner._id,
+      metadata: {
+        payoutRequestId: payoutRequest._id.toString(),
+        channelPartnerId: channelPartner._id.toString()
+      }
+    });
+  }
+
+  const imageUrl = String(req.body.paymentProofImageUrl || "").trim();
+  if (!imageUrl) return null;
+
+  return {
+    imageUrl,
+    uploadedAt: new Date()
+  };
+};
+
+const awardPartnerCreditForTenantCreditPurchase = async ({
+  tenant,
+  keysPurchased,
+  perKeyPrice,
+  purchaseAmount,
+  tenantCreditLedgerId,
+  actorId,
+  reason,
+  session
+}) => {
+  if (!tenant?.channelPartnerId || purchaseAmount <= 0) return null;
+
+  const payoutConstants = await getOrCreatePayoutConstants(session);
+  const channelPartner = await ChannelPartner.findById(tenant.channelPartnerId).session(session);
+  if (!channelPartner) return null;
+
+  const creditPercentage = getPartnerCreditPercentage(channelPartner, payoutConstants);
+  const creditAmount = calculatePartnerCreditAmount({ purchaseAmount, creditPercentage });
+
+  if (creditAmount <= 0) {
+    return {
+      channelPartnerId: channelPartner._id,
+      creditPercentage,
+      creditAmount: 0,
+      purchaseAmount
+    };
+  }
+
+  const balanceBefore = roundRupeeAmount(channelPartner.availablePayoutBalance || 0);
+  const balanceAfter = roundRupeeAmount(balanceBefore + creditAmount);
+
+  channelPartner.creditPercentage = creditPercentage;
+  channelPartner.availablePayoutBalance = balanceAfter;
+  channelPartner.lifetimePayoutEarned = roundRupeeAmount(Number(channelPartner.lifetimePayoutEarned || 0) + creditAmount);
+  await channelPartner.save({ session });
+
+  const ledgerEntries = await PartnerCreditLedger.create(
+    [
+      {
+        channelPartnerId: channelPartner._id,
+        tenantId: tenant._id,
+        tenantCreditLedgerId,
+        type: PARTNER_CREDIT_LEDGER_TYPES.TENANT_KEY_PURCHASE_COMMISSION,
+        balanceType: PARTNER_CREDIT_BALANCE_TYPES.AVAILABLE,
+        delta: creditAmount,
+        balanceBefore,
+        balanceAfter,
+        keysPurchased,
+        perKeyPrice,
+        purchaseAmount,
+        creditPercentage,
+        actorId,
+        actorCollection: "accounts",
+        reason: reason || "Tenant credit purchase commission",
+        metadata: {
+          source: "tenant_credit_purchase",
+          formula: "keysPurchased * perKeyPrice * creditPercentage / 100"
+        }
+      }
+    ],
+    { session, ordered: true }
+  );
+
+  await createAuditLog(
+    {
+      eventType: AUDIT_EVENTS.PARTNER_CREDIT_EARNED,
+      actorId,
+      tenantId: tenant._id,
+      channelPartnerId: channelPartner._id,
+      reason,
+      metadata: {
+        keysPurchased,
+        perKeyPrice,
+        purchaseAmount,
+        creditPercentage,
+        creditAmount,
+        balanceBefore,
+        balanceAfter,
+        partnerCreditLedgerId: ledgerEntries[0]._id,
+        tenantCreditLedgerId
+      }
+    },
+    { session }
+  );
+
+  return {
+    channelPartnerId: channelPartner._id,
+    creditPercentage,
+    creditAmount,
+    balanceBefore,
+    balanceAfter,
+    ledgerEntryId: ledgerEntries[0]._id,
+    purchaseAmount
+  };
 };
 
 const getTenantDetailData = async (tenantId) => {
@@ -352,6 +501,10 @@ export const createChannelPartner = async (req, res) => {
       return sendError(res, 400, "Name and type are required");
     }
 
+    if (req.body.creditPercentage !== undefined && !isValidPercentage(req.body.creditPercentage)) {
+      return sendError(res, 400, "creditPercentage must be between 0 and 100");
+    }
+
     const channelPartner = await ChannelPartner.create({
       ...req.body,
       createdBy: req.auth.id
@@ -410,7 +563,11 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, "Invalid channel partner ID");
     }
 
-    const allowedUpdates = ["name", "type", "contactEmail", "contactPhone"];
+    if (req.body.creditPercentage !== undefined && !isValidPercentage(req.body.creditPercentage)) {
+      return sendError(res, 400, "creditPercentage must be between 0 and 100");
+    }
+
+    const allowedUpdates = ["name", "type", "contactEmail", "contactPhone", "creditPercentage", "payoutUpiId", "payoutUpiName"];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))
     );
@@ -430,6 +587,15 @@ export const updateChannelPartner = async (req, res) => {
       channelPartnerId: channelPartner._id,
       metadata: updates
     });
+
+    if (updates.creditPercentage !== undefined) {
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.PARTNER_CREDIT_PERCENTAGE_UPDATED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        metadata: { creditPercentage: channelPartner.creditPercentage }
+      });
+    }
 
     return sendSuccess(res, 200, "Channel partner updated successfully", channelPartner);
   } catch (error) {
@@ -474,6 +640,135 @@ export const updateChannelPartnerStatus = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Channel partner status updated successfully", channelPartner);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch payout constants.
+ * Sample query: /admin/payout/constants
+ */
+export const getPayoutConstants = async (req, res) => {
+  try {
+    const payoutConstants = await getOrCreatePayoutConstants();
+    return sendSuccess(res, 200, "Payout constants fetched successfully", payoutConstants);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update payout constants.
+ * Sample body: { "defaultPartnerCreditPercentage": 15, "minPartnerPayoutAmount": 0, "maxPartnerPayoutAmount": 0, "defaultTenantCreditPerKeyPrice": 100 }
+ */
+export const updatePayoutConstants = async (req, res) => {
+  try {
+    const updates = {};
+
+    if (req.body.defaultPartnerCreditPercentage !== undefined) {
+      if (!isValidPercentage(req.body.defaultPartnerCreditPercentage)) {
+        return sendError(res, 400, "defaultPartnerCreditPercentage must be between 0 and 100");
+      }
+      updates.defaultPartnerCreditPercentage = Number(req.body.defaultPartnerCreditPercentage);
+    }
+
+    if (req.body.minPartnerPayoutAmount !== undefined) {
+      const minAmount = parseRupeeAmount(req.body.minPartnerPayoutAmount);
+      if (minAmount === null || minAmount < 0) {
+        return sendError(res, 400, "minPartnerPayoutAmount must be a valid non-negative rupee amount");
+      }
+      updates.minPartnerPayoutAmount = minAmount;
+    }
+
+    if (req.body.maxPartnerPayoutAmount !== undefined) {
+      const maxAmount = parseRupeeAmount(req.body.maxPartnerPayoutAmount);
+      if (maxAmount === null || maxAmount < 0) {
+        return sendError(res, 400, "maxPartnerPayoutAmount must be a valid non-negative rupee amount");
+      }
+      updates.maxPartnerPayoutAmount = maxAmount;
+    }
+
+    if (req.body.defaultTenantCreditPerKeyPrice !== undefined) {
+      const perKeyPrice = parseRupeeAmount(req.body.defaultTenantCreditPerKeyPrice);
+      if (perKeyPrice === null || perKeyPrice < 0) {
+        return sendError(res, 400, "defaultTenantCreditPerKeyPrice must be a valid non-negative rupee amount");
+      }
+      updates.defaultTenantCreditPerKeyPrice = perKeyPrice;
+    }
+
+    if (req.body.minTenantCreditPurchase !== undefined) {
+      const minCredits = Number(req.body.minTenantCreditPurchase);
+      if (!Number.isInteger(minCredits) || minCredits < 0) {
+        return sendError(res, 400, "minTenantCreditPurchase must be a non-negative integer");
+      }
+      updates.minTenantCreditPurchase = minCredits;
+    }
+
+    if (req.body.maxTenantCreditPurchase !== undefined) {
+      const maxCredits = Number(req.body.maxTenantCreditPurchase);
+      if (!Number.isInteger(maxCredits) || maxCredits < 0) {
+        return sendError(res, 400, "maxTenantCreditPurchase must be a non-negative integer");
+      }
+      updates.maxTenantCreditPurchase = maxCredits;
+    }
+
+    if (req.body.adminCreditPurchaseUpiId !== undefined) {
+      const upiId = String(req.body.adminCreditPurchaseUpiId || "").trim();
+      if (!upiId || !isValidUpiId(upiId)) {
+        return sendError(res, 400, "Valid adminCreditPurchaseUpiId is required");
+      }
+      updates.adminCreditPurchaseUpiId = upiId;
+    }
+
+    if (req.body.adminCreditPurchaseUpiName !== undefined) {
+      const upiName = String(req.body.adminCreditPurchaseUpiName || "").trim();
+      if (!upiName) {
+        return sendError(res, 400, "adminCreditPurchaseUpiName is required");
+      }
+      updates.adminCreditPurchaseUpiName = upiName;
+    }
+
+    if (req.body.adminCreditPurchaseQrImageUrl !== undefined) {
+      const qrImageUrl = String(req.body.adminCreditPurchaseQrImageUrl || "").trim();
+      if (!qrImageUrl) {
+        return sendError(res, 400, "adminCreditPurchaseQrImageUrl is required");
+      }
+      updates.adminCreditPurchaseQrImageUrl = qrImageUrl;
+    }
+
+    if (!Object.keys(updates).length) {
+      return sendError(res, 400, "At least one payout constant is required");
+    }
+
+    const currentConstants = await getOrCreatePayoutConstants();
+    const nextMin = updates.minPartnerPayoutAmount ?? Number(currentConstants.minPartnerPayoutAmount || 0);
+    const nextMax = updates.maxPartnerPayoutAmount ?? Number(currentConstants.maxPartnerPayoutAmount || 0);
+
+    if (nextMax > 0 && nextMax < nextMin) {
+      return sendError(res, 400, "maxPartnerPayoutAmount cannot be less than minPartnerPayoutAmount unless max is 0");
+    }
+
+    const nextMinCredits = updates.minTenantCreditPurchase ?? Number(currentConstants.minTenantCreditPurchase || 0);
+    const nextMaxCredits = updates.maxTenantCreditPurchase ?? Number(currentConstants.maxTenantCreditPurchase || 0);
+
+    if (nextMaxCredits > 0 && nextMaxCredits < nextMinCredits) {
+      return sendError(res, 400, "maxTenantCreditPurchase cannot be less than minTenantCreditPurchase unless max is 0");
+    }
+
+    const payoutConstants = await PayoutConstants.findOneAndUpdate(
+      { key: currentConstants.key },
+      { $set: { ...updates, updatedBy: req.auth.id } },
+      { new: true, runValidators: true }
+    );
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.PAYOUT_CONSTANTS_UPDATED,
+      actorId: req.auth.id,
+      metadata: updates
+    });
+
+    return sendSuccess(res, 200, "Payout constants updated successfully", payoutConstants);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -555,6 +850,13 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, `Invalid capability: ${invalidCapability}`);
     }
 
+    const creditPurchasePerKeyPrice =
+      req.body.creditPurchasePerKeyPrice !== undefined ? parseRupeeAmount(req.body.creditPurchasePerKeyPrice) : undefined;
+
+    if (req.body.creditPurchasePerKeyPrice !== undefined && (creditPurchasePerKeyPrice === null || creditPurchasePerKeyPrice < 0)) {
+      return sendError(res, 400, "creditPurchasePerKeyPrice must be a valid non-negative rupee amount");
+    }
+
     const channelPartner = await ChannelPartner.findOne({
       _id: req.body.channelPartnerId,
       isActive: true
@@ -606,6 +908,7 @@ export const createTenant = async (req, res) => {
           supportEmail: req.body.supportEmail,
           supportWhatsapp: req.body.supportWhatsapp,
           address: req.body.address,
+          ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
           isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
           createdBy: req.auth.id
         }
@@ -775,7 +1078,15 @@ export const updateTenant = async (req, res) => {
       return sendError(res, 400, "Invalid tenant ID");
     }
 
-    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "address", "parentTenantId"];
+    if (req.body.creditPurchasePerKeyPrice !== undefined) {
+      const creditPurchasePerKeyPrice = parseRupeeAmount(req.body.creditPurchasePerKeyPrice);
+      if (creditPurchasePerKeyPrice === null || creditPurchasePerKeyPrice < 0) {
+        return sendError(res, 400, "creditPurchasePerKeyPrice must be a valid non-negative rupee amount");
+      }
+      req.body.creditPurchasePerKeyPrice = creditPurchasePerKeyPrice;
+    }
+
+    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "address", "parentTenantId", "creditPurchasePerKeyPrice"];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))
     );
@@ -860,9 +1171,26 @@ export const adjustTenantCredits = async (req, res) => {
 
     const delta = Number(req.body.delta);
     const reason = String(req.body.reason || "").trim();
+    const perKeyPrice = delta > 0 ? parseRupeeAmount(req.body.perKeyPrice) : null;
 
     if (!Number.isInteger(delta) || delta === 0) {
       return sendError(res, 400, "delta must be a non-zero integer");
+    }
+
+    if (delta > 0 && (perKeyPrice === null || perKeyPrice < 0)) {
+      return sendError(res, 400, "perKeyPrice is required for positive credit adjustments");
+    }
+
+    const purchaseAmount = delta > 0 ? roundRupeeAmount(delta * perKeyPrice) : 0;
+    const submittedPurchaseAmount =
+      req.body.purchaseAmount !== undefined
+        ? parseRupeeAmount(req.body.purchaseAmount)
+        : req.body.amount !== undefined
+          ? parseRupeeAmount(req.body.amount)
+          : null;
+
+    if (delta > 0 && submittedPurchaseAmount !== null && submittedPurchaseAmount !== purchaseAmount) {
+      return sendError(res, 400, "purchaseAmount must equal delta * perKeyPrice");
     }
 
     if (!reason) {
@@ -899,11 +1227,34 @@ export const adjustTenantCredits = async (req, res) => {
           actorId: req.auth.id,
           actorCollection: "accounts",
           reason,
-          metadata: { source: "super_admin" }
+          metadata: {
+            source: "super_admin",
+            ...(delta > 0
+              ? {
+                  keysPurchased: delta,
+                  perKeyPrice,
+                  purchaseAmount,
+                  purchaseAmountFormula: "delta * perKeyPrice"
+                }
+              : {})
+          }
         }
       ],
       { session, ordered: true }
     );
+
+    const partnerCredit = delta > 0
+      ? await awardPartnerCreditForTenantCreditPurchase({
+          tenant,
+          keysPurchased: delta,
+          perKeyPrice,
+          purchaseAmount,
+          tenantCreditLedgerId: ledgerEntries[0]._id,
+          actorId: req.auth.id,
+          reason,
+          session
+        })
+      : null;
 
     await createAuditLog(
       {
@@ -916,7 +1267,8 @@ export const adjustTenantCredits = async (req, res) => {
           delta,
           balanceBefore,
           balanceAfter,
-          ledgerEntryId: ledgerEntries[0]._id
+          ledgerEntryId: ledgerEntries[0]._id,
+          ...(delta > 0 ? { perKeyPrice, purchaseAmount, partnerCredit } : {})
         }
       },
       { session }
@@ -931,6 +1283,615 @@ export const adjustTenantCredits = async (req, res) => {
         delta,
         current: balanceAfter
       },
+      ledgerEntryId: ledgerEntries[0]._id,
+      ...(delta > 0
+        ? {
+            purchase: {
+              keysPurchased: delta,
+              perKeyPrice,
+              purchaseAmount
+            },
+            partnerCredit
+          }
+        : {})
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * List tenant credit purchase requests.
+ * Sample query: /admin/tenant-credit-purchases?status=PENDING&tenantId=665f...&page=1&limit=20
+ */
+export const listTenantCreditPurchaseRequests = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.status) {
+      if (!Object.values(TENANT_CREDIT_PURCHASE_STATUSES).includes(req.query.status)) {
+        return sendError(res, 400, "Invalid credit purchase status");
+      }
+      filter.status = req.query.status;
+    }
+
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) {
+        return sendError(res, 400, "Invalid tenant ID");
+      }
+      filter.tenantId = req.query.tenantId;
+    }
+
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) {
+        return sendError(res, 400, "Invalid channel partner ID");
+      }
+      filter.channelPartnerId = req.query.channelPartnerId;
+    }
+
+    const [items, total] = await Promise.all([
+      TenantCreditPurchaseRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("tenantId", "name type creditBalance totalCreditsPurchased lifetimeCreditPurchaseAmount")
+        .populate("channelPartnerId", "name type")
+        .populate("requestedBy", "name email mobile role")
+        .populate("approvedBy", "name email mobile role")
+        .populate("rejectedBy", "name email mobile role")
+        .lean(),
+      TenantCreditPurchaseRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Tenant credit purchase requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch tenant credit purchase request detail.
+ * Sample params: /admin/tenant-credit-purchases/665f...
+ */
+export const getTenantCreditPurchaseRequestById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid credit purchase request ID");
+    }
+
+    const creditPurchaseRequest = await TenantCreditPurchaseRequest.findById(req.params.requestId)
+      .populate("tenantId", "name type creditBalance totalCreditsPurchased lifetimeCreditPurchaseAmount")
+      .populate("channelPartnerId", "name type")
+      .populate("requestedBy", "name email mobile role")
+      .populate("approvedBy", "name email mobile role")
+      .populate("rejectedBy", "name email mobile role")
+      .lean();
+
+    if (!creditPurchaseRequest) {
+      return sendError(res, 404, "Tenant credit purchase request not found");
+    }
+
+    const [tenantCreditLedger, partnerCreditLedger] = await Promise.all([
+      creditPurchaseRequest.tenantCreditLedgerId
+        ? TenantCreditLedger.findById(creditPurchaseRequest.tenantCreditLedgerId).lean()
+        : null,
+      creditPurchaseRequest.partnerCreditLedgerId
+        ? PartnerCreditLedger.findById(creditPurchaseRequest.partnerCreditLedgerId).lean()
+        : null
+    ]);
+
+    return sendSuccess(res, 200, "Tenant credit purchase request fetched successfully", {
+      creditPurchaseRequest,
+      tenantCreditLedger,
+      partnerCreditLedger
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Approve tenant credit purchase request.
+ * Sample body: { "note": "Payment verified" }
+ */
+export const approveTenantCreditPurchaseRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid credit purchase request ID");
+    }
+
+    session.startTransaction();
+
+    const creditPurchaseRequest = await TenantCreditPurchaseRequest.findOne({
+      _id: req.params.requestId,
+      status: TENANT_CREDIT_PURCHASE_STATUSES.PENDING
+    }).session(session);
+
+    if (!creditPurchaseRequest) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Pending tenant credit purchase request not found");
+    }
+
+    const tenant = await Tenant.findById(creditPurchaseRequest.tenantId).session(session);
+    if (!tenant) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Tenant not found");
+    }
+
+    const balanceBefore = Number(tenant.creditBalance || 0);
+    const balanceAfter = balanceBefore + creditPurchaseRequest.requestedCredits;
+
+    tenant.creditBalance = balanceAfter;
+    tenant.totalCreditsPurchased = Number(tenant.totalCreditsPurchased || 0) + creditPurchaseRequest.requestedCredits;
+    tenant.lifetimeCreditPurchaseAmount = roundRupeeAmount(
+      Number(tenant.lifetimeCreditPurchaseAmount || 0) + Number(creditPurchaseRequest.purchaseAmount || 0)
+    );
+    tenant.lastCreditPurchasedAt = new Date();
+    await tenant.save({ session });
+
+    const tenantLedgerEntries = await TenantCreditLedger.create(
+      [
+        {
+          tenantId: tenant._id,
+          type: TENANT_CREDIT_LEDGER_TYPES.TENANT_CREDIT_PURCHASE,
+          delta: creditPurchaseRequest.requestedCredits,
+          balanceBefore,
+          balanceAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          reason: req.body.note || "Tenant credit purchase approved",
+          metadata: {
+            creditPurchaseRequestId: creditPurchaseRequest._id,
+            requestedCredits: creditPurchaseRequest.requestedCredits,
+            perKeyPrice: creditPurchaseRequest.perKeyPrice,
+            purchaseAmount: creditPurchaseRequest.purchaseAmount,
+            referenceNumber: creditPurchaseRequest.referenceNumber,
+            source: "tenant_credit_purchase_request"
+          }
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    const partnerCredit = await awardPartnerCreditForTenantCreditPurchase({
+      tenant,
+      keysPurchased: creditPurchaseRequest.requestedCredits,
+      perKeyPrice: creditPurchaseRequest.perKeyPrice,
+      purchaseAmount: creditPurchaseRequest.purchaseAmount,
+      tenantCreditLedgerId: tenantLedgerEntries[0]._id,
+      actorId: req.auth.id,
+      reason: req.body.note || "Tenant credit purchase approved",
+      session
+    });
+
+    creditPurchaseRequest.status = TENANT_CREDIT_PURCHASE_STATUSES.APPROVED;
+    creditPurchaseRequest.approvedBy = req.auth.id;
+    creditPurchaseRequest.approvedAt = new Date();
+    creditPurchaseRequest.tenantCreditLedgerId = tenantLedgerEntries[0]._id;
+    creditPurchaseRequest.partnerCreditLedgerId = partnerCredit?.ledgerEntryId;
+    creditPurchaseRequest.metadata = {
+      ...(creditPurchaseRequest.metadata || {}),
+      approvalNote: req.body.note,
+      balanceBefore,
+      balanceAfter,
+      partnerCredit
+    };
+    await creditPurchaseRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_PURCHASE_APPROVED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        metadata: {
+          creditPurchaseRequestId: creditPurchaseRequest._id,
+          tenantCreditLedgerId: tenantLedgerEntries[0]._id,
+          partnerCredit,
+          requestedCredits: creditPurchaseRequest.requestedCredits,
+          perKeyPrice: creditPurchaseRequest.perKeyPrice,
+          purchaseAmount: creditPurchaseRequest.purchaseAmount
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Tenant credit purchase approved successfully", {
+      creditPurchaseRequest,
+      credits: {
+        previous: balanceBefore,
+        added: creditPurchaseRequest.requestedCredits,
+        current: balanceAfter
+      },
+      tenantCreditLedgerId: tenantLedgerEntries[0]._id,
+      partnerCredit
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Reject tenant credit purchase request.
+ * Sample body: { "reason": "Payment not found" }
+ */
+export const rejectTenantCreditPurchaseRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid credit purchase request ID");
+    }
+
+    const reason = String(req.body.reason || "").trim();
+    if (!reason) {
+      return sendError(res, 400, "Rejection reason is required");
+    }
+
+    session.startTransaction();
+
+    const creditPurchaseRequest = await TenantCreditPurchaseRequest.findOne({
+      _id: req.params.requestId,
+      status: TENANT_CREDIT_PURCHASE_STATUSES.PENDING
+    }).session(session);
+
+    if (!creditPurchaseRequest) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Pending tenant credit purchase request not found");
+    }
+
+    creditPurchaseRequest.status = TENANT_CREDIT_PURCHASE_STATUSES.REJECTED;
+    creditPurchaseRequest.rejectedBy = req.auth.id;
+    creditPurchaseRequest.rejectedAt = new Date();
+    creditPurchaseRequest.rejectionReason = reason;
+    await creditPurchaseRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_PURCHASE_REJECTED,
+        actorId: req.auth.id,
+        tenantId: creditPurchaseRequest.tenantId,
+        channelPartnerId: creditPurchaseRequest.channelPartnerId,
+        reason,
+        metadata: {
+          creditPurchaseRequestId: creditPurchaseRequest._id,
+          requestedCredits: creditPurchaseRequest.requestedCredits,
+          perKeyPrice: creditPurchaseRequest.perKeyPrice,
+          purchaseAmount: creditPurchaseRequest.purchaseAmount
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Tenant credit purchase rejected successfully", {
+      creditPurchaseRequest
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * List partner payout requests.
+ * Sample query: /admin/partner-payouts?status=PENDING&channelPartnerId=665f...&page=1&limit=20
+ */
+export const listPartnerPayoutRequests = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.status) {
+      if (!Object.values(PARTNER_PAYOUT_STATUSES).includes(req.query.status)) {
+        return sendError(res, 400, "Invalid payout status");
+      }
+      filter.status = req.query.status;
+    }
+
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) {
+        return sendError(res, 400, "Invalid channel partner ID");
+      }
+      filter.channelPartnerId = req.query.channelPartnerId;
+    }
+
+    const [items, total] = await Promise.all([
+      PartnerPayoutRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("channelPartnerId", "name type contactPhone contactEmail availablePayoutBalance payoutHoldBalance payoutUpiId payoutUpiName")
+        .populate("requestedBy", "name email mobile role")
+        .populate("approvedBy", "name email mobile role")
+        .populate("rejectedBy", "name email mobile role")
+        .lean(),
+      PartnerPayoutRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Partner payout requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Get partner payout request detail.
+ * Sample params: /admin/partner-payouts/665f...
+ */
+export const getPartnerPayoutRequestById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.payoutId)) {
+      return sendError(res, 400, "Invalid payout request ID");
+    }
+
+    const payoutRequest = await PartnerPayoutRequest.findById(req.params.payoutId)
+      .populate("channelPartnerId", "name type contactPhone contactEmail availablePayoutBalance payoutHoldBalance payoutUpiId payoutUpiName")
+      .populate("requestedBy", "name email mobile role")
+      .populate("approvedBy", "name email mobile role")
+      .populate("rejectedBy", "name email mobile role")
+      .lean();
+
+    if (!payoutRequest) {
+      return sendError(res, 404, "Partner payout request not found");
+    }
+
+    const ledger = await PartnerCreditLedger.find({ payoutRequestId: payoutRequest._id }).sort({ createdAt: -1 }).lean();
+
+    return sendSuccess(res, 200, "Partner payout request fetched successfully", {
+      payoutRequest,
+      ledger
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Approve partner payout request.
+ * Multipart fields: referenceId, proofImage
+ * JSON fallback: { "referenceId": "UTR123", "paymentProofImageUrl": "https://..." }
+ */
+export const approvePartnerPayoutRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.payoutId)) {
+      return sendError(res, 400, "Invalid payout request ID");
+    }
+
+    const referenceId = String(req.body.referenceId || req.body.adminReferenceId || "").trim();
+    if (!referenceId) {
+      return sendError(res, 400, "Payment reference ID is required");
+    }
+
+    if (!req.file && !req.body.paymentProofImageUrl) {
+      return sendError(res, 400, "Payment proof image is required");
+    }
+
+    const payoutRequest = await PartnerPayoutRequest.findById(req.params.payoutId);
+    if (!payoutRequest) {
+      return sendError(res, 404, "Partner payout request not found");
+    }
+
+    if (payoutRequest.status !== PARTNER_PAYOUT_STATUSES.PENDING) {
+      return sendError(res, 400, "Only pending payout requests can be approved");
+    }
+
+    const channelPartner = await ChannelPartner.findById(payoutRequest.channelPartnerId);
+    if (!channelPartner) {
+      return sendError(res, 404, "Channel partner not found");
+    }
+
+    const paymentProof = await buildPartnerPayoutProof({ req, payoutRequest, channelPartner });
+
+    session.startTransaction();
+
+    const payoutRequestForUpdate = await PartnerPayoutRequest.findOne({
+      _id: payoutRequest._id,
+      status: PARTNER_PAYOUT_STATUSES.PENDING
+    }).session(session);
+
+    if (!payoutRequestForUpdate) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Only pending payout requests can be approved");
+    }
+
+    const lockedPartner = await ChannelPartner.findById(payoutRequestForUpdate.channelPartnerId).session(session);
+    if (!lockedPartner) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Channel partner not found");
+    }
+
+    const holdBefore = roundRupeeAmount(lockedPartner.payoutHoldBalance || 0);
+    const amount = roundRupeeAmount(payoutRequestForUpdate.amount);
+    const holdAfter = roundRupeeAmount(holdBefore - amount);
+
+    if (holdAfter < 0) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Partner payout hold balance is insufficient");
+    }
+
+    lockedPartner.payoutHoldBalance = holdAfter;
+    lockedPartner.lifetimePayoutPaid = roundRupeeAmount(Number(lockedPartner.lifetimePayoutPaid || 0) + amount);
+    await lockedPartner.save({ session });
+
+    payoutRequestForUpdate.status = PARTNER_PAYOUT_STATUSES.APPROVED;
+    payoutRequestForUpdate.approvedBy = req.auth.id;
+    payoutRequestForUpdate.approvedAt = new Date();
+    payoutRequestForUpdate.adminReferenceId = referenceId;
+    payoutRequestForUpdate.paymentProof = paymentProof;
+    await payoutRequestForUpdate.save({ session });
+
+    const ledgerEntries = await PartnerCreditLedger.create(
+      [
+        {
+          channelPartnerId: lockedPartner._id,
+          payoutRequestId: payoutRequestForUpdate._id,
+          type: PARTNER_CREDIT_LEDGER_TYPES.PAYOUT_APPROVED_PAID,
+          balanceType: PARTNER_CREDIT_BALANCE_TYPES.HOLD,
+          delta: -amount,
+          balanceBefore: holdBefore,
+          balanceAfter: holdAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          reason: "Partner payout approved",
+          metadata: {
+            referenceId,
+            paymentProofImageUrl: paymentProof?.imageUrl
+          }
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.PARTNER_PAYOUT_APPROVED,
+        actorId: req.auth.id,
+        channelPartnerId: lockedPartner._id,
+        metadata: {
+          payoutRequestId: payoutRequest._id,
+          amount,
+          referenceId,
+          ledgerEntryId: ledgerEntries[0]._id
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Partner payout approved successfully", {
+      payoutRequest: payoutRequestForUpdate,
+      ledgerEntryId: ledgerEntries[0]._id
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Reject partner payout request.
+ * Sample body: { "reason": "UPI ID mismatch" }
+ */
+export const rejectPartnerPayoutRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.payoutId)) {
+      return sendError(res, 400, "Invalid payout request ID");
+    }
+
+    const reason = String(req.body.reason || "").trim();
+    if (!reason) {
+      return sendError(res, 400, "Rejection reason is required");
+    }
+
+    session.startTransaction();
+
+    const payoutRequest = await PartnerPayoutRequest.findById(req.params.payoutId).session(session);
+    if (!payoutRequest) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Partner payout request not found");
+    }
+
+    if (payoutRequest.status !== PARTNER_PAYOUT_STATUSES.PENDING) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Only pending payout requests can be rejected");
+    }
+
+    const channelPartner = await ChannelPartner.findById(payoutRequest.channelPartnerId).session(session);
+    if (!channelPartner) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Channel partner not found");
+    }
+
+    const amount = roundRupeeAmount(payoutRequest.amount);
+    const availableBefore = roundRupeeAmount(channelPartner.availablePayoutBalance || 0);
+    const availableAfter = roundRupeeAmount(availableBefore + amount);
+    const holdBefore = roundRupeeAmount(channelPartner.payoutHoldBalance || 0);
+    const holdAfter = roundRupeeAmount(holdBefore - amount);
+
+    if (holdAfter < 0) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Partner payout hold balance is insufficient");
+    }
+
+    channelPartner.availablePayoutBalance = availableAfter;
+    channelPartner.payoutHoldBalance = holdAfter;
+    await channelPartner.save({ session });
+
+    payoutRequest.status = PARTNER_PAYOUT_STATUSES.REJECTED;
+    payoutRequest.rejectedBy = req.auth.id;
+    payoutRequest.rejectedAt = new Date();
+    payoutRequest.rejectionReason = reason;
+    await payoutRequest.save({ session });
+
+    const ledgerEntries = await PartnerCreditLedger.create(
+      [
+        {
+          channelPartnerId: channelPartner._id,
+          payoutRequestId: payoutRequest._id,
+          type: PARTNER_CREDIT_LEDGER_TYPES.PAYOUT_REJECTED_RELEASE,
+          balanceType: PARTNER_CREDIT_BALANCE_TYPES.AVAILABLE,
+          delta: amount,
+          balanceBefore: availableBefore,
+          balanceAfter: availableAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          reason,
+          metadata: {
+            holdBalanceBefore: holdBefore,
+            holdBalanceAfter: holdAfter
+          }
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.PARTNER_PAYOUT_REJECTED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        reason,
+        metadata: {
+          payoutRequestId: payoutRequest._id,
+          amount,
+          ledgerEntryId: ledgerEntries[0]._id
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Partner payout rejected successfully", {
+      payoutRequest,
       ledgerEntryId: ledgerEntries[0]._id
     });
   } catch (error) {
@@ -2351,6 +3312,244 @@ export const getAuditLogs = async (req, res) => {
       items,
       pagination: buildPagination(page, limit, total)
     });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const buildAppBuildFilter = (query) => {
+  const filter = {};
+  const identity = validateAppBuildIdentity({
+    platform: query.platform || "android",
+    packageName: query.packageName || "com.crednexa.app",
+    channel: query.channel || undefined
+  });
+
+  if (identity.error) {
+    return { error: identity.error };
+  }
+
+  filter.platform = identity.value.platform;
+  filter.packageName = identity.value.packageName;
+  if (query.channel) filter.channel = identity.value.channel;
+
+  if (query.status && Object.values(APP_BUILD_STATUSES).includes(String(query.status).trim().toLowerCase())) {
+    filter.status = String(query.status).trim().toLowerCase();
+  } else if (query.status) {
+    return { error: "status must be draft, published, or archived" };
+  }
+
+  return { filter };
+};
+
+const handleAppBuildWriteError = (res, error) => {
+  if (error?.code === 11000) {
+    return sendError(res, 409, "App build versionCode already exists for this app channel");
+  }
+
+  return sendError(res, 500, error.message || "Internal server error");
+};
+
+/**
+ * List Android app builds for Super Admin release management. Filters are safe
+ * operational metadata only; borrower/device identifiers are not involved.
+ */
+export const listAppBuilds = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filterResult = buildAppBuildFilter(req.query);
+    if (filterResult.error) {
+      return sendError(res, 400, filterResult.error);
+    }
+
+    const [items, total] = await Promise.all([
+      AppBuild.find(filterResult.filter)
+        .populate("createdBy", "name email")
+        .populate("updatedBy", "name email")
+        .populate("publishedBy", "name email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      AppBuild.countDocuments(filterResult.filter)
+    ]);
+
+    return sendSuccess(res, 200, "App builds fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Create a draft build. Publishing is deliberately separate so an uploaded APK
+ * can be reviewed before borrower devices start receiving it.
+ */
+export const createAppBuild = async (req, res) => {
+  try {
+    if (!req.file) {
+      return sendError(res, 400, "apkFile is required");
+    }
+
+    const validation = validateBuildPayload(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const apkMetadata = await uploadBuildApk({
+      file: req.file,
+      buildData: validation.value,
+      actorId: req.auth.id
+    });
+
+    const appBuild = await AppBuild.create({
+      ...validation.value,
+      ...apkMetadata,
+      status: APP_BUILD_STATUSES.DRAFT,
+      createdBy: req.auth.id,
+      updatedBy: req.auth.id
+    });
+
+    return sendSuccess(res, 201, "App build created successfully", appBuild);
+  } catch (error) {
+    return handleAppBuildWriteError(res, error);
+  }
+};
+
+export const getAppBuildById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.buildId)) {
+      return sendError(res, 400, "Invalid app build ID");
+    }
+
+    const appBuild = await AppBuild.findById(req.params.buildId)
+      .populate("createdBy", "name email")
+      .populate("updatedBy", "name email")
+      .populate("publishedBy", "name email")
+      .lean();
+
+    if (!appBuild) {
+      return sendError(res, 404, "App build not found");
+    }
+
+    return sendSuccess(res, 200, "App build fetched successfully", appBuild);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update draft build metadata and optionally replace the APK. Published builds
+ * are immutable for identity/version fields to keep installed-client decisions
+ * auditable and reproducible.
+ */
+export const updateAppBuild = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.buildId)) {
+      return sendError(res, 400, "Invalid app build ID");
+    }
+
+    const appBuild = await AppBuild.findById(req.params.buildId);
+    if (!appBuild) {
+      return sendError(res, 404, "App build not found");
+    }
+
+    const protectedFields = ["platform", "packageName", "channel", "versionCode"];
+    if (appBuild.status === APP_BUILD_STATUSES.PUBLISHED && protectedFields.some((field) => req.body[field] !== undefined)) {
+      return sendError(res, 400, "Published build identity fields cannot be updated");
+    }
+
+    const validation = validateBuildPayload(
+      {
+        platform: req.body.platform ?? appBuild.platform,
+        packageName: req.body.packageName ?? appBuild.packageName,
+        channel: req.body.channel ?? appBuild.channel,
+        versionName: req.body.versionName ?? appBuild.versionName,
+        versionCode: req.body.versionCode ?? appBuild.versionCode,
+        minimumSupportedVersionCode: req.body.minimumSupportedVersionCode ?? appBuild.minimumSupportedVersionCode,
+        releaseNotes: req.body.releaseNotes ?? appBuild.releaseNotes,
+        buildType: req.body.buildType ?? appBuild.buildType,
+        checksumRequired: req.body.checksumRequired ?? appBuild.checksumRequired
+      },
+      { partial: false }
+    );
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    Object.assign(appBuild, validation.value, { updatedBy: req.auth.id });
+
+    if (req.file) {
+      Object.assign(
+        appBuild,
+        await uploadBuildApk({
+          file: req.file,
+          buildData: validation.value,
+          actorId: req.auth.id
+        })
+      );
+    }
+
+    await appBuild.save();
+    return sendSuccess(res, 200, "App build updated successfully", appBuild);
+  } catch (error) {
+    return handleAppBuildWriteError(res, error);
+  }
+};
+
+/**
+ * Publish one build for a package/channel and archive any previously published
+ * sibling build so production and QA channels stay independently deterministic.
+ */
+export const publishAppBuild = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.buildId)) {
+      return sendError(res, 400, "Invalid app build ID");
+    }
+
+    const appBuild = await AppBuild.findById(req.params.buildId);
+    if (!appBuild) {
+      return sendError(res, 404, "App build not found");
+    }
+
+    const identity = validateAppBuildIdentity(appBuild);
+    if (identity.error) {
+      return sendError(res, 400, identity.error);
+    }
+
+    if (!appBuild.apkUrl?.startsWith("https://")) {
+      return sendError(res, 400, "Published build requires an HTTPS apkUrl");
+    }
+
+    if (appBuild.versionCode < appBuild.minimumSupportedVersionCode) {
+      return sendError(res, 400, "versionCode must be greater than or equal to minimumSupportedVersionCode");
+    }
+
+    const publishedBuild = await publishBuild({ build: appBuild, actorId: req.auth.id });
+    return sendSuccess(res, 200, "App build published successfully", publishedBuild);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const archiveAppBuild = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.buildId)) {
+      return sendError(res, 400, "Invalid app build ID");
+    }
+
+    const appBuild = await AppBuild.findById(req.params.buildId);
+    if (!appBuild) {
+      return sendError(res, 404, "App build not found");
+    }
+
+    appBuild.status = APP_BUILD_STATUSES.ARCHIVED;
+    appBuild.updatedBy = req.auth.id;
+    await appBuild.save();
+
+    return sendSuccess(res, 200, "App build archived successfully", appBuild);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

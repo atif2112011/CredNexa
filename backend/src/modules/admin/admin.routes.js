@@ -1,11 +1,17 @@
 import { Router } from "express";
 
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
+import { parseApkUpload } from "../../middleware/parseApkUpload.js";
+import { parsePaymentProofUpload } from "../../middleware/parsePaymentProofUpload.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import {
   acknowledgeRiskFlag,
   adjustTenantCredits,
+  approvePartnerPayoutRequest,
+  approveTenantCreditPurchaseRequest,
+  archiveAppBuild,
+  createAppBuild,
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
@@ -14,12 +20,16 @@ import {
   getAdminEscalationByCaseId,
   getAdminAccountById,
   getAdminRiskFlags,
+  getAppBuildById,
   getAuditLogs,
   getChannelPartnerById,
   getConsentVersionById,
   getDeviceAuditLogs,
   getDeviceById,
   getDeviceCommands,
+  getPartnerPayoutRequestById,
+  getPayoutConstants,
+  getTenantCreditPurchaseRequestById,
   listDeviceCommands,
   lockAdminDevice,
   getTenantById,
@@ -28,8 +38,12 @@ import {
   listChannelPartners,
   listConsentVersions,
   listDevices,
+  listPartnerPayoutRequests,
+  listTenantCreditPurchaseRequests,
   listTenants,
   publishConsentVersion,
+  rejectPartnerPayoutRequest,
+  rejectTenantCreditPurchaseRequest,
   rejectAdminEscalation,
   sendCustomNotification,
   tempUnlockAdminEscalation,
@@ -41,10 +55,14 @@ import {
   updateAdminAccountStatus,
   updateChannelPartner,
   updateChannelPartnerStatus,
+  updatePayoutConstants,
   updateTenant,
   updateTenantStatus,
   upsertProvisioningDetails,
-  getProvisioningDetails
+  getProvisioningDetails,
+  listAppBuilds,
+  publishAppBuild,
+  updateAppBuild
 } from "./admin.controller.js";
 
 export const adminRoutes = Router();
@@ -54,11 +72,29 @@ adminRoutes.use(requireRole(ACCOUNT_ROLES.SUPER_ADMIN));
 
 adminRoutes.get("/dashboard", getAdminDashboard);
 
+adminRoutes.get("/app-builds", listAppBuilds);
+adminRoutes.post("/app-builds", parseApkUpload, createAppBuild);
+adminRoutes.get("/app-builds/:buildId", getAppBuildById);
+adminRoutes.patch("/app-builds/:buildId", parseApkUpload, updateAppBuild);
+adminRoutes.patch("/app-builds/:buildId/publish", publishAppBuild);
+adminRoutes.patch("/app-builds/:buildId/archive", archiveAppBuild);
+
 adminRoutes.get("/channel-partners", listChannelPartners);
 adminRoutes.post("/channel-partners", createChannelPartner);
 adminRoutes.get("/channel-partners/:id", getChannelPartnerById);
 adminRoutes.patch("/channel-partners/:id", updateChannelPartner);
 adminRoutes.patch("/channel-partners/:id/status", updateChannelPartnerStatus);
+
+adminRoutes.get("/payout/constants", getPayoutConstants);
+adminRoutes.patch("/payout/constants", updatePayoutConstants);
+adminRoutes.get("/partner-payouts", listPartnerPayoutRequests);
+adminRoutes.get("/partner-payouts/:payoutId", getPartnerPayoutRequestById);
+adminRoutes.post("/partner-payouts/:payoutId/approve", parsePaymentProofUpload, approvePartnerPayoutRequest);
+adminRoutes.post("/partner-payouts/:payoutId/reject", rejectPartnerPayoutRequest);
+adminRoutes.get("/tenant-credit-purchases", listTenantCreditPurchaseRequests);
+adminRoutes.get("/tenant-credit-purchases/:requestId", getTenantCreditPurchaseRequestById);
+adminRoutes.post("/tenant-credit-purchases/:requestId/approve", approveTenantCreditPurchaseRequest);
+adminRoutes.post("/tenant-credit-purchases/:requestId/reject", rejectTenantCreditPurchaseRequest);
 
 adminRoutes.get("/tenants", listTenants);
 adminRoutes.post("/tenants", createTenant);

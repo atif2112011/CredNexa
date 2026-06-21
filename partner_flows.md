@@ -16,6 +16,8 @@
 | Partner Admin Login | `POST /auth/login` | Available |
 | Partner Dashboard | `GET /partner/dashboard` | Available |
 | Tenant List | `GET /partner/tenants` | Available |
+| Initiate Tenant Creation Verification | `POST /partner/tenants/initiate-verification` | Available |
+| Verify Tenant Creation OTP | `POST /partner/tenants/verify-verification` | Available |
 | Create Tenant | `POST /partner/tenants?app=true` | Available |
 | Tenant Admin Account Management | `/partner/accounts/*` | Backend available; Partner App should not expose separate CRUD screens |
 | Partner Escalation Queue | `GET /partner/escalations` | Available |
@@ -174,6 +176,51 @@ Authorization: Bearer <partnerAdminToken>
 > **Actor:** Partner Admin  
 > **Outcome:** Partner creates a tenant under their own channel partner.
 
+### Step 1: Initiate Tenant Creation Verification
+
+```http
+POST /partner/tenants/initiate-verification
+Authorization: Bearer <partnerAdminToken>
+
+Body:
+{
+  "name": "Bharat Finance - Jaipur Branch",
+  "supportPhone": "9800000010",
+  "tenantCreationVerificationMode": "mobile_otp"
+}
+```
+
+When the Partner App checkbox `Use Aadhaar OTP to verify this tenant admin now` is checked, send:
+
+```json
+{
+  "tenantCreationVerificationMode": "aadhaar_otp"
+}
+```
+
+Both modes use mocked OTP `123456` for now.
+
+Future Aadhaar readiness: real Aadhaar OTP verification should match Aadhaar document name and mobile against this submitted `name` and `supportPhone`.
+
+### Step 2: Verify Tenant Creation OTP
+
+```http
+POST /partner/tenants/verify-verification
+Authorization: Bearer <partnerAdminToken>
+
+Body:
+{
+  "supportPhone": "9800000010",
+  "tenantCreationVerificationMode": "mobile_otp",
+  "verificationSessionId": "otp_...",
+  "otp": "123456"
+}
+```
+
+Success returns `nextStep: "CREATE_TENANT"`.
+
+### Step 3: Create Tenant
+
 ```http
 POST /partner/tenants?app=true
 Authorization: Bearer <partnerAdminToken>
@@ -187,6 +234,8 @@ Body:
   "supportPhone": "9800000010",
   "supportEmail": "support@bharatjaipur.in",
   "supportWhatsapp": "9800000010",
+  "tenantCreationVerificationMode": "mobile_otp",
+  "tenantCreationVerificationSessionId": "otp_...",
   "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "20 MI Road",
@@ -207,18 +256,23 @@ Body:
 - Do not send `channelPartnerId`.
 - Do not send `tenantPolicy`.
 - Do not send `devicePolicies`.
+- `tenantCreationVerificationMode` verifies tenant creation now.
+- `isAdhaarVerificationEnabled` controls future borrower onboarding only.
+- `tenantCreationVerificationSessionId` must be verified, unexpired, unused, and must match the same `name`, `supportPhone`, and `tenantCreationVerificationMode`.
 
 **Backend actions:**
 1. Validates partner admin.
 2. Reads `channelPartnerId` from JWT.
-3. Validates tenant `type` and `capabilities`.
-4. Creates `tenants`; Aadhaar verification is disabled by default unless `isAdhaarVerificationEnabled: true` is sent.
-5. Copies centralized `DEFAULT_TENANT_POLICY` into `tenantPolicies`.
-6. Copies centralized `DEFAULT_DEVICE_POLICIES` into `devicePolicies`.
-7. Because `app=true`, creates the default `tenant_admin` account.
-8. Links `tenants.adminAccountId`.
-9. Returns one-time tenant admin credentials in `credentials`.
-10. Writes audit logs.
+3. Validates the verified tenant creation OTP session.
+4. Validates tenant `type` and `capabilities`.
+5. Creates `tenants`; Aadhaar verification is disabled by default unless `isAdhaarVerificationEnabled: true` is sent.
+6. Copies centralized `DEFAULT_TENANT_POLICY` into `tenantPolicies`.
+7. Copies centralized `DEFAULT_DEVICE_POLICIES` into `devicePolicies`.
+8. Because `app=true`, creates the default `tenant_admin` account.
+9. Links `tenants.adminAccountId`.
+10. Consumes the tenant creation OTP session so it cannot be reused.
+11. Returns one-time tenant admin credentials in `credentials`.
+12. Writes audit logs.
 
 **API status:** Available.
 

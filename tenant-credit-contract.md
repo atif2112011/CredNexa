@@ -1,6 +1,8 @@
 # Tenant Credit Contract
 
-This contract covers the tenant/distributor app changes for borrower creation credits. Payment collection is not part of this phase; credits are adjusted manually by super admin.
+This contract covers the tenant/distributor app changes for borrower creation credits.
+
+For tenant credit purchase request screens and APIs, use `credit_purchase_system_for_tenant.md`.
 
 ## Credit Rule
 
@@ -102,6 +104,7 @@ HTTP 402 Payment Required
 
 ## Important Notes
 
-- The app does not call any credit purchase API in this phase.
-- Super admin manages credit additions/deductions outside the tenant app.
+- The tenant app can request credit purchases through the credit purchase APIs documented separately.
+- Super admin can still manage direct credit additions/deductions outside the tenant app.
 - Borrower creation request body remains unchanged, so only response/error handling and dashboard display need app changes.
+- When credits are added through admin approval or direct positive adjustment, backend verifies/calculates `purchaseAmount = credits * perKeyPrice`. This value is also used to calculate partner payout credit when the tenant belongs to a partner.

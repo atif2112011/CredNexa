@@ -14,11 +14,25 @@ import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { OtpRecord } from "../../models/OtpRecord.js";
+import {
+  PARTNER_CREDIT_BALANCE_TYPES,
+  PARTNER_CREDIT_LEDGER_TYPES,
+  PartnerCreditLedger
+} from "../../models/PartnerCreditLedger.js";
+import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/PartnerPayoutRequest.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
+import {
+  getOrCreatePayoutConstants,
+  getPartnerCreditPercentage,
+  getPartnerPayoutRange,
+  isValidUpiId,
+  parseRupeeAmount,
+  roundRupeeAmount
+} from "../../utils/payout.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 
 const getPagination = (query) => {
@@ -43,6 +57,10 @@ const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("bas
 const PARTNER_SIGNUP_OTP = "123456";
 const PARTNER_SIGNUP_OTP_EXPIRY_SECONDS = 10 * 60;
 const PARTNER_SIGNUP_PURPOSE = "partner_signup";
+const TENANT_CREATION_OTP = "123456";
+const TENANT_CREATION_OTP_EXPIRY_SECONDS = 10 * 60;
+const TENANT_CREATION_PURPOSE = "tenant_creation";
+const TENANT_CREATION_VERIFICATION_MODES = ["mobile_otp", "aadhaar_otp"];
 const CHANNEL_PARTNER_TYPES = ["nbfc_group", "retail_chain_group", "independent"];
 
 const normalizeMobile = (mobile) => String(mobile || "").trim();
@@ -56,6 +74,8 @@ const isValidPassword = (password) => {
   const value = String(password || "");
   return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
 };
+const normalizeComparableName = (name) => String(name || "").trim().replace(/\s+/g, " ").toLowerCase();
+const normalizeTenantCreationVerificationMode = (mode) => String(mode || "mobile_otp").trim().toLowerCase();
 
 const ensurePartnerSignupUnique = async ({ mobile, email }) => {
   const [accountByMobile, partnerByMobile, accountByEmail] = await Promise.all([
@@ -478,6 +498,239 @@ export const getPartnerDashboard = async (req, res) => {
 };
 
 /**
+ * Fetch partner payout summary and request range.
+ * Sample query: /partner/payout/summary
+ */
+export const getPartnerPayoutSummary = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    const payoutConstants = await getOrCreatePayoutConstants();
+    const payoutRange = getPartnerPayoutRange({
+      availableBalance: channelPartner.availablePayoutBalance,
+      payoutConstants
+    });
+
+    return sendSuccess(res, 200, "Partner payout summary fetched successfully", {
+      channelPartner: {
+        id: channelPartner._id,
+        name: channelPartner.name,
+        type: channelPartner.type
+      },
+      creditPercentage: getPartnerCreditPercentage(channelPartner, payoutConstants),
+      balances: {
+        available: roundRupeeAmount(channelPartner.availablePayoutBalance || 0),
+        onHold: roundRupeeAmount(channelPartner.payoutHoldBalance || 0),
+        lifetimeEarned: roundRupeeAmount(channelPartner.lifetimePayoutEarned || 0),
+        lifetimePaid: roundRupeeAmount(channelPartner.lifetimePayoutPaid || 0)
+      },
+      payoutRange: {
+        currency: "INR",
+        min: payoutRange.min,
+        max: payoutRange.max,
+        available: payoutRange.available,
+        hasMaximumCap: payoutRange.hasMaximumCap
+      },
+      upi: {
+        upiId: channelPartner.payoutUpiId || null,
+        upiName: channelPartner.payoutUpiName || null,
+        isComplete: Boolean(channelPartner.payoutUpiId && channelPartner.payoutUpiName)
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Request partner payout.
+ * Sample body: { "amount": 1000, "upiId": "partner@upi", "upiName": "Partner Name" }
+ */
+export const requestPartnerPayout = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    const amount = parseRupeeAmount(req.body.amount);
+    if (amount === null || amount <= 0) {
+      return sendError(res, 400, "Valid payout amount is required");
+    }
+
+    const payoutConstants = await getOrCreatePayoutConstants();
+    const payoutRange = getPartnerPayoutRange({
+      availableBalance: channelPartner.availablePayoutBalance,
+      payoutConstants
+    });
+
+    if (payoutRange.min > 0 && amount < payoutRange.min) {
+      return sendError(res, 400, `Minimum payout amount is ${payoutRange.min}`);
+    }
+
+    if (amount > payoutRange.max) {
+      return sendError(res, 400, "Payout amount exceeds available payout range");
+    }
+
+    const upiId = String(req.body.upiId || channelPartner.payoutUpiId || "").trim();
+    const upiName = String(req.body.upiName || channelPartner.payoutUpiName || "").trim();
+
+    if (!upiId || !upiName) {
+      return sendError(res, 400, "UPI ID and UPI name are required");
+    }
+
+    if (!isValidUpiId(upiId)) {
+      return sendError(res, 400, "Valid UPI ID is required");
+    }
+
+    session.startTransaction();
+
+    const partnerBeforeHold = await ChannelPartner.findOneAndUpdate(
+      {
+        _id: channelPartner._id,
+        isActive: true,
+        availablePayoutBalance: { $gte: amount }
+      },
+      {
+        $inc: {
+          availablePayoutBalance: -amount,
+          payoutHoldBalance: amount
+        },
+        $set: {
+          payoutUpiId: upiId,
+          payoutUpiName: upiName
+        }
+      },
+      { new: false, session }
+    );
+
+    if (!partnerBeforeHold) {
+      await session.abortTransaction();
+      return sendError(res, 400, "Insufficient available payout balance");
+    }
+
+    const balanceBefore = roundRupeeAmount(partnerBeforeHold.availablePayoutBalance || 0);
+    const balanceAfter = roundRupeeAmount(balanceBefore - amount);
+    const holdBefore = roundRupeeAmount(partnerBeforeHold.payoutHoldBalance || 0);
+    const holdAfter = roundRupeeAmount(holdBefore + amount);
+
+    const payoutRequests = await PartnerPayoutRequest.create(
+      [
+        {
+          channelPartnerId: partnerBeforeHold._id,
+          amount,
+          status: PARTNER_PAYOUT_STATUSES.PENDING,
+          upiId,
+          upiName,
+          requestedBy: req.auth.id,
+          metadata: {
+            availableBalanceBefore: balanceBefore,
+            availableBalanceAfter: balanceAfter,
+            holdBalanceBefore: holdBefore,
+            holdBalanceAfter: holdAfter
+          }
+        }
+      ],
+      { session, ordered: true }
+    );
+    const payoutRequest = payoutRequests[0];
+
+    const ledgerEntries = await PartnerCreditLedger.create(
+      [
+        {
+          channelPartnerId: partnerBeforeHold._id,
+          payoutRequestId: payoutRequest._id,
+          type: PARTNER_CREDIT_LEDGER_TYPES.PAYOUT_REQUEST_HOLD,
+          balanceType: PARTNER_CREDIT_BALANCE_TYPES.AVAILABLE,
+          delta: -amount,
+          balanceBefore,
+          balanceAfter,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          reason: "Partner payout requested",
+          metadata: {
+            holdBalanceBefore: holdBefore,
+            holdBalanceAfter: holdAfter,
+            upiId,
+            upiName
+          }
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.PARTNER_PAYOUT_REQUESTED,
+        actorId: req.auth.id,
+        channelPartnerId: partnerBeforeHold._id,
+        metadata: {
+          payoutRequestId: payoutRequest._id,
+          amount,
+          ledgerEntryId: ledgerEntries[0]._id
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Partner payout requested successfully", {
+      payoutRequest,
+      ledgerEntryId: ledgerEntries[0]._id,
+      balances: {
+        available: balanceAfter,
+        onHold: holdAfter
+      }
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * List payout requests for the authenticated partner.
+ * Sample query: /partner/payout/requests?status=PENDING&page=1&limit=20
+ */
+export const listPartnerPayoutRequests = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { channelPartnerId: channelPartner._id };
+
+    if (req.query.status) {
+      if (!Object.values(PARTNER_PAYOUT_STATUSES).includes(req.query.status)) {
+        return sendError(res, 400, "Invalid payout status");
+      }
+      filter.status = req.query.status;
+    }
+
+    const [items, total] = await Promise.all([
+      PartnerPayoutRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select("-__v")
+        .lean(),
+      PartnerPayoutRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Partner payout requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * List tenants owned by the partner.
  * Sample query: /partner/tenants?status=active&capability=lend&search=pune&page=1&limit=20
  */
@@ -502,6 +755,144 @@ export const getPartnerTenants = async (req, res) => {
     return sendSuccess(res, 200, "Partner tenants fetched successfully", {
       items,
       pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const initiateTenantCreationVerification = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const tenantName = String(req.body.name || "").trim();
+    const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+
+    if (!tenantName) {
+      return sendError(res, 400, "Tenant name is required");
+    }
+
+    if (!supportPhone) {
+      return sendError(res, 400, "Support phone is required");
+    }
+
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "Valid 10 digit support phone is required");
+    }
+
+    if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
+      return sendError(res, 400, "Invalid tenant creation verification mode");
+    }
+
+    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
+    const otpHash = await bcrypt.hash(TENANT_CREATION_OTP, 12);
+    const providerReferenceId = `tenant_creation_mock_${crypto.randomBytes(8).toString("hex")}`;
+
+    await OtpRecord.create({
+      mobile: supportPhone,
+      otpHash,
+      purpose: TENANT_CREATION_PURPOSE,
+      verificationSessionId,
+      provider: "mock",
+      providerReferenceId,
+      maxAttempts: 3,
+      expiresAt: new Date(Date.now() + TENANT_CREATION_OTP_EXPIRY_SECONDS * 1000),
+      providerResponse: {
+        mock: true,
+        status: "OTP_SENT",
+        channelPartnerId: channelPartner._id,
+        tenantName,
+        normalizedTenantName: normalizeComparableName(tenantName),
+        // Future Aadhaar OTP provider must match Aadhaar document name and mobile against these submitted values.
+        aadhaarMatchInput: {
+          name: tenantName,
+          mobile: supportPhone
+        },
+        tenantCreationVerificationMode
+      }
+    });
+
+    return sendSuccess(res, 200, "Tenant creation OTP sent successfully", {
+      verificationSessionId,
+      otpSent: true,
+      tenantCreationVerificationMode,
+      expiresInSeconds: TENANT_CREATION_OTP_EXPIRY_SECONDS
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const verifyTenantCreationVerification = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    if (!hasRequiredFields(req.body, ["supportPhone", "tenantCreationVerificationMode", "verificationSessionId", "otp"])) {
+      return sendError(res, 400, "Support phone, verification mode, verification session, and OTP are required");
+    }
+
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "Valid 10 digit support phone is required");
+    }
+
+    if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
+      return sendError(res, 400, "Invalid tenant creation verification mode");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile: supportPhone,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: TENANT_CREATION_PURPOSE,
+      consumedAt: null
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (String(otpRecord.providerResponse?.channelPartnerId) !== String(channelPartner._id)) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (otpRecord.providerResponse?.tenantCreationVerificationMode !== tenantCreationVerificationMode) {
+      return sendError(res, 400, "Tenant creation verification mode mismatch");
+    }
+
+    if (otpRecord.expiresAt < new Date()) {
+      return sendError(res, 400, "OTP expired");
+    }
+
+    if (otpRecord.attempts >= otpRecord.maxAttempts) {
+      return sendError(res, 429, "Maximum OTP attempts exceeded");
+    }
+
+    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    if (!otpMatches) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return sendError(res, 400, "Invalid OTP");
+    }
+
+    otpRecord.attempts += 1;
+    otpRecord.verified = true;
+    otpRecord.providerResponse = {
+      ...(otpRecord.providerResponse || {}),
+      status: "VERIFIED",
+      verifiedAt: new Date()
+    };
+    await otpRecord.save();
+
+    return sendSuccess(res, 200, "Tenant creation OTP verified successfully", {
+      verified: true,
+      verificationSessionId: otpRecord.verificationSessionId,
+      tenantCreationVerificationMode,
+      nextStep: "CREATE_TENANT"
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -544,6 +935,13 @@ export const createPartnerTenant = async (req, res) => {
       return sendError(res, 400, `Invalid capability: ${invalidCapability}`);
     }
 
+    const creditPurchasePerKeyPrice =
+      req.body.creditPurchasePerKeyPrice !== undefined ? parseRupeeAmount(req.body.creditPurchasePerKeyPrice) : undefined;
+
+    if (req.body.creditPurchasePerKeyPrice !== undefined && (creditPurchasePerKeyPrice === null || creditPurchasePerKeyPrice < 0)) {
+      return sendError(res, 400, "creditPurchasePerKeyPrice must be a valid non-negative rupee amount");
+    }
+
     if (req.body.parentTenantId) {
       const parentTenant = await validateTenantBelongsToPartner(req.body.parentTenantId, channelPartner._id);
       if (!parentTenant) {
@@ -553,8 +951,57 @@ export const createPartnerTenant = async (req, res) => {
 
     let tenantAdminInput = null;
     let tenantAdminPassword = null;
+    let tenantCreationOtpRecord = null;
 
     if (shouldCreateTenantAdmin) {
+      const supportPhone = normalizeMobile(req.body.supportPhone);
+      const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+      const verificationSessionId = String(req.body.tenantCreationVerificationSessionId || "").trim();
+
+      if (!supportPhone) {
+        return sendError(res, 400, "Support phone is required when app=true");
+      }
+
+      if (!isValidIndianMobile(supportPhone)) {
+        return sendError(res, 400, "Valid 10 digit support phone is required");
+      }
+
+      if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
+        return sendError(res, 400, "Invalid tenant creation verification mode");
+      }
+
+      if (!verificationSessionId) {
+        return sendError(res, 400, "Tenant creation verification session is required when app=true");
+      }
+
+      tenantCreationOtpRecord = await OtpRecord.findOne({
+        mobile: supportPhone,
+        verificationSessionId,
+        purpose: TENANT_CREATION_PURPOSE,
+        verified: true,
+        consumedAt: null,
+        expiresAt: { $gt: new Date() }
+      });
+
+      if (!tenantCreationOtpRecord) {
+        return sendError(res, 400, "Verified tenant creation OTP session not found");
+      }
+
+      if (String(tenantCreationOtpRecord.providerResponse?.channelPartnerId) !== String(channelPartner._id)) {
+        return sendError(res, 400, "Verified tenant creation OTP session not found");
+      }
+
+      if (tenantCreationOtpRecord.providerResponse?.tenantCreationVerificationMode !== tenantCreationVerificationMode) {
+        return sendError(res, 400, "Tenant creation verification mode mismatch");
+      }
+
+      if (
+        tenantCreationOtpRecord.providerResponse?.normalizedTenantName &&
+        tenantCreationOtpRecord.providerResponse.normalizedTenantName !== normalizeComparableName(req.body.name)
+      ) {
+        return sendError(res, 400, "Tenant name does not match verified OTP session");
+      }
+
       tenantAdminInput = req.body.tenantAdmin || {};
       const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
         .trim()
@@ -592,6 +1039,7 @@ export const createPartnerTenant = async (req, res) => {
           supportEmail: req.body.supportEmail,
           supportWhatsapp: req.body.supportWhatsapp,
           address: req.body.address,
+          ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
           isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
           createdBy: req.auth.id
         }
@@ -692,6 +1140,24 @@ export const createPartnerTenant = async (req, res) => {
       },
       { session }
     );
+
+    if (shouldCreateTenantAdmin) {
+      const consumedOtpRecord = await OtpRecord.findOneAndUpdate(
+        {
+          _id: tenantCreationOtpRecord._id,
+          verified: true,
+          consumedAt: null,
+          expiresAt: { $gt: new Date() }
+        },
+        { $set: { consumedAt: new Date() } },
+        { new: true, session }
+      );
+
+      if (!consumedOtpRecord) {
+        await session.abortTransaction();
+        return sendError(res, 400, "Verified tenant creation OTP session already used or expired");
+      }
+    }
 
     await session.commitTransaction();
 

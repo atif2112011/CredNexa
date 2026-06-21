@@ -400,11 +400,93 @@ GET /api/partner/tenants?status=active&capability=lend&search=pune&page=1&limit=
 
 ## 8. Create Tenant
 
-```http
+Partner App tenant creation is a three-step verify-then-create flow:
+
+```text
+POST /api/partner/tenants/initiate-verification
+POST /api/partner/tenants/verify-verification
 POST /api/partner/tenants?app=true
 ```
 
-Creates a tenant under the logged-in partner, copies default tenant/device policies, creates the default tenant admin account, and returns the tenant admin credentials.
+`tenantCreationVerificationMode` verifies the tenant creation action now. `isAdhaarVerificationEnabled` is separate and controls future borrower onboarding for this tenant.
+
+### Step 1: Initiate Tenant Creation Verification
+
+```http
+POST /api/partner/tenants/initiate-verification
+Authorization: Bearer <partnerAdminToken>
+```
+
+Request:
+
+```json
+{
+  "name": "Bharat Finance - Jaipur Branch",
+  "supportPhone": "9800000010",
+  "tenantCreationVerificationMode": "mobile_otp"
+}
+```
+
+Use `"aadhaar_otp"` when the Partner App checkbox for Aadhaar OTP verification is checked. Both modes use mocked OTP `123456` for now.
+
+Future Aadhaar readiness: when real Aadhaar OTP is connected, backend will match the Aadhaar document name and mobile against the submitted `name` and `supportPhone`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Tenant creation OTP sent successfully",
+  "data": {
+    "verificationSessionId": "otp_...",
+    "otpSent": true,
+    "tenantCreationVerificationMode": "mobile_otp",
+    "expiresInSeconds": 600
+  }
+}
+```
+
+### Step 2: Verify Tenant Creation OTP
+
+```http
+POST /api/partner/tenants/verify-verification
+Authorization: Bearer <partnerAdminToken>
+```
+
+Request:
+
+```json
+{
+  "supportPhone": "9800000010",
+  "tenantCreationVerificationMode": "mobile_otp",
+  "verificationSessionId": "otp_...",
+  "otp": "123456"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Tenant creation OTP verified successfully",
+  "data": {
+    "verified": true,
+    "verificationSessionId": "otp_...",
+    "tenantCreationVerificationMode": "mobile_otp",
+    "nextStep": "CREATE_TENANT"
+  }
+}
+```
+
+### Step 3: Create Tenant
+
+```http
+POST /api/partner/tenants?app=true
+Authorization: Bearer <partnerAdminToken>
+```
+
+Creates a tenant under the logged-in partner, copies default tenant/device policies, creates the default tenant admin account, consumes the verified tenant creation OTP session, and returns the tenant admin credentials.
 
 Use `app=true` for the partner app tenant creation flow.
 
@@ -419,6 +501,8 @@ Use `app=true` for the partner app tenant creation flow.
   "supportPhone": "9800000002",
   "supportEmail": "support@tenant.in",
   "supportWhatsapp": "9800000002",
+  "tenantCreationVerificationMode": "mobile_otp",
+  "tenantCreationVerificationSessionId": "otp_...",
   "isAdhaarVerificationEnabled": false,
   "address": {
     "street": "MI Road",
@@ -441,7 +525,12 @@ Use `app=true` for the partner app tenant creation flow.
 name
 type
 capabilities
+supportPhone
+tenantCreationVerificationMode
+tenantCreationVerificationSessionId
 ```
+
+For `app=true`, `tenantCreationVerificationSessionId` must be verified, unexpired, unused, owned by the logged-in partner, and must match the same `name`, `supportPhone`, and `tenantCreationVerificationMode` sent during verification.
 
 Do not send:
 
