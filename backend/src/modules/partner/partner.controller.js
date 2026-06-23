@@ -370,6 +370,7 @@ export const completePartnerSignup = async (req, res) => {
         : null
     });
   } catch (error) {
+    console.log('[ERROR] completePartnerSignup', error);
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
