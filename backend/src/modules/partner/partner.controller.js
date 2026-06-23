@@ -221,6 +221,7 @@ export const completePartnerSignup = async (req, res) => {
     const createAccount = isTruthyQueryParam(req.query.createAccount);
     const name = String(req.body.name || "").trim();
     const mobile = normalizeMobile(req.body.mobile);
+
     const email = normalizeEmail(req.body.email);
     const type = String(req.body.type || "").trim();
     const addressInput = req.body.address && typeof req.body.address === "object" && !Array.isArray(req.body.address)
@@ -294,7 +295,8 @@ export const completePartnerSignup = async (req, res) => {
           name,
           type,
           contactPhone: mobile,
-          contactEmail: email,
+          ...email && { contactEmail: email },
+          // contactEmail: email,
           address,
           isActive: true
         }
@@ -310,7 +312,8 @@ export const completePartnerSignup = async (req, res) => {
         [
           {
             name,
-            email,
+            // email,
+            ...email && { email },
             mobile,
             role: ACCOUNT_ROLES.PARTNER_ADMIN,
             channelPartnerId: channelPartner._id,
