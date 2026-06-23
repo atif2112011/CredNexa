@@ -12,7 +12,8 @@ const accountSchema = new mongoose.Schema(
     email: {
       type: String,
       lowercase: true,
-      trim: true
+      trim: true,
+      sparse: true
     },
     mobile: {
       type: String,
@@ -51,14 +52,14 @@ const accountSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-accountSchema.index(
-  { email: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { email: { $type: "string" } },
-    name: "account_email_optional_unique"
-  }
-);
+// accountSchema.index(
+//   { email: 1 },
+//   {
+//     unique: true,
+//     partialFilterExpression: { email: { $type: "string" } },
+//     name: "account_email_optional_unique"
+//   }
+// );
 
 accountSchema.index({ mobile: 1 }, { name: "account_mobile_lookup" });
 
