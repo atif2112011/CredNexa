@@ -64,6 +64,75 @@ const buildPagination = (page, limit, total) => ({
 
 const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
+const DEFAULT_PENDING_EMI_ALERT_DAYS = 10;
+
+const buildSeenFilter = (seenAt) => (seenAt ? { updatedAt: { $gt: seenAt } } : {});
+
+const getDashboardAlertCounts = async ({ tenant, now = new Date() }) => {
+  const dueUntil = new Date(now.getTime() + DEFAULT_PENDING_EMI_ALERT_DAYS * 24 * 60 * 60 * 1000);
+  const alerts = tenant.dashboardAlerts || {};
+
+  const [pendingEmis, overdueEmis, approvePayments, unlockRequests] = await Promise.all([
+    EmiSchedule.countDocuments({
+      tenantId: tenant._id,
+      ...buildSeenFilter(alerts.pendingEmis?.seenAt),
+      installments: {
+        $elemMatch: {
+          status: { $in: ["pending", "partial"] },
+          dueDate: { $gte: now, $lte: dueUntil }
+        }
+      }
+    }),
+    EmiSchedule.countDocuments({
+      tenantId: tenant._id,
+      ...buildSeenFilter(alerts.overdueEmis?.seenAt),
+      installments: {
+        $elemMatch: {
+          $or: [{ status: "overdue" }, { status: "partial", dueDate: { $lt: now } }, { status: "pending", dueDate: { $lt: now } }]
+        }
+      }
+    }),
+    Payment.countDocuments({
+      tenantId: tenant._id,
+      approvalStatus: "pending_approval",
+      ...(alerts.approvePayments?.seenAt ? { submittedAt: { $gt: alerts.approvePayments.seenAt } } : {})
+    }),
+    UnlockRequest.countDocuments({
+      tenantId: tenant._id,
+      status: "PENDING_TENANT",
+      ...buildSeenFilter(alerts.unlockRequests?.seenAt)
+    })
+  ]);
+
+  return { pendingEmis, overdueEmis, approvePayments, unlockRequests };
+};
+
+const saveDashboardAlertCounts = async ({ tenantId, counts }) => {
+  await Tenant.updateOne(
+    { _id: tenantId },
+    {
+      $set: {
+        "dashboardAlerts.pendingEmis.count": counts.pendingEmis,
+        "dashboardAlerts.overdueEmis.count": counts.overdueEmis,
+        "dashboardAlerts.approvePayments.count": counts.approvePayments,
+        "dashboardAlerts.unlockRequests.count": counts.unlockRequests
+      }
+    }
+  );
+};
+
+const clearDashboardAlert = async ({ tenantId, alertKey, now = new Date() }) => {
+  await Tenant.updateOne(
+    { _id: tenantId },
+    {
+      $set: {
+        [`dashboardAlerts.${alertKey}.count`]: 0,
+        [`dashboardAlerts.${alertKey}.seenAt`]: now
+      }
+    }
+  );
+};
+
 const ensureDistributorAccess = async (req, res) => {
   if (req.auth.role !== ACCOUNT_ROLES.TENANT_ADMIN) {
     sendError(res, 403, "tenant_admin role is required");
@@ -245,6 +314,18 @@ const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
 
 const getEnrollmentTokenExpiry = () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
+const createBorrowerUid = () => `BRW-${new Date().getFullYear()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+
+const generateUniqueBorrowerUid = async () => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const loanId = createBorrowerUid();
+    const existingUser = await User.exists({ loanId });
+    if (!existingUser) return loanId;
+  }
+
+  throw new Error("Unable to generate borrower UID");
+};
+
 const buildQrPayload = (enrollmentToken, provisioningDetails) => (
   {
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": provisioningDetails?.adminComponentName,
@@ -286,7 +367,7 @@ const getEnrollmentStatus = ({ enrollmentToken, user, device, now = new Date() }
 
 /**
  * Register borrower and generate EMI schedule + enrollment token.
- * Sample body: { "name": "Ramesh Kumar", "mobile": "9876543210", "aadhaarLinkedMobile": "9876543210", "loanId": "LOAN-001", "loanAmount": 18000, "emiAmount": 3000, "tenureMonths": 6, "disbursementDate": "2026-05-21" }
+ * Sample body: { "name": "Ramesh Kumar", "mobile": "9876543210", "aadhaarLinkedMobile": "9876543210", "loanAmount": 18000, "emiAmount": 3000, "tenureMonths": 6, "disbursementDate": "2026-05-21" }
  */
 export const registerBorrower = async (req, res) => {
   const session = await mongoose.startSession();
@@ -299,7 +380,6 @@ export const registerBorrower = async (req, res) => {
       "name",
       "mobile",
       "aadhaarLinkedMobile",
-      "loanId",
       "loanAmount",
       "emiAmount",
       "tenureMonths",
@@ -310,14 +390,26 @@ export const registerBorrower = async (req, res) => {
       return sendError(res, 400, "Borrower and EMI details are required");
     }
 
-    if(req.body.tenureMonths <= 0) {
+    const loanAmount = Number(req.body.loanAmount);
+    const emiAmount = Number(req.body.emiAmount);
+    const tenureMonths = Number(req.body.tenureMonths);
+
+    if (!Number.isFinite(tenureMonths) || tenureMonths <= 0) {
       return sendError(res, 400, "Tenure months must be greater than 0");
     }
-    if(req.body.loanAmount <= 0) {
+    if (!Number.isFinite(loanAmount) || loanAmount <= 0) {
       return sendError(res, 400, "Loan amount must be greater than 0");
     }
-    if(req.body.emiAmount <= 0) {
+    if (!Number.isFinite(emiAmount) || emiAmount <= 0) {
       return sendError(res, 400, "EMI amount must be greater than 0");
+    }
+    if (emiAmount > loanAmount) {
+      return sendError(res, 400, "EMI amount cannot be greater than loan amount");
+    }
+
+    const expectedTenureMonths = Math.ceil(loanAmount / emiAmount);
+    if (tenureMonths !== expectedTenureMonths) {
+      return sendError(res, 400, "Tenure months does not match loan amount and EMI amount");
     }
 
     const disbursementDate = new Date(req.body.disbursementDate);
@@ -328,17 +420,14 @@ export const registerBorrower = async (req, res) => {
     if (disbursementDate < previousDayStart) {
       return sendError(res, 400, "Disbursement date cannot be earlier than previous day");
     }
-    if(req.body.tenureMonths*req.body.emiAmount < req.body.loanAmount) {
-      return sendError(res, 400, "Total EMI amount cannot be less than loan amount");
-    }
 
-    const existingUser = await User.findOne({
-      $or: [{ mobile: req.body.mobile }, { loanId: req.body.loanId }]
-    }).lean();
+    const existingUser = await User.findOne({ mobile: req.body.mobile }).lean();
 
     if (existingUser) {
-      return sendError(res, 400, "User mobile or loan ID already exists");
+      return sendError(res, 400, "User mobile already exists");
     }
+
+    const loanId = await generateUniqueBorrowerUid();
 
     session.startTransaction();
 
@@ -364,10 +453,10 @@ export const registerBorrower = async (req, res) => {
           email: req.body.email,
           aadhaarLinkedMobile: req.body.aadhaarLinkedMobile,
           tenantId: tenant._id,
-          loanId: req.body.loanId,
-          loanAmount: req.body.loanAmount,
-          emiAmount: req.body.emiAmount,
-          tenureMonths: req.body.tenureMonths,
+          loanId,
+          loanAmount,
+          emiAmount,
+          tenureMonths,
           disbursementDate: req.body.disbursementDate,
           registeredBy: req.auth.id
         }
@@ -395,7 +484,7 @@ export const registerBorrower = async (req, res) => {
       { session, ordered: true }
     );
 
-    const installments = generateInstallments(req.body);
+    const installments = generateInstallments({ emiAmount, tenureMonths, disbursementDate: req.body.disbursementDate });
 
     const schedules = await EmiSchedule.create(
       [
@@ -580,6 +669,8 @@ export const getDashboard = async (req, res) => {
         .populate("userId", "name mobile loanId consentRecordId")
         .lean()
     ]);
+    const alerts = await getDashboardAlertCounts({ tenant, now });
+    await saveDashboardAlertCounts({ tenantId: tenant._id, counts: alerts });
 
     const recentEnrollmentRows = await Promise.all(
       recentEnrollments.map(async (enrollmentToken) => {
@@ -631,6 +722,7 @@ export const getDashboard = async (req, res) => {
           return result;
         }, {})
       },
+      alerts,
       recentEnrollments: recentEnrollmentRows
     });
   } catch (error) {
@@ -975,6 +1067,7 @@ export const getBorrowersWithPendingEmis = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
+    await clearDashboardAlert({ tenantId: tenant._id, alertKey: "pendingEmis" });
 
     const { page, limit, skip } = getPagination(req.query);
     const days = Math.min(Math.max(Number(req.query.days) || 10, 1), 365);
@@ -1027,6 +1120,7 @@ export const getBorrowersWithOverdueEmis = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
+    await clearDashboardAlert({ tenantId: tenant._id, alertKey: "overdueEmis" });
 
     const { page, limit, skip } = getPagination(req.query);
     const now = new Date();
@@ -1632,6 +1726,7 @@ export const listPendingPayments = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
+    await clearDashboardAlert({ tenantId: tenant._id, alertKey: "approvePayments" });
 
     const payments = await Payment.find({ tenantId: tenant._id, approvalStatus: "pending_approval" })
       .populate("userId", "name mobile loanId")
@@ -1653,6 +1748,9 @@ export const listPaymentApprovalRequests = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
+    if (!req.query.status || req.query.status === "pending_approval") {
+      await clearDashboardAlert({ tenantId: tenant._id, alertKey: "approvePayments" });
+    }
 
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
@@ -2026,6 +2124,8 @@ export const listTenantUnlockRequests = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
+
+    await clearDashboardAlert({ tenantId: tenant._id, alertKey: "unlockRequests" });
 
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };

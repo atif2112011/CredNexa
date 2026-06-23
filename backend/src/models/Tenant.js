@@ -110,6 +110,40 @@ const tenantSchema = new mongoose.Schema(
       min: 0
     },
     lastCreditPurchasedAt: Date,
+    dashboardAlerts: {
+      pendingEmis: {
+        count: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        seenAt: Date
+      },
+      overdueEmis: {
+        count: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        seenAt: Date
+      },
+      approvePayments: {
+        count: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        seenAt: Date
+      },
+      unlockRequests: {
+        count: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        seenAt: Date
+      }
+    },
     isAdhaarVerificationEnabled: {
       type: Boolean,
       default: false

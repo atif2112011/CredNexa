@@ -21,6 +21,12 @@ const channelPartnerSchema = new mongoose.Schema(
       type: String,
       trim: true
     },
+    address: {
+      street: String,
+      city: String,
+      state: String,
+      pincode: String
+    },
     adminAccountId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account"

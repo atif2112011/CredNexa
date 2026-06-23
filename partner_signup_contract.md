@@ -82,7 +82,14 @@ POST /api/partner/signup/complete?createAccount=true
   "type": "independent",
   "verificationSessionId": "otp_...",
   "password": "Pass@123",
-  "email": "optional@example.com"
+  "confirmPassword": "Pass@123",
+  "email": "optional@example.com",
+  "address": {
+    "street": "Shop 12, Main Road",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "pincode": "411001"
+  }
 }
 ```
 
@@ -94,7 +101,7 @@ retail_chain_group
 independent
 ```
 
-`email` is optional. `password` is required when `createAccount=true`.
+`email` and `address` are optional. `address` uses the same object format as tenant address: `street`, `city`, `state`, and `pincode`. `password` and `confirmPassword` are required when `createAccount=true`. `confirmPassword` is validation only and is never stored.
 
 ### Success Response
 
@@ -109,6 +116,12 @@ independent
       "type": "independent",
       "contactPhone": "9876543210",
       "contactEmail": "optional@example.com",
+      "address": {
+        "street": "Shop 12, Main Road",
+        "city": "Pune",
+        "state": "Maharashtra",
+        "pincode": "411001"
+      },
       "adminAccountId": "accountId",
       "isActive": true
     },
@@ -155,4 +168,6 @@ The Partner App can also log in with mobile:
 - Name is required.
 - Type is required and must be one of the allowed partner types.
 - Password must be at least 8 characters and include at least one letter and one number.
+- Confirm password is required when creating the partner admin account and must match password.
 - If email is provided, it must not already exist on an account.
+- Address is optional and stored on the partner record using the same object shape as tenant address.

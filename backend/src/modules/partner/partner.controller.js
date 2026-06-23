@@ -223,6 +223,15 @@ export const completePartnerSignup = async (req, res) => {
     const mobile = normalizeMobile(req.body.mobile);
     const email = normalizeEmail(req.body.email);
     const type = String(req.body.type || "").trim();
+    const addressInput = req.body.address && typeof req.body.address === "object" && !Array.isArray(req.body.address)
+      ? req.body.address
+      : {};
+    const address = {
+      street: String(addressInput.street || req.body.address || "").trim(),
+      city: String(addressInput.city || req.body.city || "").trim(),
+      state: String(addressInput.state || req.body.state || "").trim(),
+      pincode: String(addressInput.pincode || req.body.pincode || "").trim()
+    };
 
     if (!hasRequiredFields({ name, mobile, type, verificationSessionId: req.body.verificationSessionId }, [
       "name",
@@ -247,6 +256,14 @@ export const completePartnerSignup = async (req, res) => {
 
     if (createAccount && !isValidPassword(req.body.password)) {
       return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
+    }
+
+    if (createAccount && !req.body.confirmPassword) {
+      return sendError(res, 400, "Confirm password is required");
+    }
+
+    if (createAccount && req.body.password !== req.body.confirmPassword) {
+      return sendError(res, 400, "Password and confirm password must match");
     }
 
     const otpRecord = await OtpRecord.findOne({
@@ -278,6 +295,7 @@ export const completePartnerSignup = async (req, res) => {
           type,
           contactPhone: mobile,
           contactEmail: email,
+          address,
           isActive: true
         }
       ],
@@ -336,6 +354,7 @@ export const completePartnerSignup = async (req, res) => {
         type: channelPartner.type,
         contactPhone: channelPartner.contactPhone,
         contactEmail: channelPartner.contactEmail,
+        address: channelPartner.address,
         adminAccountId: channelPartner.adminAccountId,
         isActive: channelPartner.isActive
       },
@@ -911,16 +930,18 @@ export const createPartnerTenant = async (req, res) => {
     const channelPartner = await ensurePartnerAccess(req, res);
     if (!channelPartner) return null;
 
-    if (!hasRequiredFields(req.body, ["name", "type", "capabilities"])) {
-      return sendError(res, 400, "Name, type, and capabilities are required");
+    if (!hasRequiredFields(req.body, ["name", "capabilities", "supportPhone"])) {
+      return sendError(res, 400, "Name, capabilities, and supportPhone are required");
+    }
+
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "Valid 10 digit support phone is required");
     }
 
     if (req.body.channelPartnerId || req.body.tenantPolicy || req.body.devicePolicies) {
       return sendError(res, 400, "channelPartnerId and policy payloads are managed by the backend");
-    }
-
-    if (!Object.values(TENANT_TYPES).includes(req.body.type)) {
-      return sendError(res, 400, "Invalid tenant type");
     }
 
     if (!Array.isArray(req.body.capabilities) || req.body.capabilities.length === 0) {
@@ -954,17 +975,8 @@ export const createPartnerTenant = async (req, res) => {
     let tenantCreationOtpRecord = null;
 
     if (shouldCreateTenantAdmin) {
-      const supportPhone = normalizeMobile(req.body.supportPhone);
       const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
       const verificationSessionId = String(req.body.tenantCreationVerificationSessionId || "").trim();
-
-      if (!supportPhone) {
-        return sendError(res, 400, "Support phone is required when app=true");
-      }
-
-      if (!isValidIndianMobile(supportPhone)) {
-        return sendError(res, 400, "Valid 10 digit support phone is required");
-      }
 
       if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
         return sendError(res, 400, "Invalid tenant creation verification mode");
@@ -1006,7 +1018,12 @@ export const createPartnerTenant = async (req, res) => {
       const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
         .trim()
         .toLowerCase();
-      const requestedTemporaryPassword = tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
+      const requestedTemporaryPassword = tenantAdminInput.password || req.body.password || tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
+      const confirmTenantAdminPassword = tenantAdminInput.confirmPassword || req.body.confirmPassword;
+
+      if (requestedTemporaryPassword && requestedTemporaryPassword !== confirmTenantAdminPassword) {
+        return sendError(res, 400, "Password and confirm password must match");
+      }
 
       if (!tenantAdminEmail) {
         return sendError(res, 400, "Tenant admin email is required when app=true");
@@ -1031,13 +1048,12 @@ export const createPartnerTenant = async (req, res) => {
       [
         {
           name: req.body.name,
-          type: req.body.type,
+          type: TENANT_TYPES.STANDALONE_OUTLET,
           capabilities: ["lend","distribute"],
           channelPartnerId: channelPartner._id,
           parentTenantId: req.body.parentTenantId || null,
-          supportPhone: req.body.supportPhone,
+          supportPhone,
           supportEmail: req.body.supportEmail,
-          supportWhatsapp: req.body.supportWhatsapp,
           address: req.body.address,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
           isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,

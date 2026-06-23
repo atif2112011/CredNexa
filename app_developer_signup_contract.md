@@ -89,7 +89,14 @@ Request:
   "type": "independent",
   "verificationSessionId": "otp_...",
   "password": "Pass@123",
-  "email": "optional@example.com"
+  "confirmPassword": "Pass@123",
+  "email": "optional@example.com",
+  "address": {
+    "street": "Shop 12, Main Road",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "pincode": "411001"
+  }
 }
 ```
 
@@ -101,7 +108,20 @@ retail_chain_group
 independent
 ```
 
-`email` is optional. The app can omit it.
+`email` and `address` are optional. The app can omit them.
+
+`address` uses the same shape as tenant address:
+
+```json
+{
+  "street": "Shop 12, Main Road",
+  "city": "Pune",
+  "state": "Maharashtra",
+  "pincode": "411001"
+}
+```
+
+`confirmPassword` is required when creating the account, but it is only used for validation and is not stored.
 
 Success response:
 
@@ -116,6 +136,12 @@ Success response:
       "type": "independent",
       "contactPhone": "9876543210",
       "contactEmail": "optional@example.com",
+      "address": {
+        "street": "Shop 12, Main Road",
+        "city": "Pune",
+        "state": "Maharashtra",
+        "pincode": "411001"
+      },
       "adminAccountId": "accountId",
       "isActive": true
     },
@@ -165,8 +191,10 @@ Email login also works if email was provided:
 - Name is required.
 - Type is required.
 - Password must be at least 8 characters and include at least one letter and one number.
+- Confirm password is required and must match password.
 - Email is optional.
 - If email is provided, it must be unique.
+- Address is optional and uses the same `street`, `city`, `state`, `pincode` shape as tenant address.
 - OTP expires in 10 minutes.
 - Wrong OTP is rejected after maximum attempts.
 
@@ -204,5 +232,12 @@ Email login also works if email was provided:
 {
   "success": false,
   "error": "Password must be at least 8 characters and include at least one letter and one number"
+}
+```
+
+```json
+{
+  "success": false,
+  "error": "Password and confirm password must match"
 }
 ```
