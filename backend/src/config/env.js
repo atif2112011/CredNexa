@@ -43,5 +43,6 @@ export const env = {
   firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET,
   firebaseMessagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
   firebaseAppId: process.env.FIREBASE_APP_ID,
-  firebaseMeasurementId: process.env.FIREBASE_MEASUREMENT_ID
+  firebaseMeasurementId: process.env.FIREBASE_MEASUREMENT_ID,
+  nodeEnv: process.env.NODE_ENV=="development"?"development":"production"
 };

@@ -1,5 +1,7 @@
 export const sendSuccess = (res, statusCode, message, data = null) => {
-  console.log("API Success", {res, statusCode, message, data});
+  if (env.nodeEnv === "development") {
+    console.log("API Success", {res, statusCode, message, data});
+  }
   return res.status(statusCode).json({
     success: true,
     message,
