@@ -4,7 +4,9 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   AlertTriangle,
+  Bell,
   Building2,
+  Boxes,
   FileClock,
   Gauge,
   Gavel,
@@ -22,6 +24,7 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: Gauge },
+  { href: "/builds", label: "Builds", icon: Boxes },
   { href: "/partners", label: "Partners", icon: Landmark },
   { href: "/tenants", label: "Tenants", icon: Building2 },
   { href: "/accounts", label: "Accounts", icon: Users },
@@ -29,6 +32,7 @@ const navItems = [
   { href: "/cases", label: "Cases", icon: Gavel },
   { href: "/devices", label: "Devices", icon: Smartphone },
   { href: "/commands", label: "Commands", icon: TerminalSquare },
+  { href: "/push-notification", label: "Push Notification", icon: Bell },
   { href: "/risk-flags", label: "Risk Flags", icon: AlertTriangle },
   { href: "/audit-logs", label: "Audit Logs", icon: FileClock }
 ];

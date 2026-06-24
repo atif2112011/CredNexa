@@ -31,6 +31,7 @@ import {
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
   listDeviceCommands,
+  listNotificationTargets,
   lockAdminDevice,
   getTenantById,
   listAdminAccounts,
@@ -134,6 +135,7 @@ adminRoutes.get("/risk-flags", getAdminRiskFlags);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
 adminRoutes.get("/audit-logs", getAuditLogs);
 
+adminRoutes.get("/notifications/targets", listNotificationTargets);
 adminRoutes.post("/notifications/custom", sendCustomNotification);
 
 adminRoutes.post("/provisioning-details", upsertProvisioningDetails);

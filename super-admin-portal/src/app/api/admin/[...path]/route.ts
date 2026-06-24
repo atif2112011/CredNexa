@@ -25,11 +25,13 @@ async function proxy(request: Request, { params }: Params) {
   backendUrl.search = incomingUrl.search;
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
-  const body = hasBody ? await request.text() : undefined;
+  const contentType = request.headers.get("content-type") || "";
+  const isMultipart = contentType.includes("multipart/form-data");
+  const body = hasBody ? (isMultipart ? await request.formData() : await request.text()) : undefined;
   const requestInit = (accessToken: string) => ({
     method: request.method,
     headers: {
-      "Content-Type": "application/json",
+      ...(isMultipart ? {} : { "Content-Type": contentType || "application/json" }),
       Authorization: `Bearer ${accessToken}`
     },
     body

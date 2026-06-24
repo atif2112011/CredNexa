@@ -40,6 +40,7 @@ import {
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
+import { queuePartnerAppNotification, queueTenantAppNotification } from "../../utils/appNotifications.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import {
   calculatePartnerCreditAmount,
@@ -68,6 +69,12 @@ const buildRegex = (value) => new RegExp(String(value).trim(), "i");
 const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
 
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
+
+const NOTIFICATION_TARGET_APPS = Object.freeze({
+  BORROWER_APP: "borrower_app",
+  TENANT_APP: "tenant_app",
+  PARTNER_APP: "partner_app"
+});
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
@@ -2957,204 +2964,344 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
   }
 };
 
+const validateCustomNotificationPayload = (req, res) => {
+  if (!hasRequiredFields(req.body, ["title", "text"])) {
+    sendError(res, 400, "Title and text are required");
+    return null;
+  }
+
+  const title = String(req.body.title).trim();
+  const text = String(req.body.text).trim();
+
+  if (!title || !text) {
+    sendError(res, 400, "Title and text cannot be empty");
+    return null;
+  }
+
+  if (title.length > 120) {
+    sendError(res, 400, "Title must be 120 characters or fewer");
+    return null;
+  }
+
+  if (text.length > 1000) {
+    sendError(res, 400, "Text must be 1000 characters or fewer");
+    return null;
+  }
+
+  return { title, text };
+};
+
+const getDeliverySummary = (results) =>
+  results.reduce((summary, result) => {
+    const status = result.status || "unknown";
+    summary[status] = (summary[status] || 0) + 1;
+    return summary;
+  }, {});
+
 /**
- * Send a custom notification to one borrower, one tenant, or all registered devices.
- * Sample body: { "title": "Payment reminder", "text": "Your EMI is due soon", "userId": "optional", "tenantId": "optional" }
+ * List Super Admin notification target options.
+ * Sample query: /admin/notifications/targets?targetApp=tenant_app
+ */
+export const listNotificationTargets = async (req, res) => {
+  try {
+    const targetApp = String(req.query.targetApp || NOTIFICATION_TARGET_APPS.BORROWER_APP).trim();
+    if (!Object.values(NOTIFICATION_TARGET_APPS).includes(targetApp)) {
+      return sendError(res, 400, "Invalid targetApp");
+    }
+
+    const allOption = { id: "all", label: "All" };
+    let items = [];
+
+    if (targetApp === NOTIFICATION_TARGET_APPS.BORROWER_APP) {
+      const userIds = await Device.distinct("userId", { fcmToken: { $exists: true, $ne: "" } });
+      const users = await User.find({ _id: { $in: userIds }, isActive: true })
+        .select("name tenantId")
+        .populate("tenantId", "name")
+        .sort({ name: 1 })
+        .lean();
+
+      items = users.map((user) => ({
+        id: user._id.toString(),
+        label: user.tenantId?.name ? `${user.name} - ${user.tenantId.name}` : user.name
+      }));
+    }
+
+    if (targetApp === NOTIFICATION_TARGET_APPS.TENANT_APP) {
+      const tenants = await Tenant.find({ isActive: true }).select("name").sort({ name: 1 }).lean();
+      items = tenants.map((tenant) => ({
+        id: tenant._id.toString(),
+        label: tenant.name
+      }));
+    }
+
+    if (targetApp === NOTIFICATION_TARGET_APPS.PARTNER_APP) {
+      const partners = await ChannelPartner.find({ isActive: true }).select("name").sort({ name: 1 }).lean();
+      items = partners.map((partner) => ({
+        id: partner._id.toString(),
+        label: partner.name
+      }));
+    }
+
+    return sendSuccess(res, 200, "Notification targets fetched successfully", {
+      targetApp,
+      items: [allOption, ...items]
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const sendBorrowerAppCustomNotification = async ({ req, res, title, text, targetId, notificationRequestId }) => {
+  const deviceFilter = {
+    fcmToken: { $exists: true, $ne: "" }
+  };
+  let scope = "all";
+  let activeUserCount;
+  let auditTenantId;
+  let auditUserId;
+
+  if (targetId && targetId !== "all") {
+    if (!isValidObjectId(targetId)) {
+      return sendError(res, 400, "Invalid borrower target ID");
+    }
+
+    const user = await User.findOne({ _id: targetId, isActive: true }).lean();
+    if (!user) {
+      return sendError(res, 404, "Active borrower not found");
+    }
+
+    deviceFilter.userId = user._id;
+    scope = "user";
+    activeUserCount = 1;
+    auditUserId = user._id;
+  } else if (req.body.tenantId) {
+    if (!isValidObjectId(req.body.tenantId)) {
+      return sendError(res, 400, "Invalid tenant ID");
+    }
+
+    const tenant = await Tenant.findById(req.body.tenantId).lean();
+    if (!tenant) {
+      return sendError(res, 404, "Tenant not found");
+    }
+
+    const activeUsers = await User.find({ tenantId: tenant._id, isActive: true }).select("_id").lean();
+    activeUserCount = activeUsers.length;
+    deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
+    deviceFilter.tenantId = tenant._id;
+    scope = "tenant";
+    auditTenantId = tenant._id;
+  } else {
+    const activeUsers = await User.find({ isActive: true }).select("_id").lean();
+    activeUserCount = activeUsers.length;
+    deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
+  }
+
+  const devices = await Device.find(deviceFilter).select("_id tenantId userId fcmToken").lean();
+  if (!devices.length) {
+    console.warn("Custom borrower notification has no target devices with FCM tokens", {
+      notificationRequestId,
+      scope,
+      targetId,
+      activeUserCount
+    });
+    return sendError(res, 404, "No registered devices with FCM tokens found for this notification target");
+  }
+
+  const commands = await DeviceCommand.create(
+    devices.map((device) => ({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "NOTIFICATION",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      payload: {
+        title,
+        text,
+        scope,
+        targetApp: NOTIFICATION_TARGET_APPS.BORROWER_APP,
+        userId: scope === "user" ? targetId : req.body.userId,
+        tenantId: scope === "tenant" ? req.body.tenantId : undefined,
+        notificationType: "CUSTOM"
+      }
+    }))
+  );
+
+  const commandIds = commands.map((command) => command._id);
+  await createAuditLog({
+    eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
+    actorId: req.auth.id,
+    actorCollection: "accounts",
+    tenantId: auditTenantId,
+    userId: auditUserId,
+    metadata: {
+      targetApp: NOTIFICATION_TARGET_APPS.BORROWER_APP,
+      targetId: targetId || "all",
+      scope,
+      title,
+      targetDeviceCount: devices.length,
+      commandIds
+    }
+  });
+
+  const deliveryResults = await runFcmDeliveryBatch({ limit: commands.length, commandIds });
+  const deliverySummary = getDeliverySummary(deliveryResults);
+
+  return sendSuccess(res, 201, "Custom notification queued successfully", {
+    targetApp: NOTIFICATION_TARGET_APPS.BORROWER_APP,
+    targetId: targetId || "all",
+    scope,
+    targetDeviceCount: devices.length,
+    queuedCommandCount: commands.length,
+    deliveryAttempted: true,
+    deliverySummary,
+    deliveryResults
+  });
+};
+
+const sendTenantAppCustomNotification = async ({ req, res, title, text, targetId }) => {
+  let jobs = [];
+  let targetTenantCount = 0;
+
+  if (targetId && targetId !== "all") {
+    if (!isValidObjectId(targetId)) return sendError(res, 400, "Invalid tenant target ID");
+    const tenant = await Tenant.findOne({ _id: targetId, isActive: true }).select("_id").lean();
+    if (!tenant) return sendError(res, 404, "Active tenant not found");
+    jobs = await queueTenantAppNotification({ tenantId: tenant._id, title, text, notificationType: "CUSTOM" });
+    targetTenantCount = 1;
+  } else {
+    const tenants = await Tenant.find({ isActive: true }).select("_id").lean();
+    targetTenantCount = tenants.length;
+    const queued = await Promise.all(
+      tenants.map((tenant) =>
+        queueTenantAppNotification({ tenantId: tenant._id, title, text, notificationType: "CUSTOM" })
+      )
+    );
+    jobs = queued.flat();
+  }
+
+  if (!jobs.length) {
+    return sendError(res, 404, "No active tenant app push tokens found for this notification target");
+  }
+
+  await createAuditLog({
+    eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
+    actorId: req.auth.id,
+    actorCollection: "accounts",
+    tenantId: targetId && targetId !== "all" ? targetId : undefined,
+    metadata: {
+      targetApp: NOTIFICATION_TARGET_APPS.TENANT_APP,
+      targetId: targetId || "all",
+      title,
+      queuedJobCount: jobs.length
+    }
+  });
+
+  return sendSuccess(res, 201, "Custom notification queued successfully", {
+    targetApp: NOTIFICATION_TARGET_APPS.TENANT_APP,
+    targetId: targetId || "all",
+    targetTenantCount,
+    targetAccountCount: jobs.length,
+    queuedJobCount: jobs.length,
+    deliveryAttempted: false
+  });
+};
+
+const sendPartnerAppCustomNotification = async ({ req, res, title, text, targetId }) => {
+  let jobs = [];
+  let targetPartnerCount = 0;
+
+  if (targetId && targetId !== "all") {
+    if (!isValidObjectId(targetId)) return sendError(res, 400, "Invalid partner target ID");
+    const partner = await ChannelPartner.findOne({ _id: targetId, isActive: true }).select("_id").lean();
+    if (!partner) return sendError(res, 404, "Active channel partner not found");
+    jobs = await queuePartnerAppNotification({ channelPartnerId: partner._id, title, text, notificationType: "CUSTOM" });
+    targetPartnerCount = 1;
+  } else {
+    const partners = await ChannelPartner.find({ isActive: true }).select("_id").lean();
+    targetPartnerCount = partners.length;
+    const queued = await Promise.all(
+      partners.map((partner) =>
+        queuePartnerAppNotification({ channelPartnerId: partner._id, title, text, notificationType: "CUSTOM" })
+      )
+    );
+    jobs = queued.flat();
+  }
+
+  if (!jobs.length) {
+    return sendError(res, 404, "No active partner app push tokens found for this notification target");
+  }
+
+  await createAuditLog({
+    eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
+    actorId: req.auth.id,
+    actorCollection: "accounts",
+    channelPartnerId: targetId && targetId !== "all" ? targetId : undefined,
+    metadata: {
+      targetApp: NOTIFICATION_TARGET_APPS.PARTNER_APP,
+      targetId: targetId || "all",
+      title,
+      queuedJobCount: jobs.length
+    }
+  });
+
+  return sendSuccess(res, 201, "Custom notification queued successfully", {
+    targetApp: NOTIFICATION_TARGET_APPS.PARTNER_APP,
+    targetId: targetId || "all",
+    targetPartnerCount,
+    targetAccountCount: jobs.length,
+    queuedJobCount: jobs.length,
+    deliveryAttempted: false
+  });
+};
+
+/**
+ * Send a custom notification to Borrower App, Tenant App, or Partner App.
+ * Sample body: { "targetApp": "borrower_app", "targetId": "all", "title": "Payment reminder", "text": "Your EMI is due soon" }
  */
 export const sendCustomNotification = async (req, res) => {
   const notificationRequestId = `custom_notification_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   try {
-    if (!hasRequiredFields(req.body, ["title", "text"])) {
-      return sendError(res, 400, "Title and text are required");
+    const notificationPayload = validateCustomNotificationPayload(req, res);
+    if (!notificationPayload) return null;
+
+    const targetApp = String(req.body.targetApp || NOTIFICATION_TARGET_APPS.BORROWER_APP).trim();
+    if (!Object.values(NOTIFICATION_TARGET_APPS).includes(targetApp)) {
+      return sendError(res, 400, "Invalid targetApp");
     }
 
-    const title = String(req.body.title).trim();
-    const text = String(req.body.text).trim();
-
-    if (!title || !text) {
-      return sendError(res, 400, "Title and text cannot be empty");
-    }
-
-    if (title.length > 120) {
-      return sendError(res, 400, "Title must be 120 characters or fewer");
-    }
-
-    if (text.length > 1000) {
-      return sendError(res, 400, "Text must be 1000 characters or fewer");
-    }
-
+    const targetId = req.body.targetId || req.body.userId || "all";
     console.info("Custom notification request received", {
       notificationRequestId,
       actorId: req.auth.id,
-      hasUserId: Boolean(req.body.userId),
-      hasTenantId: Boolean(req.body.tenantId),
-      titleLength: title.length,
-      textLength: text.length
+      targetApp,
+      targetId,
+      hasLegacyTenantId: Boolean(req.body.tenantId),
+      titleLength: notificationPayload.title.length,
+      textLength: notificationPayload.text.length
     });
 
-    const deviceFilter = {
-      fcmToken: { $exists: true, $ne: "" }
-    };
-    let scope = "all";
-    let activeUserCount;
-
-    if (req.body.userId) {
-      if (!isValidObjectId(req.body.userId)) {
-        return sendError(res, 400, "Invalid user ID");
-      }
-
-      const user = await User.findOne({ _id: req.body.userId, isActive: true }).lean();
-      if (!user) {
-        return sendError(res, 404, "Active user not found");
-      }
-
-      deviceFilter.userId = user._id;
-      scope = "user";
-      activeUserCount = 1;
-
-      console.info("Custom notification user target resolved", {
-        notificationRequestId,
-        scope,
-        userId: String(user._id),
-        tenantId: user.tenantId ? String(user.tenantId) : undefined
-      });
-    } else if (req.body.tenantId) {
-      if (!isValidObjectId(req.body.tenantId)) {
-        return sendError(res, 400, "Invalid tenant ID");
-      }
-
-      const tenant = await Tenant.findById(req.body.tenantId).lean();
-      if (!tenant) {
-        return sendError(res, 404, "Tenant not found");
-      }
-
-      const activeUsers = await User.find({ tenantId: tenant._id, isActive: true }).select("_id").lean();
-      activeUserCount = activeUsers.length;
-      deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
-      deviceFilter.tenantId = tenant._id;
-      scope = "tenant";
-
-      console.info("Custom notification tenant target resolved", {
-        notificationRequestId,
-        scope,
-        tenantId: String(tenant._id),
-        activeUserCount
-      });
-    } else {
-      const activeUsers = await User.find({ isActive: true }).select("_id").lean();
-      activeUserCount = activeUsers.length;
-      deviceFilter.userId = { $in: activeUsers.map((user) => user._id) };
-
-      console.info("Custom notification all-users target resolved", {
-        notificationRequestId,
-        scope,
-        activeUserCount
+    if (targetApp === NOTIFICATION_TARGET_APPS.BORROWER_APP) {
+      return sendBorrowerAppCustomNotification({
+        req,
+        res,
+        ...notificationPayload,
+        targetId,
+        notificationRequestId
       });
     }
 
-    const devices = await Device.find(deviceFilter).select("_id tenantId userId fcmToken").lean();
-
-    if (!devices.length) {
-      console.warn("Custom notification has no target devices with FCM tokens", {
-        notificationRequestId,
-        scope,
-        userId: req.body.userId,
-        tenantId: req.body.tenantId,
-        activeUserCount
-      });
-
-      return sendError(res, 404, "No registered devices with FCM tokens found for this notification target");
+    if (targetApp === NOTIFICATION_TARGET_APPS.TENANT_APP) {
+      return sendTenantAppCustomNotification({ req, res, ...notificationPayload, targetId });
     }
 
-    console.info("Custom notification target devices resolved", {
-      notificationRequestId,
-      scope,
-      activeUserCount,
-      targetDeviceCount: devices.length,
-      deviceIds: devices.map((device) => String(device._id)),
-      userIds: [...new Set(devices.map((device) => String(device.userId)))],
-      tenantIds: [...new Set(devices.map((device) => String(device.tenantId)))],
-      devicesWithFcmToken: devices.filter((device) => Boolean(device.fcmToken)).length
-    });
-
-    const commands = await DeviceCommand.create(
-      devices.map((device) => ({
-        deviceId: device._id,
-        tenantId: device.tenantId,
-        commandType: "NOTIFICATION",
-        triggeredBy: "super_admin",
-        triggeredByAccountId: req.auth.id,
-        payload: {
-          title,
-          text,
-          scope,
-          userId: req.body.userId,
-          tenantId: req.body.tenantId
-        }
-      }))
-    );
-
-    const commandIds = commands.map((command) => command._id);
-
-    console.info("Custom notification commands queued", {
-      notificationRequestId,
-      scope,
-      commandCount: commands.length,
-      commandIds: commandIds.map((commandId) => String(commandId))
-    });
-
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.CUSTOM_NOTIFICATION_QUEUED,
-      actorId: req.auth.id,
-      actorCollection: "accounts",
-      tenantId: scope === "tenant" ? req.body.tenantId : undefined,
-      userId: scope === "user" ? req.body.userId : undefined,
-      metadata: {
-        scope,
-        title,
-        targetDeviceCount: devices.length,
-        commandIds
-      }
-    });
-
-    const deliveryResults = await runFcmDeliveryBatch({ limit: commands.length, commandIds });
-    const deliverySummary = deliveryResults.reduce(
-      (summary, result) => {
-        const status = result.status || "unknown";
-        summary[status] = (summary[status] || 0) + 1;
-        return summary;
-      },
-      {}
-    );
-
-    console.info("Custom notification delivery attempted", {
-      notificationRequestId,
-      scope,
-      commandCount: commands.length,
-      deliverySummary,
-      deliveryResults: deliveryResults.map((result) => ({
-        commandId: result.commandId ? String(result.commandId) : undefined,
-        status: result.status,
-        providerMessageId: result.providerMessageId,
-        error: result.error
-      }))
-    });
-
-    return sendSuccess(res, 201, "Custom notification queued successfully", {
-      scope,
-      targetDeviceCount: devices.length,
-      queuedCommandCount: commands.length,
-      deliveryAttempted: true,
-      deliverySummary,
-      deliveryResults
-    });
+    return sendPartnerAppCustomNotification({ req, res, ...notificationPayload, targetId });
   } catch (error) {
     console.error("Custom notification failed", {
       notificationRequestId,
       actorId: req.auth?.id,
-      userId: req.body?.userId,
-      tenantId: req.body?.tenantId,
+      targetApp: req.body?.targetApp,
+      targetId: req.body?.targetId,
       message: error.message,
       stack: error.stack
     });
