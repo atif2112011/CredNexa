@@ -1,7 +1,10 @@
 import { connectDatabase } from "../config/database.js";
+import { AccountPushToken } from "../models/AccountPushToken.js";
+import { AppNotificationJob } from "../models/AppNotificationJob.js";
 import { Device } from "../models/Device.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
 import { FcmDeliveryLog } from "../models/FcmDeliveryLog.js";
+import { isInvalidFcmTokenError } from "../utils/pushTokens.js";
 
 let firebaseApp;
 
@@ -109,6 +112,36 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
   };
 };
 
+const stringifyDataPayload = (data = {}) =>
+  Object.entries(data || {}).reduce((result, [key, value]) => {
+    if (value === undefined || value === null) return result;
+    result[key] = typeof value === "string" ? value : JSON.stringify(value);
+    return result;
+  }, {});
+
+const buildAppNotificationMessage = ({ pushToken, job }) => ({
+  token: pushToken.fcmToken,
+  notification: {
+    title: String(job.title || ""),
+    body: String(job.text || "")
+  },
+  data: {
+    ...stringifyDataPayload(job.data),
+    type: "APP_NOTIFICATION",
+    notificationJobId: job._id.toString(),
+    notificationType: String(job.notificationType || "CUSTOM"),
+    targetApp: String(job.targetApp),
+    title: String(job.title || ""),
+    text: String(job.text || "")
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId: "app_notifications"
+    }
+  }
+});
+
 export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   await connectDatabase();
 
@@ -195,10 +228,146 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   return results;
 };
 
+export const runAppNotificationDeliveryBatch = async ({ limit = 50, jobIds } = {}) => {
+  await connectDatabase();
+
+  const jobFilter = {
+    status: { $in: ["pending", "failed"] },
+    $expr: { $lt: ["$retryCount", "$maxRetries"] },
+    $or: [{ nextRetryAt: { $exists: false } }, { nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }]
+  };
+
+  if (jobIds?.length) {
+    jobFilter._id = { $in: jobIds };
+  }
+
+  const jobs = await AppNotificationJob.find(jobFilter).sort({ createdAt: 1 }).limit(limit);
+  const firebase = await loadFirebaseAdmin();
+  const results = [];
+
+  for (const job of jobs) {
+    const pushTokens = await AccountPushToken.find({
+      accountId: job.accountId,
+      targetApp: job.targetApp,
+      isActive: true
+    }).lean();
+
+    if (!pushTokens.length) {
+      job.status = "skipped";
+      job.failureReason = "Active account FCM token not found";
+      await job.save();
+      await FcmDeliveryLog.create({
+        notificationJobId: job._id,
+        accountId: job.accountId,
+        tenantId: job.tenantId,
+        channelPartnerId: job.channelPartnerId,
+        targetApp: job.targetApp,
+        recipientType: job.recipientType,
+        notificationType: job.notificationType,
+        messageType: "APP_NOTIFICATION",
+        status: "skipped",
+        error: job.failureReason
+      });
+      results.push({ jobId: job._id, status: "skipped" });
+      continue;
+    }
+
+    const deliveryResults = [];
+
+    for (const pushToken of pushTokens) {
+      try {
+        const message = buildAppNotificationMessage({ pushToken, job });
+        let providerMessageId = `mock_app_fcm_${job._id}_${pushToken._id}`;
+
+        if (firebase) {
+          providerMessageId = await firebase.messaging().send(message);
+        }
+
+        await FcmDeliveryLog.create({
+          notificationJobId: job._id,
+          accountId: job.accountId,
+          accountPushTokenId: pushToken._id,
+          tenantId: job.tenantId,
+          channelPartnerId: job.channelPartnerId,
+          tokenHash: pushToken.tokenHash,
+          targetApp: job.targetApp,
+          recipientType: job.recipientType,
+          notificationType: job.notificationType,
+          messageType: "APP_NOTIFICATION",
+          status: "sent",
+          providerMessageId,
+          metadata: { mockMode: !firebase }
+        });
+        deliveryResults.push({ status: "sent", providerMessageId });
+      } catch (error) {
+        if (isInvalidFcmTokenError(error)) {
+          await AccountPushToken.updateOne(
+            { _id: pushToken._id },
+            {
+              $set: {
+                isActive: false,
+                deactivatedAt: new Date(),
+                deactivationReason: "invalid_token"
+              }
+            }
+          );
+        }
+
+        await FcmDeliveryLog.create({
+          notificationJobId: job._id,
+          accountId: job.accountId,
+          accountPushTokenId: pushToken._id,
+          tenantId: job.tenantId,
+          channelPartnerId: job.channelPartnerId,
+          tokenHash: pushToken.tokenHash,
+          targetApp: job.targetApp,
+          recipientType: job.recipientType,
+          notificationType: job.notificationType,
+          messageType: "APP_NOTIFICATION",
+          status: "failed",
+          error: error.message
+        });
+        deliveryResults.push({ status: "failed", error: error.message });
+      }
+    }
+
+    const sentCount = deliveryResults.filter((result) => result.status === "sent").length;
+    if (sentCount > 0) {
+      job.status = "sent";
+      job.sentAt = new Date();
+      job.failureReason = undefined;
+    } else {
+      job.status = "failed";
+      job.retryCount += 1;
+      job.nextRetryAt = new Date(Date.now() + Math.min(job.retryCount + 1, 5) * 5 * 60 * 1000);
+      job.failureReason = deliveryResults.find((result) => result.error)?.error || "FCM delivery failed";
+    }
+    await job.save();
+
+    results.push({
+      jobId: job._id,
+      status: job.status,
+      sentCount,
+      failedCount: deliveryResults.length - sentCount
+    });
+  }
+
+  return results;
+};
+
+export const runAllFcmDeliveryBatches = async ({ limit = 50 } = {}) => {
+  const deviceCommands = await runFcmDeliveryBatch({ limit });
+  const appNotifications = await runAppNotificationDeliveryBatch({ limit });
+
+  return { deviceCommands, appNotifications };
+};
+
 if (process.argv[1]?.endsWith("fcmDeliveryWorker.js")) {
-  runFcmDeliveryBatch()
+  runAllFcmDeliveryBatches()
     .then((results) => {
-      console.log(`FCM delivery batch completed: ${results.length} command(s) processed`);
+      console.log(
+        `FCM delivery batch completed: ${results.deviceCommands.length} device command(s), ${results.appNotifications.length} app notification(s) processed`
+      );
       process.exit(0);
     })
     .catch((error) => {

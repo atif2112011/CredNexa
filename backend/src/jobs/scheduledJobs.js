@@ -10,7 +10,7 @@ import { EmiSchedule } from "../models/EmiSchedule.js";
 import { RiskFlag } from "../models/RiskFlag.js";
 import { TenantPolicy } from "../models/TenantPolicy.js";
 import { UnlockRequest } from "../models/UnlockRequest.js";
-import { runFcmDeliveryBatch } from "./fcmDeliveryWorker.js";
+import { runAllFcmDeliveryBatches } from "./fcmDeliveryWorker.js";
 
 const createAuditLog = async (payload) => AuditLog.create(payload);
 
@@ -617,7 +617,7 @@ export const runScheduledJobs = async () => {
   const slaEscalations = await runSlaEscalationJob({ limit: SCHEDULED_JOB_LIMITS.slaEscalation });
   const relockedDevices = await runTempUnlockExpiryJob({ limit: SCHEDULED_JOB_LIMITS.tempUnlockExpiry });
   const emiPolicy = await runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy });
-  const fcmDeliveries = await runFcmDeliveryBatch({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery });
+  const fcmDeliveries = await runAllFcmDeliveryBatches({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery });
 
   return { slaEscalations, relockedDevices, emiPolicy, fcmDeliveries };
 };
@@ -636,7 +636,7 @@ export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
     {
       name: "fcmDeliveryJob",
       intervalMs: SCHEDULED_JOB_INTERVALS.fcmDeliveryMs,
-      run: () => runFcmDeliveryBatch({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery })
+      run: () => runAllFcmDeliveryBatches({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery })
     },
     {
       name: "tempUnlockExpiryJob",
