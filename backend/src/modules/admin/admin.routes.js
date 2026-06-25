@@ -27,6 +27,7 @@ import {
   getDeviceAuditLogs,
   getDeviceById,
   getDeviceCommands,
+  listFcmDeliveryLogs,
   getPartnerPayoutRequestById,
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
@@ -123,6 +124,7 @@ adminRoutes.post("/escalations/:caseId/reject", rejectAdminEscalation);
 
 adminRoutes.get("/devices", listDevices);
 adminRoutes.get("/commands", listDeviceCommands);
+adminRoutes.get("/fcm-logs", listFcmDeliveryLogs);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
 adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);

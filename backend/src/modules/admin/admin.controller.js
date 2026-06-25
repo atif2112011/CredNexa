@@ -16,6 +16,7 @@ import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
+import { FcmDeliveryLog } from "../../models/FcmDeliveryLog.js";
 import {
   PARTNER_CREDIT_BALANCE_TYPES,
   PARTNER_CREDIT_LEDGER_TYPES,
@@ -65,6 +66,8 @@ const buildPagination = (page, limit, total) => ({
 });
 
 const buildRegex = (value) => new RegExp(String(value).trim(), "i");
+
+const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value || "").trim().toLowerCase());
 
@@ -1312,12 +1315,20 @@ export const adjustTenantCredits = async (req, res) => {
 
 /**
  * List tenant credit purchase requests.
- * Sample query: /admin/tenant-credit-purchases?status=PENDING&tenantId=665f...&page=1&limit=20
+ * Sample query: /admin/tenant-credit-purchases?status=PENDING&tenantId=665f...&sortBy=requestedAt&sortOrder=desc&page=1&limit=20
  */
 export const listTenantCreditPurchaseRequests = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
     const filter = {};
+    const allowedSortFields = {
+      tenantName: "tenantName",
+      partnerName: "partnerName",
+      status: "status",
+      purchaseAmount: "purchaseAmount",
+      requestedAt: "requestedAt",
+      createdAt: "createdAt"
+    };
 
     if (req.query.status) {
       if (!Object.values(TENANT_CREDIT_PURCHASE_STATUSES).includes(req.query.status)) {
@@ -1330,29 +1341,107 @@ export const listTenantCreditPurchaseRequests = async (req, res) => {
       if (!isValidObjectId(req.query.tenantId)) {
         return sendError(res, 400, "Invalid tenant ID");
       }
-      filter.tenantId = req.query.tenantId;
+      filter.tenantId = new mongoose.Types.ObjectId(req.query.tenantId);
     }
 
     if (req.query.channelPartnerId) {
       if (!isValidObjectId(req.query.channelPartnerId)) {
         return sendError(res, 400, "Invalid channel partner ID");
       }
-      filter.channelPartnerId = req.query.channelPartnerId;
+      filter.channelPartnerId = new mongoose.Types.ObjectId(req.query.channelPartnerId);
     }
 
-    const [items, total] = await Promise.all([
-      TenantCreditPurchaseRequest.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("tenantId", "name type creditBalance totalCreditsPurchased lifetimeCreditPurchaseAmount")
-        .populate("channelPartnerId", "name type")
-        .populate("requestedBy", "name email mobile role")
-        .populate("approvedBy", "name email mobile role")
-        .populate("rejectedBy", "name email mobile role")
-        .lean(),
-      TenantCreditPurchaseRequest.countDocuments(filter)
+    if (req.query.search) {
+      const searchRegex = new RegExp(escapeRegex(req.query.search), "i");
+      filter.$or = [
+        { referenceNumber: searchRegex },
+        { status: searchRegex }
+      ];
+    }
+
+    const sortBy = allowedSortFields[req.query.sortBy] || "requestedAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sort = ["requestedAt", "createdAt"].includes(sortBy) ? { [sortBy]: sortOrder, _id: -1 } : { [sortBy]: sortOrder, requestedAt: -1, _id: -1 };
+
+    const [result] = await TenantCreditPurchaseRequest.aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: "tenants",
+          localField: "tenantId",
+          foreignField: "_id",
+          as: "tenant"
+        }
+      },
+      {
+        $lookup: {
+          from: "channelpartners",
+          localField: "channelPartnerId",
+          foreignField: "_id",
+          as: "channelPartner"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "requestedBy",
+          foreignField: "_id",
+          as: "requestedByAccount"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "approvedBy",
+          foreignField: "_id",
+          as: "approvedByAccount"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "rejectedBy",
+          foreignField: "_id",
+          as: "rejectedByAccount"
+        }
+      },
+      {
+        $addFields: {
+          tenantId: { $arrayElemAt: ["$tenant", 0] },
+          channelPartnerId: { $arrayElemAt: ["$channelPartner", 0] },
+          requestedBy: { $arrayElemAt: ["$requestedByAccount", 0] },
+          approvedBy: { $arrayElemAt: ["$approvedByAccount", 0] },
+          rejectedBy: { $arrayElemAt: ["$rejectedByAccount", 0] },
+          tenantName: { $ifNull: [{ $arrayElemAt: ["$tenant.name", 0] }, ""] },
+          partnerName: { $ifNull: [{ $arrayElemAt: ["$channelPartner.name", 0] }, ""] }
+        }
+      },
+      {
+        $project: {
+          tenant: 0,
+          channelPartner: 0,
+          requestedByAccount: 0,
+          approvedByAccount: 0,
+          rejectedByAccount: 0,
+          "requestedBy.passwordHash": 0,
+          "approvedBy.passwordHash": 0,
+          "rejectedBy.passwordHash": 0
+        }
+      },
+      {
+        $facet: {
+          items: [
+            { $sort: sort },
+            { $skip: skip },
+            { $limit: limit }
+          ],
+          total: [{ $count: "count" }]
+        }
+      }
     ]);
+
+    const items = result?.items || [];
+    const total = result?.total?.[0]?.count || 0;
 
     return sendSuccess(res, 200, "Tenant credit purchase requests fetched successfully", {
       items,
@@ -1599,12 +1688,19 @@ export const rejectTenantCreditPurchaseRequest = async (req, res) => {
 
 /**
  * List partner payout requests.
- * Sample query: /admin/partner-payouts?status=PENDING&channelPartnerId=665f...&page=1&limit=20
+ * Sample query: /admin/partner-payouts?status=PENDING&channelPartnerId=665f...&sortBy=requestedAt&sortOrder=desc&page=1&limit=20
  */
 export const listPartnerPayoutRequests = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
     const filter = {};
+    const allowedSortFields = {
+      partnerName: "partnerName",
+      status: "status",
+      amount: "amount",
+      requestedAt: "requestedAt",
+      createdAt: "createdAt"
+    };
 
     if (req.query.status) {
       if (!Object.values(PARTNER_PAYOUT_STATUSES).includes(req.query.status)) {
@@ -1617,21 +1713,95 @@ export const listPartnerPayoutRequests = async (req, res) => {
       if (!isValidObjectId(req.query.channelPartnerId)) {
         return sendError(res, 400, "Invalid channel partner ID");
       }
-      filter.channelPartnerId = req.query.channelPartnerId;
+      filter.channelPartnerId = new mongoose.Types.ObjectId(req.query.channelPartnerId);
     }
 
-    const [items, total] = await Promise.all([
-      PartnerPayoutRequest.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate("channelPartnerId", "name type contactPhone contactEmail availablePayoutBalance payoutHoldBalance payoutUpiId payoutUpiName")
-        .populate("requestedBy", "name email mobile role")
-        .populate("approvedBy", "name email mobile role")
-        .populate("rejectedBy", "name email mobile role")
-        .lean(),
-      PartnerPayoutRequest.countDocuments(filter)
+    if (req.query.search) {
+      const searchText = String(req.query.search).trim();
+      const searchRegex = new RegExp(escapeRegex(searchText), "i");
+      const searchFilter = [
+        { adminReferenceId: searchRegex },
+        { status: searchRegex }
+      ];
+      const searchAmount = parseRupeeAmount(searchText);
+      if (searchAmount !== null) {
+        searchFilter.push({ amount: searchAmount });
+      }
+      filter.$or = searchFilter;
+    }
+
+    const sortBy = allowedSortFields[req.query.sortBy] || "requestedAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sort = ["requestedAt", "createdAt"].includes(sortBy) ? { [sortBy]: sortOrder, _id: -1 } : { [sortBy]: sortOrder, requestedAt: -1, _id: -1 };
+
+    const [result] = await PartnerPayoutRequest.aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: "channelpartners",
+          localField: "channelPartnerId",
+          foreignField: "_id",
+          as: "channelPartner"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "requestedBy",
+          foreignField: "_id",
+          as: "requestedByAccount"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "approvedBy",
+          foreignField: "_id",
+          as: "approvedByAccount"
+        }
+      },
+      {
+        $lookup: {
+          from: "accounts",
+          localField: "rejectedBy",
+          foreignField: "_id",
+          as: "rejectedByAccount"
+        }
+      },
+      {
+        $addFields: {
+          channelPartnerId: { $arrayElemAt: ["$channelPartner", 0] },
+          requestedBy: { $arrayElemAt: ["$requestedByAccount", 0] },
+          approvedBy: { $arrayElemAt: ["$approvedByAccount", 0] },
+          rejectedBy: { $arrayElemAt: ["$rejectedByAccount", 0] },
+          partnerName: { $ifNull: [{ $arrayElemAt: ["$channelPartner.name", 0] }, ""] }
+        }
+      },
+      {
+        $project: {
+          channelPartner: 0,
+          requestedByAccount: 0,
+          approvedByAccount: 0,
+          rejectedByAccount: 0,
+          "requestedBy.passwordHash": 0,
+          "approvedBy.passwordHash": 0,
+          "rejectedBy.passwordHash": 0
+        }
+      },
+      {
+        $facet: {
+          items: [
+            { $sort: sort },
+            { $skip: skip },
+            { $limit: limit }
+          ],
+          total: [{ $count: "count" }]
+        }
+      }
     ]);
+
+    const items = result?.items || [];
+    const total = result?.total?.[0]?.count || 0;
 
     return sendSuccess(res, 200, "Partner payout requests fetched successfully", {
       items,
@@ -3343,6 +3513,92 @@ export const listDeviceCommands = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Device commands fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List FCM delivery attempts across borrower, tenant, and partner apps.
+ * Sample query: /admin/fcm-logs?status=sent&targetApp=tenant_app&sortBy=createdAt&sortOrder=desc&page=1&limit=20
+ */
+export const listFcmDeliveryLogs = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    const allowedStatuses = new Set(["sent", "failed", "skipped"]);
+    const allowedTargetApps = new Set(["borrower_app", "tenant_app", "partner_app"]);
+    const allowedRecipientTypes = new Set(["device", "tenant_admin", "partner_admin"]);
+    const allowedMessageTypes = new Set(["POLICY_UPDATE", "NOTIFICATION", "APP_NOTIFICATION"]);
+    const allowedSortFields = new Set(["createdAt", "status", "targetApp", "recipientType", "messageType", "notificationType"]);
+
+    if (req.query.status && req.query.status !== "all") {
+      if (!allowedStatuses.has(req.query.status)) return sendError(res, 400, "Invalid FCM log status");
+      filter.status = req.query.status;
+    }
+    if (req.query.targetApp && req.query.targetApp !== "all") {
+      if (!allowedTargetApps.has(req.query.targetApp)) return sendError(res, 400, "Invalid targetApp");
+      filter.targetApp = req.query.targetApp;
+    }
+    if (req.query.recipientType && req.query.recipientType !== "all") {
+      if (!allowedRecipientTypes.has(req.query.recipientType)) return sendError(res, 400, "Invalid recipientType");
+      filter.recipientType = req.query.recipientType;
+    }
+    if (req.query.messageType && req.query.messageType !== "all") {
+      if (!allowedMessageTypes.has(req.query.messageType)) return sendError(res, 400, "Invalid messageType");
+      filter.messageType = req.query.messageType;
+    }
+    if (req.query.notificationType) filter.notificationType = req.query.notificationType;
+    if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+    if (req.query.channelPartnerId) filter.channelPartnerId = req.query.channelPartnerId;
+    if (req.query.deviceId) filter.deviceId = req.query.deviceId;
+    if (req.query.accountId) filter.accountId = req.query.accountId;
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {};
+      if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
+    }
+    if (req.query.search) {
+      const search = new RegExp(escapeRegex(req.query.search), "i");
+      filter.$or = [
+        { providerMessageId: search },
+        { error: search },
+        { tokenHash: search },
+        { messageType: search },
+        { notificationType: search },
+        { targetApp: search },
+        { recipientType: search },
+        { status: search }
+      ];
+    }
+
+    const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder } : { [sortBy]: sortOrder, createdAt: -1 };
+
+    const [rawItems, total] = await Promise.all([
+      FcmDeliveryLog.find(filter)
+        .select("-token")
+        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("commandId", "commandType status triggeredBy")
+        .populate("notificationJobId", "title notificationType status")
+        .populate("accountId", "name email role")
+        .populate("tenantId", "name")
+        .populate("channelPartnerId", "name")
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .lean(),
+      FcmDeliveryLog.countDocuments(filter)
+    ]);
+
+    const items = rawItems.map(({ token, ...item }) => item);
+
+    return sendSuccess(res, 200, "FCM delivery logs fetched successfully", {
       items,
       pagination: buildPagination(page, limit, total)
     });

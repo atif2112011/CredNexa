@@ -10,6 +10,7 @@ import {
   FileClock,
   Gauge,
   Gavel,
+  HandCoins,
   KeyRound,
   Landmark,
   LogOut,
@@ -25,6 +26,8 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: Gauge },
   { href: "/builds", label: "Builds", icon: Boxes },
+  { href: "/key-requests", label: "Key Requests", icon: KeyRound },
+  { href: "/payout-requests", label: "Payout Requests", icon: HandCoins },
   { href: "/partners", label: "Partners", icon: Landmark },
   { href: "/tenants", label: "Tenants", icon: Building2 },
   { href: "/accounts", label: "Accounts", icon: Users },
@@ -32,6 +35,7 @@ const navItems = [
   { href: "/cases", label: "Cases", icon: Gavel },
   { href: "/devices", label: "Devices", icon: Smartphone },
   { href: "/commands", label: "Commands", icon: TerminalSquare },
+  { href: "/fcm-logs", label: "FCM Logs", icon: Bell },
   { href: "/push-notification", label: "Push Notification", icon: Bell },
   { href: "/risk-flags", label: "Risk Flags", icon: AlertTriangle },
   { href: "/audit-logs", label: "Audit Logs", icon: FileClock }
@@ -48,7 +52,7 @@ export function Sidebar() {
 
   return (
     <aside className="sticky top-0 flex h-screen w-full flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-      <div className="flex h-20 items-center gap-3 border-b px-5">
+      <div className="flex h-20 shrink-0 items-center gap-3 border-b px-5">
         <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
           <KeyRound className="h-5 w-5" aria-hidden="true" />
         </div>
@@ -57,7 +61,7 @@ export function Sidebar() {
           <p className="text-xs font-medium text-white/60">Super Admin Console</p>
         </div>
       </div>
-      <nav className="flex-1 space-y-1.5 p-3" aria-label="Main navigation">
+      <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3" aria-label="Main navigation">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -83,7 +87,7 @@ export function Sidebar() {
           );
         })}
       </nav>
-      <div className="border-t border-white/10 p-3 pb-5">
+      <div className="shrink-0 border-t border-white/10 p-3 pb-5">
         <Button type="button" variant="ghost" className="h-10 w-full justify-start rounded-xl text-white/80 hover:bg-white/8 hover:text-white" onClick={logout}>
           <LogOut className="h-4 w-4" aria-hidden="true" />
           Sign out
