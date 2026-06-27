@@ -31,6 +31,10 @@ import {
   parsePositiveInteger,
   validateAppBuildIdentity
 } from "../../services/appUpdate.service.js";
+import {
+  generateManualOverrideTokenForDevice,
+  recordManualOverrideTokenUsage
+} from "../../services/manualOverrideToken.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { hasRequiredFields } from "../../utils/validators.js";
@@ -1528,6 +1532,43 @@ export const registerDevice = async (req, res) => {
 
     await session.commitTransaction();
 
+    try {
+      await generateManualOverrideTokenForDevice(device, {
+        reason: "Device registration emergency QR",
+        source: "device_registration",
+        supersedeExisting: false,
+        metadata: {
+          enrollmentTokenId: enrollmentToken._id
+        }
+      });
+    } catch (tokenError) {
+      console.error("Manual override token generation failed after device registration", {
+        deviceId: device._id,
+        message: tokenError.message
+      });
+
+      try {
+        await createAuditLog({
+          eventType: AUDIT_EVENTS.MANUAL_OVERRIDE_TOKEN_GENERATION_FAILED,
+          actorId: user._id,
+          actorCollection: "users",
+          tenantId: user.tenantId,
+          userId: user._id,
+          deviceId: device._id,
+          reason: "Device registration completed without manual override token",
+          metadata: {
+            enrollmentTokenId: enrollmentToken._id,
+            message: tokenError.message
+          }
+        });
+      } catch (auditError) {
+        console.error("Manual override token failure audit could not be recorded", {
+          deviceId: device._id,
+          message: auditError.message
+        });
+      }
+    }
+
     return sendSuccess(res, 201, "Device registered successfully", {
       deviceId: device._id,
       userId: device.userId,
@@ -2011,13 +2052,22 @@ export const syncDevice = async (req, res) => {
     device.isTampered = req.body.isTampered ?? device.isTampered;
     await device.save();
 
-    await DeviceEvent.create({
+    const syncEvent = await DeviceEvent.create({
       deviceId: device._id,
       userId: req.auth.id,
       tenantId: device.tenantId,
       eventType: "sync",
       payload: req.body
     });
+
+    if (req.body.manualOverride?.active || req.body.manualOverride?.tokenId) {
+      await recordManualOverrideTokenUsage({
+        tokenId: req.body.manualOverride?.tokenId,
+        device,
+        deviceEvent: syncEvent,
+        manualOverride: req.body.manualOverride
+      });
+    }
 
     const [syncState, scheduledLockAt] = await Promise.all([getDeviceSyncState(device), getScheduledLockAt(device)]);
 

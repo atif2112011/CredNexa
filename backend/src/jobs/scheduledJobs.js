@@ -10,6 +10,10 @@ import { EmiSchedule } from "../models/EmiSchedule.js";
 import { RiskFlag } from "../models/RiskFlag.js";
 import { TenantPolicy } from "../models/TenantPolicy.js";
 import { UnlockRequest } from "../models/UnlockRequest.js";
+import {
+  expireManualOverrideTokens,
+  renewExpiringManualOverrideTokens
+} from "../services/manualOverrideToken.service.js";
 import { runAllFcmDeliveryBatches } from "./fcmDeliveryWorker.js";
 
 const createAuditLog = async (payload) => AuditLog.create(payload);
@@ -25,14 +29,16 @@ export const SCHEDULED_JOB_INTERVALS = Object.freeze({
   fcmDeliveryMs: 5 * 60 * 1000,
   tempUnlockExpiryMs: 10 * 60 * 1000,
   slaEscalationMs: 30 * 60 * 1000,
-  emiPolicyMs: 30 * 60 * 1000
+  emiPolicyMs: 30 * 60 * 1000,
+  manualOverrideTokenRenewalMs: 24 * 60 * 60 * 1000
 });
 
 export const SCHEDULED_JOB_LIMITS = Object.freeze({
   fcmDelivery: 100,
   tempUnlockExpiry: 200,
   slaEscalation: 200,
-  emiPolicy: 500
+  emiPolicy: 500,
+  manualOverrideTokenRenewal: 500
 });
 
 let scheduledJobTimers = [];
@@ -260,6 +266,22 @@ export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.temp
   }
 
   return relocked;
+};
+
+export const runManualOverrideTokenRenewalJob = async ({
+  limit = SCHEDULED_JOB_LIMITS.manualOverrideTokenRenewal
+} = {}) => {
+  await connectDatabase();
+  const expired = await expireManualOverrideTokens();
+  const renewal = await renewExpiringManualOverrideTokens({
+    limit,
+    source: "scheduled_renewal_job"
+  });
+
+  return {
+    expired,
+    ...renewal
+  };
 };
 
 export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy } = {}) => {
@@ -616,10 +638,13 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
 export const runScheduledJobs = async () => {
   const slaEscalations = await runSlaEscalationJob({ limit: SCHEDULED_JOB_LIMITS.slaEscalation });
   const relockedDevices = await runTempUnlockExpiryJob({ limit: SCHEDULED_JOB_LIMITS.tempUnlockExpiry });
+  const manualOverrideTokens = await runManualOverrideTokenRenewalJob({
+    limit: SCHEDULED_JOB_LIMITS.manualOverrideTokenRenewal
+  });
   const emiPolicy = await runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy });
   const fcmDeliveries = await runAllFcmDeliveryBatches({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery });
 
-  return { slaEscalations, relockedDevices, emiPolicy, fcmDeliveries };
+  return { slaEscalations, relockedDevices, manualOverrideTokens, emiPolicy, fcmDeliveries };
 };
 
 export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
@@ -652,6 +677,11 @@ export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
       name: "emiPolicyJob",
       intervalMs: SCHEDULED_JOB_INTERVALS.emiPolicyMs,
       run: () => runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy })
+    },
+    {
+      name: "manualOverrideTokenRenewalJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.manualOverrideTokenRenewalMs,
+      run: () => runManualOverrideTokenRenewalJob({ limit: SCHEDULED_JOB_LIMITS.manualOverrideTokenRenewal })
     }
   ];
 

@@ -11,11 +11,13 @@ import {
   approvePartnerPayoutRequest,
   approveTenantCreditPurchaseRequest,
   archiveAppBuild,
+  backfillManualOverrideTokensForDevices,
   createAppBuild,
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
   createTenant,
+  generateDeviceManualOverrideToken,
   getAdminDashboard,
   getAdminEscalationByCaseId,
   getAdminAccountById,
@@ -27,11 +29,14 @@ import {
   getDeviceAuditLogs,
   getDeviceById,
   getDeviceCommands,
+  getManualOverrideTokenById,
   listFcmDeliveryLogs,
+  listDeviceManualOverrideTokens,
   getPartnerPayoutRequestById,
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
   listDeviceCommands,
+  listManualOverrideTokens,
   listNotificationTargets,
   lockAdminDevice,
   getTenantById,
@@ -47,6 +52,8 @@ import {
   rejectPartnerPayoutRequest,
   rejectTenantCreditPurchaseRequest,
   rejectAdminEscalation,
+  renewExpiringManualOverrideTokensForDevices,
+  revokeManualOverrideToken,
   sendCustomNotification,
   tempUnlockAdminEscalation,
   tempUnlockAdminDevice,
@@ -125,7 +132,14 @@ adminRoutes.post("/escalations/:caseId/reject", rejectAdminEscalation);
 adminRoutes.get("/devices", listDevices);
 adminRoutes.get("/commands", listDeviceCommands);
 adminRoutes.get("/fcm-logs", listFcmDeliveryLogs);
+adminRoutes.get("/manual-override-tokens", listManualOverrideTokens);
+adminRoutes.post("/manual-override-tokens/backfill", backfillManualOverrideTokensForDevices);
+adminRoutes.post("/manual-override-tokens/renew-expiring", renewExpiringManualOverrideTokensForDevices);
+adminRoutes.get("/manual-override-tokens/:tokenId", getManualOverrideTokenById);
+adminRoutes.post("/manual-override-tokens/:tokenId/revoke", revokeManualOverrideToken);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
+adminRoutes.post("/devices/:deviceId/manual-override-token", generateDeviceManualOverrideToken);
+adminRoutes.get("/devices/:deviceId/manual-override-tokens", listDeviceManualOverrideTokens);
 adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);

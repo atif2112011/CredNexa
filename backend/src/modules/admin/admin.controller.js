@@ -17,6 +17,7 @@ import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { FcmDeliveryLog } from "../../models/FcmDeliveryLog.js";
+import { MANUAL_OVERRIDE_TOKEN_STATUSES, ManualOverrideToken } from "../../models/ManualOverrideToken.js";
 import {
   PARTNER_CREDIT_BALANCE_TYPES,
   PARTNER_CREDIT_LEDGER_TYPES,
@@ -38,6 +39,11 @@ import {
   validateAppBuildIdentity,
   validateBuildPayload
 } from "../../services/appUpdate.service.js";
+import {
+  backfillManualOverrideTokens,
+  generateManualOverrideTokenForDevice,
+  renewExpiringManualOverrideTokens
+} from "../../services/manualOverrideToken.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
@@ -73,6 +79,8 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
+const parseBoolean = (value) => value === true || isTruthyQueryParam(value);
+
 const NOTIFICATION_TARGET_APPS = Object.freeze({
   BORROWER_APP: "borrower_app",
   TENANT_APP: "tenant_app",
@@ -81,6 +89,38 @@ const NOTIFICATION_TARGET_APPS = Object.freeze({
 
 const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
+};
+
+const buildManualOverrideTokenResponse = (token, { includeQr = false } = {}) => {
+  const response = {
+    _id: token._id,
+    tokenId: token.tokenId,
+    deviceId: token.deviceId,
+    userId: token.userId,
+    tenantId: token.tenantId,
+    channelPartnerId: token.channelPartnerId,
+    status: token.status,
+    issuedAt: token.issuedAt,
+    expiresAt: token.expiresAt,
+    usedAt: token.usedAt,
+    downloadedAt: token.downloadedAt,
+    supersededAt: token.supersededAt,
+    revokedAt: token.revokedAt,
+    reason: token.reason,
+    generatedBy: token.generatedBy,
+    downloadedBy: token.downloadedBy,
+    usedSyncEventId: token.usedSyncEventId,
+    metadata: token.metadata,
+    createdAt: token.createdAt,
+    updatedAt: token.updatedAt
+  };
+
+  if (includeQr) {
+    response.signedToken = token.signedToken;
+    response.qrDataUrl = token.qrDataUrl;
+  }
+
+  return response;
 };
 
 const isValidPercentage = (value) => {
@@ -3680,6 +3720,253 @@ export const acknowledgeRiskFlag = async (req, res) => {
     }
 
     return sendSuccess(res, 200, "Risk flag acknowledged successfully", riskFlag);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Generate a signed manual override QR token for one device.
+ * Sample body: { "reason": "Server outage readiness" }
+ */
+export const generateDeviceManualOverrideToken = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+
+    const device = await Device.findById(req.params.deviceId);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const token = await generateManualOverrideTokenForDevice(device, {
+      generatedBy: req.auth.id,
+      reason: req.body.reason || "Emergency offline manual override",
+      source: "admin_api"
+    });
+
+    return sendSuccess(
+      res,
+      201,
+      "Manual override token generated successfully",
+      buildManualOverrideTokenResponse(token, { includeQr: true })
+    );
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List manual override QR tokens for one device.
+ */
+export const listDeviceManualOverrideTokens = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+
+    const tokens = await ManualOverrideToken.find({ deviceId: req.params.deviceId }).sort({ createdAt: -1 }).lean();
+
+    return sendSuccess(
+      res,
+      200,
+      "Device manual override tokens fetched successfully",
+      tokens.map((token) => buildManualOverrideTokenResponse(token))
+    );
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List platform manual override QR tokens.
+ * Sample query: /admin/manual-override-tokens?tenantId=665f...&status=GENERATED&page=1&limit=20
+ */
+export const listManualOverrideTokens = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.deviceId) filter.deviceId = req.query.deviceId;
+    if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+    if (req.query.channelPartnerId) filter.channelPartnerId = req.query.channelPartnerId;
+    if (req.query.status) {
+      const status = String(req.query.status).trim().toUpperCase();
+      if (!Object.values(MANUAL_OVERRIDE_TOKEN_STATUSES).includes(status)) {
+        return sendError(res, 400, "Invalid manual override token status");
+      }
+      filter.status = status;
+    }
+    if (req.query.expiresBefore) {
+      const expiresBefore = new Date(req.query.expiresBefore);
+      if (Number.isNaN(expiresBefore.getTime())) {
+        return sendError(res, 400, "expiresBefore must be a valid date");
+      }
+      filter.expiresAt = { $lte: expiresBefore };
+    }
+
+    const [items, total] = await Promise.all([
+      ManualOverrideToken.find(filter)
+        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("tenantId", "name")
+        .populate("channelPartnerId", "name")
+        .populate("generatedBy", "name email")
+        .populate("downloadedBy", "name email")
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 })
+        .lean(),
+      ManualOverrideToken.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Manual override tokens fetched successfully", {
+      items: items.map((token) => buildManualOverrideTokenResponse(token)),
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const buildManualOverrideTokenLookup = (tokenId) => {
+  const lookup = [{ tokenId }];
+  if (isValidObjectId(tokenId)) lookup.push({ _id: tokenId });
+  return { $or: lookup };
+};
+
+/**
+ * Fetch one manual override QR token and mark it as downloaded.
+ */
+export const getManualOverrideTokenById = async (req, res) => {
+  try {
+    const token = await ManualOverrideToken.findOne(buildManualOverrideTokenLookup(req.params.tokenId));
+    if (!token) {
+      return sendError(res, 404, "Manual override token not found");
+    }
+
+    if (token.status === MANUAL_OVERRIDE_TOKEN_STATUSES.GENERATED) {
+      token.status = MANUAL_OVERRIDE_TOKEN_STATUSES.DOWNLOADED;
+      token.downloadedAt = new Date();
+      token.downloadedBy = req.auth.id;
+      await token.save();
+
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.MANUAL_OVERRIDE_TOKEN_DOWNLOADED,
+        actorId: req.auth.id,
+        actorCollection: "accounts",
+        tenantId: token.tenantId,
+        channelPartnerId: token.channelPartnerId,
+        userId: token.userId,
+        deviceId: token.deviceId,
+        metadata: { tokenId: token.tokenId }
+      });
+    }
+
+    return sendSuccess(
+      res,
+      200,
+      "Manual override token fetched successfully",
+      buildManualOverrideTokenResponse(token, { includeQr: true })
+    );
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Revoke an unused manual override QR token.
+ */
+export const revokeManualOverrideToken = async (req, res) => {
+  try {
+    const token = await ManualOverrideToken.findOne(buildManualOverrideTokenLookup(req.params.tokenId));
+    if (!token) {
+      return sendError(res, 404, "Manual override token not found");
+    }
+
+    if (token.status === MANUAL_OVERRIDE_TOKEN_STATUSES.USED) {
+      return sendError(res, 409, "Used manual override tokens cannot be revoked");
+    }
+
+    if (token.status !== MANUAL_OVERRIDE_TOKEN_STATUSES.REVOKED) {
+      token.status = MANUAL_OVERRIDE_TOKEN_STATUSES.REVOKED;
+      token.revokedAt = new Date();
+      token.metadata = {
+        ...(token.metadata || {}),
+        revokedReason: req.body.reason
+      };
+      await token.save();
+
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.MANUAL_OVERRIDE_TOKEN_REVOKED,
+        actorId: req.auth.id,
+        actorCollection: "accounts",
+        tenantId: token.tenantId,
+        channelPartnerId: token.channelPartnerId,
+        userId: token.userId,
+        deviceId: token.deviceId,
+        reason: req.body.reason,
+        metadata: { tokenId: token.tokenId }
+      });
+    }
+
+    return sendSuccess(res, 200, "Manual override token revoked successfully", buildManualOverrideTokenResponse(token));
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Backfill manual override QR tokens for existing devices.
+ * Sample body: { "tenantId": "...", "deviceId": "...", "limit": 500, "dryRun": false }
+ */
+export const backfillManualOverrideTokensForDevices = async (req, res) => {
+  try {
+    if (req.body.deviceId && !isValidObjectId(req.body.deviceId)) {
+      return sendError(res, 400, "deviceId must be valid");
+    }
+    if (req.body.tenantId && !isValidObjectId(req.body.tenantId)) {
+      return sendError(res, 400, "tenantId must be valid");
+    }
+
+    const result = await backfillManualOverrideTokens({
+      deviceId: req.body.deviceId,
+      tenantId: req.body.tenantId,
+      limit: req.body.limit,
+      dryRun: parseBoolean(req.body.dryRun),
+      generatedBy: req.auth.id,
+      reason: req.body.reason || "Manual override token backfill",
+      source: "admin_backfill_api"
+    });
+
+    return sendSuccess(res, 200, "Manual override token backfill completed", result);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Renew manual override QR tokens that are missing or close to expiry.
+ */
+export const renewExpiringManualOverrideTokensForDevices = async (req, res) => {
+  try {
+    if (req.body.deviceId && !isValidObjectId(req.body.deviceId)) {
+      return sendError(res, 400, "deviceId must be valid");
+    }
+    if (req.body.tenantId && !isValidObjectId(req.body.tenantId)) {
+      return sendError(res, 400, "tenantId must be valid");
+    }
+
+    const result = await renewExpiringManualOverrideTokens({
+      deviceId: req.body.deviceId,
+      tenantId: req.body.tenantId,
+      limit: req.body.limit,
+      dryRun: parseBoolean(req.body.dryRun),
+      generatedBy: req.auth.id,
+      source: "admin_renewal_api"
+    });
+
+    return sendSuccess(res, 200, "Manual override token renewal completed", result);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
