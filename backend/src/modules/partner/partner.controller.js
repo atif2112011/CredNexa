@@ -24,6 +24,7 @@ import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
+import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
   getOrCreatePayoutConstants,
@@ -784,6 +785,26 @@ export const getPartnerTenants = async (req, res) => {
   }
 };
 
+/**
+ * Fetch one tenant owned by the partner.
+ * Sample request: /partner/tenants/665f...
+ */
+export const getPartnerTenantById = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    const tenant = await validateTenantBelongsToPartner(req.params.tenantId, channelPartner._id);
+    if (!tenant) {
+      return sendError(res, 404, "Tenant not found");
+    }
+
+    return sendSuccess(res, 200, "Partner tenant fetched successfully", tenant);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
 export const initiateTenantCreationVerification = async (req, res) => {
   try {
     const channelPartner = await ensurePartnerAccess(req, res);
@@ -1060,6 +1081,7 @@ export const createPartnerTenant = async (req, res) => {
           supportEmail: req.body.supportEmail,
           address: req.body.address,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
+          metrics: buildEmptyTenantMetrics(),
           isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
           createdBy: req.auth.id
         }
@@ -1561,6 +1583,8 @@ export const unlockPartnerEscalation = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "partner_escalation_unlocked", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Partner unlock queued successfully", {
       unlockRequest,
       device,
@@ -1654,6 +1678,8 @@ export const tempUnlockPartnerEscalation = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "partner_escalation_temp_unlocked", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Partner temporary unlock queued successfully", {
       unlockRequest,
       device,
@@ -1712,6 +1738,8 @@ export const rejectPartnerEscalation = async (req, res) => {
       caseId: unlockRequest.caseId,
       reason: req.body.note
     });
+
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "partner_escalation_rejected", caseId: unlockRequest.caseId });
 
     return sendSuccess(res, 200, "Partner escalation rejected successfully", unlockRequest);
   } catch (error) {

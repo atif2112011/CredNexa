@@ -35,8 +35,10 @@ import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
 } from "../../services/manualOverrideToken.service.js";
+import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
+import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../../utils/appNotifications.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
 const MOCK_CASHFREE_OTP = "123456";
@@ -1532,6 +1534,8 @@ export const registerDevice = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(user.tenantId, { source: "device_registration", deviceId: device._id });
+
     try {
       await generateManualOverrideTokenForDevice(device, {
         reason: "Device registration emergency QR",
@@ -1961,6 +1965,25 @@ export const createUnlockRequest = async (req, res) => {
       reason: req.body.reason,
       metadata: { reasonCategory: unlockRequest.reasonCategory, slaDeadline }
     });
+
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.TENANT,
+      tenantId: device.tenantId,
+      title: "New unlock request",
+      text: `Case ${unlockRequest.caseId} needs review.`,
+      notificationType: "UNLOCK_REQUEST_CREATED",
+      data: {
+        caseId: unlockRequest.caseId,
+        unlockRequestId: unlockRequest._id,
+        deviceId: device._id,
+        userId: req.auth.id,
+        tenantId: device.tenantId,
+        reasonCategory: unlockRequest.reasonCategory,
+        slaDeadline: unlockRequest.slaDeadline
+      }
+    });
+
+    await safeRefreshTenantMetrics(device.tenantId, { source: "unlock_request_created", caseId: unlockRequest.caseId });
 
     return sendSuccess(res, 201, "Unlock request created successfully", {
       caseId: unlockRequest.caseId,

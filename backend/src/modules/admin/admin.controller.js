@@ -44,10 +44,16 @@ import {
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
 } from "../../services/manualOverrideToken.service.js";
+import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
-import { queuePartnerAppNotification, queueTenantAppNotification } from "../../utils/appNotifications.js";
+import {
+  NOTIFICATION_AUDIENCES,
+  queuePartnerAppNotification,
+  queueTenantAppNotification,
+  safeQueueNotification
+} from "../../utils/appNotifications.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import {
   calculatePartnerCreditAmount,
@@ -959,6 +965,7 @@ export const createTenant = async (req, res) => {
           supportWhatsapp: req.body.supportWhatsapp,
           address: req.body.address,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
+          metrics: buildEmptyTenantMetrics(),
           isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
           createdBy: req.auth.id
         }
@@ -1643,6 +1650,20 @@ export const approveTenantCreditPurchaseRequest = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.TENANT,
+      tenantId: tenant._id,
+      title: "Key purchase approved",
+      text: `${creditPurchaseRequest.requestedCredits} key credits have been added to your account.`,
+      notificationType: "TENANT_CREDIT_PURCHASE_APPROVED",
+      data: {
+        creditPurchaseRequestId: creditPurchaseRequest._id,
+        requestedCredits: creditPurchaseRequest.requestedCredits,
+        purchaseAmount: creditPurchaseRequest.purchaseAmount,
+        tenantCreditLedgerId: tenantLedgerEntries[0]._id
+      }
+    });
+
     return sendSuccess(res, 200, "Tenant credit purchase approved successfully", {
       creditPurchaseRequest,
       credits: {
@@ -1714,6 +1735,20 @@ export const rejectTenantCreditPurchaseRequest = async (req, res) => {
     );
 
     await session.commitTransaction();
+
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.TENANT,
+      tenantId: creditPurchaseRequest.tenantId,
+      title: "Key purchase rejected",
+      text: "Your key purchase request was rejected.",
+      notificationType: "TENANT_CREDIT_PURCHASE_REJECTED",
+      data: {
+        creditPurchaseRequestId: creditPurchaseRequest._id,
+        requestedCredits: creditPurchaseRequest.requestedCredits,
+        purchaseAmount: creditPurchaseRequest.purchaseAmount,
+        rejectionReason: reason
+      }
+    });
 
     return sendSuccess(res, 200, "Tenant credit purchase rejected successfully", {
       creditPurchaseRequest
@@ -1999,6 +2034,20 @@ export const approvePartnerPayoutRequest = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.PARTNER,
+      channelPartnerId: lockedPartner._id,
+      title: "Payout approved",
+      text: `Your payout of Rs ${amount} has been approved.`,
+      notificationType: "PARTNER_PAYOUT_APPROVED",
+      data: {
+        payoutRequestId: payoutRequestForUpdate._id,
+        amount,
+        referenceId,
+        ledgerEntryId: ledgerEntries[0]._id
+      }
+    });
+
     return sendSuccess(res, 200, "Partner payout approved successfully", {
       payoutRequest: payoutRequestForUpdate,
       ledgerEntryId: ledgerEntries[0]._id
@@ -2106,6 +2155,20 @@ export const rejectPartnerPayoutRequest = async (req, res) => {
     );
 
     await session.commitTransaction();
+
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.PARTNER,
+      channelPartnerId: channelPartner._id,
+      title: "Payout rejected",
+      text: `Your payout request of Rs ${amount} was rejected.`,
+      notificationType: "PARTNER_PAYOUT_REJECTED",
+      data: {
+        payoutRequestId: payoutRequest._id,
+        amount,
+        rejectionReason: reason,
+        ledgerEntryId: ledgerEntries[0]._id
+      }
+    });
 
     return sendSuccess(res, 200, "Partner payout rejected successfully", {
       payoutRequest,
@@ -2677,6 +2740,8 @@ export const unlockAdminEscalation = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "admin_escalation_unlocked", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Admin unlock override queued successfully", {
       unlockRequest,
       device,
@@ -2758,6 +2823,8 @@ export const tempUnlockAdminEscalation = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "admin_escalation_temp_unlocked", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Admin temporary unlock queued successfully", {
       unlockRequest,
       device,
@@ -2810,6 +2877,8 @@ export const rejectAdminEscalation = async (req, res) => {
       caseId: unlockRequest.caseId,
       reason: req.body.reason
     });
+
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "admin_escalation_rejected", caseId: unlockRequest.caseId });
 
     return sendSuccess(res, 200, "Escalation rejected successfully", unlockRequest);
   } catch (error) {

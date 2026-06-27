@@ -40,6 +40,7 @@ Important: most intervals are currently code constants, not environment variable
 | SLA escalation | `runSlaEscalationJob` | 30 minutes | 200 |
 | EMI policy | `runEmiPolicyJob` | 30 minutes | 500 |
 | Manual override token renewal | `runManualOverrideTokenRenewalJob` | 24 hours | 500 |
+| Tenant metrics reconciliation | `runTenantMetricsReconciliationJob` | 24 hours | 500 |
 
 The scheduler prevents overlapping runs of the same timer. If a previous run is still active, the next run for that job is skipped and logged.
 
@@ -134,10 +135,12 @@ What it does:
 - Sets `partnerSlaDeadline` from tenant policy `partnerEscalationSlaHours`, defaulting to 48 hours.
 - Creates a high-severity `TENANT_SLA_BREACH` risk flag.
 - Writes an audit log.
+- Refreshes stored tenant metrics after the case moves to partner escalation.
 - Finds unlock requests with `status: "ESCALATED_PARTNER"` and `partnerSlaDeadline <= now`.
 - Escalates them to `ESCALATED_ADMIN`.
 - Creates a critical `PARTNER_SLA_BREACH` risk flag.
 - Writes an audit log.
+- Refreshes stored tenant metrics after the case moves to admin escalation.
 
 How initial tenant SLA is set:
 
@@ -278,6 +281,36 @@ node -e "require('dotenv').config(); const crypto=require('crypto'); let k=proce
 
 The output must show `modulusLength: 2048` or higher for production RS256 signing.
 
+## Tenant Metrics Reconciliation Job
+
+Function:
+
+```js
+runTenantMetricsReconciliationJob({ limit })
+```
+
+Runs every 24 hours.
+
+What it does:
+
+- Scans tenant documents.
+- Recomputes stored tenant metrics from source collections.
+- Updates `Tenant.metrics.borrowers.total` from borrower records.
+- Updates `Tenant.metrics.devices.total` from device records.
+- Updates `Tenant.metrics.cases.open` from open unlock request statuses.
+- Updates `Tenant.metrics.cases.escalatedToPartner` from cases currently waiting for partner action.
+- Sets `Tenant.metrics.updatedAt`.
+
+Why it exists:
+
+- Most write paths refresh tenant metrics immediately after successful changes.
+- This daily job repairs older tenant records and any count drift caused by failed post-commit metric refreshes.
+
+How to alter:
+
+- Timer interval: edit `SCHEDULED_JOB_INTERVALS.tenantMetricsReconciliationMs`.
+- Batch size: edit `SCHEDULED_JOB_LIMITS.tenantMetricsReconciliation`.
+
 ## Operational Notes
 
 Logs:
@@ -307,3 +340,4 @@ Recommended manual checks:
 - `riskFlags` for SLA breach records.
 - `devices` for state, policy, and `tempUnlockExpiresAt`.
 - `manualoverridetokens` for QR token status and expiry.
+- `tenants.metrics` for partner app tenant-level metric counts.

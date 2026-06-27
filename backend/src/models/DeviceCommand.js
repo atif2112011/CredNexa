@@ -24,7 +24,7 @@ const deviceCommandSchema = new mongoose.Schema(
     },
     triggeredBy: {
       type: String,
-      enum: ["auto_policy", "payment_unlock", "manual_tenant", "partner_admin", "super_admin", "temp_unlock_expiry"],
+      enum: ["auto_policy", "payment_unlock", "manual_tenant", "partner_admin", "super_admin", "temp_unlock_expiry", "system_notification"],
       required: true
     },
     triggeredByAccountId: {

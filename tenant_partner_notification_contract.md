@@ -234,6 +234,8 @@ app_notifications
 
 App should create this notification channel locally before displaying notifications.
 
+Notifications are queued by the backend and delivered by the existing FCM delivery job. In the current backend schedule, queued app notifications are processed every 5 minutes.
+
 ## Suggested Notification Types
 
 Tenant App may receive:
@@ -241,6 +243,10 @@ Tenant App may receive:
 ```text
 PAYMENT_APPROVAL_PENDING
 UNLOCK_REQUEST_PENDING
+UNLOCK_REQUEST_CREATED
+UNLOCK_REQUEST_ESCALATED_TO_PARTNER
+TENANT_CREDIT_PURCHASE_APPROVED
+TENANT_CREDIT_PURCHASE_REJECTED
 PENDING_EMIS
 OVERDUE_EMIS
 CUSTOM
@@ -250,12 +256,113 @@ Partner App may receive:
 
 ```text
 PARTNER_ESCALATION
+UNLOCK_REQUEST_ESCALATED_TO_PARTNER
 TENANT_CREATED
 PAYOUT_UPDATE
+PARTNER_PAYOUT_APPROVED
+PARTNER_PAYOUT_REJECTED
 CUSTOM
 ```
 
 App should handle unknown `notificationType` safely by opening the home screen or notification center.
+
+## System Notification Payload Examples
+
+Tenant notification when a borrower creates an unlock request:
+
+```json
+{
+  "notificationType": "UNLOCK_REQUEST_CREATED",
+  "targetApp": "tenant_app",
+  "title": "New unlock request",
+  "text": "Case CASE-20260627-1234 needs review.",
+  "caseId": "CASE-20260627-1234",
+  "unlockRequestId": "665f...",
+  "deviceId": "665f...",
+  "userId": "665f...",
+  "tenantId": "665f...",
+  "reasonCategory": "payment_made",
+  "slaDeadline": "2026-06-28T10:00:00.000Z"
+}
+```
+
+Tenant notification when a key purchase is approved:
+
+```json
+{
+  "notificationType": "TENANT_CREDIT_PURCHASE_APPROVED",
+  "targetApp": "tenant_app",
+  "title": "Key purchase approved",
+  "text": "100 key credits have been added to your account.",
+  "creditPurchaseRequestId": "665f...",
+  "requestedCredits": "100",
+  "purchaseAmount": "5000",
+  "tenantCreditLedgerId": "665f..."
+}
+```
+
+Tenant notification when a key purchase is rejected:
+
+```json
+{
+  "notificationType": "TENANT_CREDIT_PURCHASE_REJECTED",
+  "targetApp": "tenant_app",
+  "title": "Key purchase rejected",
+  "text": "Your key purchase request was rejected.",
+  "creditPurchaseRequestId": "665f...",
+  "requestedCredits": "100",
+  "purchaseAmount": "5000",
+  "rejectionReason": "Payment not found"
+}
+```
+
+Tenant and partner notification when an unlock request is escalated to partner:
+
+```json
+{
+  "notificationType": "UNLOCK_REQUEST_ESCALATED_TO_PARTNER",
+  "targetApp": "tenant_app or partner_app",
+  "title": "Unlock request escalated",
+  "text": "Case CASE-20260627-1234 needs partner review.",
+  "caseId": "CASE-20260627-1234",
+  "unlockRequestId": "665f...",
+  "tenantId": "665f...",
+  "channelPartnerId": "665f...",
+  "deviceId": "665f...",
+  "userId": "665f...",
+  "partnerSlaDeadline": "2026-06-29T10:00:00.000Z"
+}
+```
+
+Partner notification when a payout is approved:
+
+```json
+{
+  "notificationType": "PARTNER_PAYOUT_APPROVED",
+  "targetApp": "partner_app",
+  "title": "Payout approved",
+  "text": "Your payout of Rs 2500 has been approved.",
+  "payoutRequestId": "665f...",
+  "amount": "2500",
+  "referenceId": "UTR123",
+  "ledgerEntryId": "665f..."
+}
+```
+
+Partner notification when a payout is rejected:
+
+```json
+{
+  "notificationType": "PARTNER_PAYOUT_REJECTED",
+  "targetApp": "partner_app",
+  "title": "Payout rejected",
+  "text": "Your payout request of Rs 2500 was rejected.",
+  "payoutRequestId": "665f...",
+  "amount": "2500",
+  "rejectionReason": "UPI ID mismatch",
+  "ledgerEntryId": "665f..."
+}
+```
 
 ## App Handling Requirements
 

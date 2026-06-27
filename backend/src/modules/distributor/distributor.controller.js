@@ -21,8 +21,10 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
+import { NOTIFICATION_AUDIENCES, queueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
+import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import {
   getEffectiveTenantCreditPerKeyPrice,
   getOrCreatePayoutConstants,
@@ -67,6 +69,18 @@ const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*
 const DEFAULT_PENDING_EMI_ALERT_DAYS = 10;
 
 const buildSeenFilter = (seenAt) => (seenAt ? { updatedAt: { $gt: seenAt } } : {});
+
+const formatDashboardAlert = (alert = {}) => ({
+  count: Math.max(Number(alert.count || 0), 0),
+  seenAt: alert.seenAt || null
+});
+
+const formatDashboardAlerts = (dashboardAlerts = {}) => ({
+  pendingEmis: formatDashboardAlert(dashboardAlerts.pendingEmis),
+  overdueEmis: formatDashboardAlert(dashboardAlerts.overdueEmis),
+  approvePayments: formatDashboardAlert(dashboardAlerts.approvePayments),
+  unlockRequests: formatDashboardAlert(dashboardAlerts.unlockRequests)
+});
 
 const getDashboardAlertCounts = async ({ tenant, now = new Date() }) => {
   const dueUntil = new Date(now.getTime() + DEFAULT_PENDING_EMI_ALERT_DAYS * 24 * 60 * 60 * 1000);
@@ -545,6 +559,8 @@ export const registerBorrower = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(tenant._id, { source: "borrower_registration" });
+
     return sendSuccess(res, 201, "Borrower registered successfully", {
       userId: user._id,
       tenantId: user.tenantId,
@@ -669,8 +685,7 @@ export const getDashboard = async (req, res) => {
         .populate("userId", "name mobile loanId consentRecordId")
         .lean()
     ]);
-    const alerts = await getDashboardAlertCounts({ tenant, now });
-    await saveDashboardAlertCounts({ tenantId: tenant._id, counts: alerts });
+    const alerts = formatDashboardAlerts(tenant.dashboardAlerts);
 
     const recentEnrollmentRows = await Promise.all(
       recentEnrollments.map(async (enrollmentToken) => {
@@ -1059,6 +1074,92 @@ const formatScheduleInstallmentSummary = ({ schedule, installments, installmentK
   dpd: schedule.dpd
 });
 
+const getInstallmentOutstanding = (installment) => {
+  const total = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
+  return Math.max(total - Number(installment.paidAmount || 0), 0);
+};
+
+const getOverdueInstallments = (schedule, now = new Date()) =>
+  (schedule?.installments || []).filter(
+    (item) => item.status === "overdue" || (["pending", "partial"].includes(item.status) && new Date(item.dueDate) < now)
+  );
+
+const queueOverdueEmiReminderForUser = async ({ tenant, userId, accountId, note }) => {
+  if (!mongoose.isValidObjectId(userId)) {
+    return { status: "failed", reason: "INVALID_USER_ID", userId };
+  }
+
+  const user = await User.findOne({ _id: userId, tenantId: tenant._id }).lean();
+  if (!user) {
+    return { status: "failed", reason: "BORROWER_NOT_FOUND", userId };
+  }
+
+  const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  const overdueInstallments = getOverdueInstallments(schedule);
+
+  if (!overdueInstallments.length) {
+    return { status: "skippedNoOverdue", userId: user._id };
+  }
+
+  const device = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  if (!device?.fcmToken) {
+    return {
+      status: "skippedNoDevice",
+      userId: user._id,
+      deviceId: device?._id
+    };
+  }
+
+  const totalOutstandingAmount = overdueInstallments.reduce((sum, installment) => sum + getInstallmentOutstanding(installment), 0);
+  const reminderText = String(note || "").trim() || "Please clear your overdue EMI to avoid device restrictions.";
+  const commands = await queueNotification({
+    audience: NOTIFICATION_AUDIENCES.BORROWER,
+    tenantId: tenant._id,
+    deviceId: device._id,
+    title: "EMI overdue",
+    text: reminderText,
+    notificationType: "OVERDUE_EMI_REMINDER",
+    triggeredBy: "manual_tenant",
+    triggeredByAccountId: accountId,
+    data: {
+      userId: user._id,
+      deviceId: device._id,
+      overdueInstallmentCount: overdueInstallments.length,
+      totalOutstandingAmount,
+      installmentIds: overdueInstallments.map((installment) => installment._id),
+      note: reminderText
+    }
+  });
+  const command = commands[0];
+
+  await createAuditLog({
+    eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+    actorId: accountId,
+    tenantId: tenant._id,
+    channelPartnerId: tenant.channelPartnerId,
+    userId: user._id,
+    deviceId: device._id,
+    reason: reminderText,
+    metadata: {
+      commandId: command?._id,
+      commandType: "NOTIFICATION",
+      notificationType: "OVERDUE_EMI_REMINDER",
+      overdueInstallmentCount: overdueInstallments.length,
+      totalOutstandingAmount
+    }
+  });
+
+  return {
+    status: "queued",
+    queued: true,
+    commandId: command?._id,
+    userId: user._id,
+    deviceId: device._id,
+    overdueInstallmentCount: overdueInstallments.length,
+    totalOutstandingAmount
+  };
+};
+
 /**
  * List borrowers with upcoming unpaid EMI installments due in the next x days.
  * Sample query: /distributor/users/pending-emis?days=10&page=1&limit=20&search=ramesh
@@ -1154,6 +1255,123 @@ export const getBorrowersWithOverdueEmis = async (req, res) => {
     return sendSuccess(res, 200, "Borrowers with overdue EMIs fetched successfully", {
       items,
       pagination: buildPagination(page, limit, filteredSchedules.length)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue an overdue EMI reminder notification for one borrower.
+ * Sample body: { "note": "Please clear your overdue EMI to avoid device restrictions." }
+ */
+export const sendOverdueEmiReminder = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const result = await queueOverdueEmiReminderForUser({
+      tenant,
+      userId: req.params.userId,
+      accountId: req.auth.id,
+      note: req.body.note
+    });
+
+    if (result.status === "failed") {
+      return sendError(res, result.reason === "INVALID_USER_ID" ? 400 : 404, result.reason);
+    }
+
+    if (result.status === "skippedNoOverdue") {
+      return sendSuccess(res, 200, "No overdue EMI found for borrower", {
+        queued: false,
+        reason: "NO_OVERDUE_EMI",
+        userId: result.userId
+      });
+    }
+
+    if (result.status === "skippedNoDevice") {
+      return sendSuccess(res, 200, "Device is not reachable for reminder", {
+        queued: false,
+        reason: "DEVICE_NOT_REACHABLE",
+        userId: result.userId,
+        deviceId: result.deviceId
+      });
+    }
+
+    return sendSuccess(res, 201, "Overdue EMI reminder queued successfully", {
+      queued: true,
+      commandId: result.commandId,
+      userId: result.userId,
+      deviceId: result.deviceId,
+      overdueInstallmentCount: result.overdueInstallmentCount,
+      totalOutstandingAmount: result.totalOutstandingAmount
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue overdue EMI reminder notifications for multiple borrowers.
+ * Sample body: { "userIds": ["665f..."], "limit": 100, "note": "Payment reminder" }
+ */
+export const sendBulkOverdueEmiReminders = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const limit = Math.min(Math.max(Number(req.body.limit || 100), 1), 500);
+    let userIds = Array.isArray(req.body.userIds) ? req.body.userIds.filter(Boolean) : [];
+
+    if (!userIds.length) {
+      const now = new Date();
+      const schedules = await EmiSchedule.find({
+        tenantId: tenant._id,
+        installments: {
+          $elemMatch: {
+            $or: [{ status: "overdue" }, { status: "partial", dueDate: { $lt: now } }, { status: "pending", dueDate: { $lt: now } }]
+          }
+        }
+      })
+        .select("userId")
+        .limit(limit)
+        .lean();
+      userIds = schedules.map((schedule) => schedule.userId);
+    }
+
+    const limitedUserIds = [...new Set(userIds.map((userId) => userId.toString()))].slice(0, limit);
+    const results = [];
+    const counts = {
+      scanned: limitedUserIds.length,
+      queued: 0,
+      skippedNoOverdue: 0,
+      skippedNoDevice: 0,
+      failed: 0
+    };
+
+    for (const userId of limitedUserIds) {
+      try {
+        const result = await queueOverdueEmiReminderForUser({
+          tenant,
+          userId,
+          accountId: req.auth.id,
+          note: req.body.note
+        });
+        results.push(result);
+
+        if (result.status === "queued") counts.queued += 1;
+        else if (result.status === "skippedNoOverdue") counts.skippedNoOverdue += 1;
+        else if (result.status === "skippedNoDevice") counts.skippedNoDevice += 1;
+        else counts.failed += 1;
+      } catch (error) {
+        counts.failed += 1;
+        results.push({ status: "failed", userId, reason: error.message });
+      }
+    }
+
+    return sendSuccess(res, 200, "Overdue EMI reminders processed successfully", {
+      counts,
+      results
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2273,6 +2491,8 @@ export const approveTenantUnlockRequest = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(tenant._id, { source: "tenant_unlock_request_approved", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Unlock request approved successfully", {
       unlockRequest,
       command
@@ -2358,6 +2578,8 @@ export const tempUnlockTenantUnlockRequest = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeRefreshTenantMetrics(tenant._id, { source: "tenant_unlock_request_temp_unlocked", caseId: unlockRequest.caseId });
+
     return sendSuccess(res, 200, "Temporary unlock request approved successfully", {
       unlockRequest,
       command
@@ -2410,6 +2632,8 @@ export const rejectTenantUnlockRequest = async (req, res) => {
       reason: req.body.note,
       metadata: { rejectedBy: "tenant_admin" }
     });
+
+    await safeRefreshTenantMetrics(tenant._id, { source: "tenant_unlock_request_rejected", caseId: unlockRequest.caseId });
 
     return sendSuccess(res, 200, "Unlock request rejected successfully", unlockRequest);
   } catch (error) {

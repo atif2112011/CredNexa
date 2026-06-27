@@ -144,6 +144,35 @@ const tenantSchema = new mongoose.Schema(
         seenAt: Date
       }
     },
+    metrics: {
+      borrowers: {
+        total: {
+          type: Number,
+          default: 0,
+          min: 0
+        }
+      },
+      devices: {
+        total: {
+          type: Number,
+          default: 0,
+          min: 0
+        }
+      },
+      cases: {
+        open: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        escalatedToPartner: {
+          type: Number,
+          default: 0,
+          min: 0
+        }
+      },
+      updatedAt: Date
+    },
     isAdhaarVerificationEnabled: {
       type: Boolean,
       default: false

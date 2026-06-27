@@ -11,6 +11,7 @@ import {
   getPartnerDashboard,
   getPartnerEscalationByCaseId,
   getPartnerPayoutSummary,
+  getPartnerTenantById,
   getPartnerTenants,
   initiateTenantCreationVerification,
   initiatePartnerSignupOtp,
@@ -46,6 +47,7 @@ partnerRoutes.post("/payout/requests", ...requirePartnerAdmin, requestPartnerPay
 partnerRoutes.post("/tenants/initiate-verification", ...requirePartnerAdmin, initiateTenantCreationVerification);
 partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, verifyTenantCreationVerification);
 partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
+partnerRoutes.get("/tenants/:tenantId", ...requirePartnerAdmin, getPartnerTenantById);
 partnerRoutes.post("/tenants", ...requirePartnerAdmin, createPartnerTenant);
 
 partnerRoutes.get("/accounts", ...requirePartnerAdmin, listPartnerAccounts);

@@ -33,6 +33,8 @@ import {
   registerBorrower,
   rejectPayment,
   rejectTenantUnlockRequest,
+  sendBulkOverdueEmiReminders,
+  sendOverdueEmiReminder,
   sendUpcomingPaymentCommand,
   submitCreditPurchaseRequest,
   tempUnlockTenantDevice,
@@ -55,6 +57,8 @@ distributorRoutes.get("/enrollments/:token/status", getEnrollmentStatusByToken);
 distributorRoutes.get("/users", getDistributorUsers);
 distributorRoutes.get("/users/pending-emis", getBorrowersWithPendingEmis);
 distributorRoutes.get("/users/overdue-emis", getBorrowersWithOverdueEmis);
+distributorRoutes.post("/users/overdue-emis/reminders", sendBulkOverdueEmiReminders);
+distributorRoutes.post("/users/:userId/overdue-emi-reminder", sendOverdueEmiReminder);
 distributorRoutes.post("/users/:userId/enrollment/qr", regenerateEnrollmentQr);
 distributorRoutes.get("/users/:id/emi-installments", getUserEmiInstallments);
 distributorRoutes.get("/users/:id", getDistributorUserById);

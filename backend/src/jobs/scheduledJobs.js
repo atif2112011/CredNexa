@@ -14,6 +14,11 @@ import {
   expireManualOverrideTokens,
   renewExpiringManualOverrideTokens
 } from "../services/manualOverrideToken.service.js";
+import {
+  refreshAllTenantMetrics,
+  safeRefreshTenantMetrics
+} from "../services/tenantMetrics.service.js";
+import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../utils/appNotifications.js";
 import { runAllFcmDeliveryBatches } from "./fcmDeliveryWorker.js";
 
 const createAuditLog = async (payload) => AuditLog.create(payload);
@@ -30,7 +35,8 @@ export const SCHEDULED_JOB_INTERVALS = Object.freeze({
   tempUnlockExpiryMs: 10 * 60 * 1000,
   slaEscalationMs: 30 * 60 * 1000,
   emiPolicyMs: 30 * 60 * 1000,
-  manualOverrideTokenRenewalMs: 24 * 60 * 60 * 1000
+  manualOverrideTokenRenewalMs: 24 * 60 * 60 * 1000,
+  tenantMetricsReconciliationMs: 24 * 60 * 60 * 1000
 });
 
 export const SCHEDULED_JOB_LIMITS = Object.freeze({
@@ -38,7 +44,8 @@ export const SCHEDULED_JOB_LIMITS = Object.freeze({
   tempUnlockExpiry: 200,
   slaEscalation: 200,
   emiPolicy: 500,
-  manualOverrideTokenRenewal: 500
+  manualOverrideTokenRenewal: 500,
+  tenantMetricsReconciliation: 500
 });
 
 let scheduledJobTimers = [];
@@ -172,6 +179,37 @@ export const runSlaEscalationJob = async ({ limit = SCHEDULED_JOB_LIMITS.slaEsca
       metadata: { fromStatus: "PENDING_TENANT", toStatus: "ESCALATED_PARTNER" }
     });
 
+    const escalationNotificationData = {
+      caseId: unlockRequest.caseId,
+      unlockRequestId: unlockRequest._id,
+      tenantId: unlockRequest.tenantId,
+      channelPartnerId: unlockRequest.channelPartnerId,
+      deviceId: unlockRequest.deviceId,
+      userId: unlockRequest.userId,
+      partnerSlaDeadline: unlockRequest.partnerSlaDeadline
+    };
+
+    await Promise.all([
+      safeQueueNotification({
+        audience: NOTIFICATION_AUDIENCES.TENANT,
+        tenantId: unlockRequest.tenantId,
+        title: "Unlock request escalated",
+        text: `Case ${unlockRequest.caseId} has been escalated to partner review.`,
+        notificationType: "UNLOCK_REQUEST_ESCALATED_TO_PARTNER",
+        data: escalationNotificationData
+      }),
+      safeQueueNotification({
+        audience: NOTIFICATION_AUDIENCES.PARTNER,
+        channelPartnerId: unlockRequest.channelPartnerId,
+        title: "Unlock request escalated",
+        text: `Case ${unlockRequest.caseId} needs partner review.`,
+        notificationType: "UNLOCK_REQUEST_ESCALATED_TO_PARTNER",
+        data: escalationNotificationData
+      })
+    ]);
+
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "sla_escalated_to_partner", caseId: unlockRequest.caseId });
+
     escalated.push(unlockRequest.caseId);
   }
 
@@ -208,10 +246,17 @@ export const runSlaEscalationJob = async ({ limit = SCHEDULED_JOB_LIMITS.slaEsca
       metadata: { fromStatus: "ESCALATED_PARTNER", toStatus: "ESCALATED_ADMIN" }
     });
 
+    await safeRefreshTenantMetrics(unlockRequest.tenantId, { source: "sla_escalated_to_admin", caseId: unlockRequest.caseId });
+
     escalated.push(unlockRequest.caseId);
   }
 
   return escalated;
+};
+
+export const runTenantMetricsReconciliationJob = async ({ limit = SCHEDULED_JOB_LIMITS.tenantMetricsReconciliation } = {}) => {
+  await connectDatabase();
+  return refreshAllTenantMetrics({ limit });
 };
 
 export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.tempUnlockExpiry } = {}) => {
@@ -641,10 +686,11 @@ export const runScheduledJobs = async () => {
   const manualOverrideTokens = await runManualOverrideTokenRenewalJob({
     limit: SCHEDULED_JOB_LIMITS.manualOverrideTokenRenewal
   });
+  const tenantMetrics = await runTenantMetricsReconciliationJob({ limit: SCHEDULED_JOB_LIMITS.tenantMetricsReconciliation });
   const emiPolicy = await runEmiPolicyJob({ limit: SCHEDULED_JOB_LIMITS.emiPolicy });
   const fcmDeliveries = await runAllFcmDeliveryBatches({ limit: SCHEDULED_JOB_LIMITS.fcmDelivery });
 
-  return { slaEscalations, relockedDevices, manualOverrideTokens, emiPolicy, fcmDeliveries };
+  return { slaEscalations, relockedDevices, manualOverrideTokens, tenantMetrics, emiPolicy, fcmDeliveries };
 };
 
 export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
@@ -682,6 +728,11 @@ export const startScheduledJobTimers = ({ runImmediately = false } = {}) => {
       name: "manualOverrideTokenRenewalJob",
       intervalMs: SCHEDULED_JOB_INTERVALS.manualOverrideTokenRenewalMs,
       run: () => runManualOverrideTokenRenewalJob({ limit: SCHEDULED_JOB_LIMITS.manualOverrideTokenRenewal })
+    },
+    {
+      name: "tenantMetricsReconciliationJob",
+      intervalMs: SCHEDULED_JOB_INTERVALS.tenantMetricsReconciliationMs,
+      run: () => runTenantMetricsReconciliationJob({ limit: SCHEDULED_JOB_LIMITS.tenantMetricsReconciliation })
     }
   ];
 

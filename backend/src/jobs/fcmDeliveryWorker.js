@@ -67,6 +67,7 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
       },
       data: {
         ...baseData,
+        ...stringifyDataPayload(command.payload?.data),
         type: "NOTIFICATION",
         notificationType: String(command.payload?.notificationType || "CUSTOM"),
         title: String(command.payload?.title || ""),

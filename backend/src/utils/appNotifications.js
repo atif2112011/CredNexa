@@ -5,6 +5,14 @@ import {
 } from "../models/AppNotificationJob.js";
 import { AccountPushToken, ACCOUNT_PUSH_TARGET_APPS } from "../models/AccountPushToken.js";
 import { Account } from "../models/Account.js";
+import { Device } from "../models/Device.js";
+import { DeviceCommand } from "../models/DeviceCommand.js";
+
+export const NOTIFICATION_AUDIENCES = Object.freeze({
+  BORROWER: "borrower",
+  TENANT: "tenant",
+  PARTNER: "partner"
+});
 
 const normalizeNotificationText = ({ title, text }) => ({
   title: String(title || "").trim(),
@@ -55,7 +63,7 @@ const createNotificationJobs = async ({ accounts, targetApp, recipientType, tena
   );
 };
 
-export const queueTenantAppNotification = async ({ tenantId, accountId, title, text, data = {}, notificationType = "CUSTOM" }) => {
+const queueTenantNotification = async ({ tenantId, accountId, title, text, data = {}, notificationType = "CUSTOM" }) => {
   const normalized = normalizeNotificationText({ title, text });
   validateNotificationText(normalized);
 
@@ -82,7 +90,7 @@ export const queueTenantAppNotification = async ({ tenantId, accountId, title, t
   });
 };
 
-export const queuePartnerAppNotification = async ({ channelPartnerId, accountId, title, text, data = {}, notificationType = "CUSTOM" }) => {
+const queuePartnerNotification = async ({ channelPartnerId, accountId, title, text, data = {}, notificationType = "CUSTOM" }) => {
   const normalized = normalizeNotificationText({ title, text });
   validateNotificationText(normalized);
 
@@ -108,3 +116,108 @@ export const queuePartnerAppNotification = async ({ channelPartnerId, accountId,
     notificationType
   });
 };
+
+export const queueBorrowerNotification = async ({
+  tenantId,
+  deviceId,
+  userId,
+  title,
+  text,
+  data = {},
+  notificationType = "CUSTOM",
+  triggeredBy = "system_notification",
+  triggeredByAccountId
+}) => {
+  const normalized = normalizeNotificationText({ title, text });
+  validateNotificationText(normalized);
+
+  const deviceFilter = {};
+  if (deviceId) deviceFilter._id = deviceId;
+  if (userId) deviceFilter.userId = userId;
+  if (tenantId) deviceFilter.tenantId = tenantId;
+
+  if (!Object.keys(deviceFilter).length) {
+    throw new Error("Borrower notification requires tenantId, deviceId, or userId");
+  }
+
+  const devices = await Device.find(deviceFilter).select("_id tenantId").lean();
+  if (!devices.length) return [];
+
+  return DeviceCommand.create(
+    devices.map((device) => ({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "NOTIFICATION",
+      triggeredBy,
+      triggeredByAccountId,
+      payload: {
+        title: normalized.title,
+        text: normalized.text,
+        notificationType: notificationType || "CUSTOM",
+        data: data || {}
+      }
+    }))
+  );
+};
+
+export const queueNotification = async ({
+  audience,
+  tenantId,
+  channelPartnerId,
+  deviceId,
+  userId,
+  accountId,
+  title,
+  text,
+  data = {},
+  notificationType = "CUSTOM",
+  triggeredBy,
+  triggeredByAccountId
+}) => {
+  if (audience === NOTIFICATION_AUDIENCES.TENANT) {
+    return queueTenantNotification({ tenantId, accountId, title, text, data, notificationType });
+  }
+
+  if (audience === NOTIFICATION_AUDIENCES.PARTNER) {
+    return queuePartnerNotification({ channelPartnerId, accountId, title, text, data, notificationType });
+  }
+
+  if (audience === NOTIFICATION_AUDIENCES.BORROWER) {
+    return queueBorrowerNotification({
+      tenantId,
+      deviceId,
+      userId,
+      title,
+      text,
+      data,
+      notificationType,
+      triggeredBy,
+      triggeredByAccountId
+    });
+  }
+
+  throw new Error("Unsupported notification audience");
+};
+
+export const safeQueueNotification = async (payload) => {
+  try {
+    return await queueNotification(payload);
+  } catch (error) {
+    console.error("Failed to queue notification", {
+      audience: payload?.audience,
+      notificationType: payload?.notificationType,
+      tenantId: payload?.tenantId,
+      channelPartnerId: payload?.channelPartnerId,
+      deviceId: payload?.deviceId,
+      userId: payload?.userId,
+      message: error.message
+    });
+    return [];
+  }
+};
+
+export const queueTenantAppNotification = async (payload) =>
+  queueNotification({ ...payload, audience: NOTIFICATION_AUDIENCES.TENANT });
+
+export const queuePartnerAppNotification = async (payload) =>
+  queueNotification({ ...payload, audience: NOTIFICATION_AUDIENCES.PARTNER });
