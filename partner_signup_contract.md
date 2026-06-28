@@ -101,7 +101,7 @@ retail_chain_group
 independent
 ```
 
-`email` and `address` are optional. `address` uses the same object format as tenant address: `street`, `city`, `state`, and `pincode`. `password` and `confirmPassword` are required when `createAccount=true`. `confirmPassword` is validation only and is never stored.
+`email` and `address` are optional. The single `email` field is copied to both `ChannelPartner.contactEmail` and the created `partner_admin` `Account.email`. `address` uses the same object format as tenant address: `street`, `city`, `state`, and `pincode`. `password` and `confirmPassword` are required when `createAccount=true`. `confirmPassword` is validation only and is never stored.
 
 ### Success Response
 

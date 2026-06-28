@@ -215,7 +215,6 @@ Request:
   },
   "tenantAdmin": {
     "name": "Priya Sharma",
-    "email": "priya@bharatjaipur.in",
     "mobile": "9800000011",
     "temporaryPassword": "optional"
   }
@@ -228,6 +227,8 @@ Rules:
 - `name` must match the name used in OTP initiate.
 - `tenantCreationVerificationMode` must match the mode used in OTP initiate and verify.
 - `tenantCreationVerificationSessionId` must be the verified session ID.
+- `tenantAdmin.mobile` is required and becomes the tenant admin login identifier.
+- `tenantAdmin.email` is optional.
 - The verified OTP session can be used only once.
 - If the session is missing, expired, unverified, already used, or mismatched, tenant creation fails.
 
@@ -249,12 +250,14 @@ Success response:
     "tenantAdmin": {
       "accountId": "accountId",
       "name": "Priya Sharma",
-      "email": "priya@bharatjaipur.in",
+      "email": null,
       "mobile": "9800000011",
       "role": "tenant_admin"
     },
     "credentials": {
-      "email": "priya@bharatjaipur.in",
+      "identifier": "9800000011",
+      "mobile": "9800000011",
+      "email": null,
       "temporaryPassword": "generated-or-requested-password"
     }
   }
@@ -264,7 +267,7 @@ Success response:
 App behavior:
 
 ```text
-Show tenant admin credentials after success.
+Show tenant admin mobile/login identifier and temporary password after success.
 Do not show the temporary password again after leaving this screen.
 ```
 
@@ -283,7 +286,7 @@ Create Tenant API
   -> POST /partner/tenants?app=true
 
 Success Screen
-  Show tenant admin email and temporary password
+  Show tenant admin mobile/login identifier and temporary password
 ```
 
 ## Error Handling
@@ -327,7 +330,8 @@ Common reasons:
 - Tenant name mismatch
 - `supportPhone` mismatch
 - `tenantCreationVerificationMode` mismatch
-- Tenant admin email already exists
+- Tenant admin mobile already exists
+- Tenant admin email already exists, if optional email is provided
 
 ## Implementation Notes
 

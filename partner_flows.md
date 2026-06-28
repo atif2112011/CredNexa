@@ -245,7 +245,6 @@ Body:
   },
   "tenantAdmin": {
     "name": "Priya Sharma",
-    "email": "priya@bharatjaipur.in",
     "mobile": "9800000011",
     "temporaryPassword": "optional"
   }
@@ -259,6 +258,7 @@ Body:
 - `tenantCreationVerificationMode` verifies tenant creation now.
 - `isAdhaarVerificationEnabled` controls future borrower onboarding only.
 - `tenantCreationVerificationSessionId` must be verified, unexpired, unused, and must match the same `name`, `supportPhone`, and `tenantCreationVerificationMode`.
+- `tenantAdmin.mobile` is required and is the tenant admin login identifier; `tenantAdmin.email` is optional.
 
 **Backend actions:**
 1. Validates partner admin.
@@ -271,7 +271,7 @@ Body:
 8. Because `app=true`, creates the default `tenant_admin` account.
 9. Links `tenants.adminAccountId`.
 10. Consumes the tenant creation OTP session so it cannot be reused.
-11. Returns one-time tenant admin credentials in `credentials`.
+11. Returns one-time tenant admin mobile/login identifier and password in `credentials`.
 12. Writes audit logs.
 
 **API status:** Available.

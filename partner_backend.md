@@ -512,7 +512,6 @@ Use `app=true` for the partner app tenant creation flow.
   },
   "tenantAdmin": {
     "name": "Priya Sharma",
-    "email": "priya@tenant.in",
     "mobile": "9800000003",
     "temporaryPassword": "optional-password"
   }
@@ -528,6 +527,7 @@ capabilities
 supportPhone
 tenantCreationVerificationMode
 tenantCreationVerificationSessionId
+tenantAdmin.mobile
 ```
 
 For `app=true`, `tenantCreationVerificationSessionId` must be verified, unexpired, unused, owned by the logged-in partner, and must match the same `name`, `supportPhone`, and `tenantCreationVerificationMode` sent during verification.
@@ -544,13 +544,15 @@ These are managed by the backend.
 
 ### Tenant Admin Notes
 
-When `app=true`, tenant admin email is required. Backend uses this fallback order:
+When `app=true`, tenant admin mobile is required. Backend uses this fallback order:
 
 ```text
-tenantAdmin.email
-adminEmail
-supportEmail
+tenantAdmin.mobile
+adminMobile
+supportPhone
 ```
+
+Tenant admin email is optional. If sent, it must be unique.
 
 If `tenantAdmin.temporaryPassword` or root `temporaryPassword` is not sent, backend generates a temporary password and returns it once in the response.
 
@@ -613,14 +615,16 @@ If `tenantAdmin.temporaryPassword` or root `temporaryPassword` is not sent, back
     "tenantAdmin": {
       "accountId": "accountId",
       "name": "Priya Sharma",
-      "email": "priya@tenant.in",
+      "email": null,
       "mobile": "9800000003",
       "role": "tenant_admin",
       "tenantId": "tenantId",
       "channelPartnerId": "channelPartnerId"
     },
     "credentials": {
-      "email": "priya@tenant.in",
+      "identifier": "9800000003",
+      "mobile": "9800000003",
+      "email": null,
       "temporaryPassword": "CNX-generated-password"
     }
   }

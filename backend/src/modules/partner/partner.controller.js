@@ -1040,9 +1040,10 @@ export const createPartnerTenant = async (req, res) => {
       }
 
       tenantAdminInput = req.body.tenantAdmin || {};
-      const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
+      const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || "")
         .trim()
         .toLowerCase();
+      const tenantAdminMobile = normalizeMobile(tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone);
       const requestedTemporaryPassword = tenantAdminInput.password || req.body.password || tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
       const confirmTenantAdminPassword = tenantAdminInput.confirmPassword || req.body.confirmPassword;
 
@@ -1050,19 +1051,32 @@ export const createPartnerTenant = async (req, res) => {
         return sendError(res, 400, "Password and confirm password must match");
       }
 
-      if (!tenantAdminEmail) {
-        return sendError(res, 400, "Tenant admin email is required when app=true");
+      if (!tenantAdminMobile) {
+        return sendError(res, 400, "Tenant admin mobile is required when app=true");
       }
 
-      const existingAccount = await Account.findOne({ email: tenantAdminEmail }).lean();
-      if (existingAccount) {
+      if (!isValidIndianMobile(tenantAdminMobile)) {
+        return sendError(res, 400, "Valid 10 digit tenant admin mobile is required");
+      }
+
+      const duplicateAccountFilters = [{ mobile: tenantAdminMobile }];
+      if (tenantAdminEmail) {
+        duplicateAccountFilters.push({ email: tenantAdminEmail });
+      }
+
+      const existingAccount = await Account.findOne({ $or: duplicateAccountFilters }).lean();
+      if (existingAccount?.mobile === tenantAdminMobile) {
+        return sendError(res, 400, "Account with this mobile already exists");
+      }
+
+      if (tenantAdminEmail && existingAccount?.email === tenantAdminEmail) {
         return sendError(res, 400, "Account with this email already exists");
       }
 
       tenantAdminInput = {
         name: tenantAdminInput.name || req.body.adminName || `${req.body.name} Admin`,
-        email: tenantAdminEmail,
-        mobile: tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone
+        email: tenantAdminEmail || undefined,
+        mobile: tenantAdminMobile
       };
       tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
     }
@@ -1212,14 +1226,16 @@ export const createPartnerTenant = async (req, res) => {
             tenantAdmin: {
               accountId: createdTenantAdmin._id,
               name: createdTenantAdmin.name,
-              email: createdTenantAdmin.email,
+              email: createdTenantAdmin.email || null,
               mobile: createdTenantAdmin.mobile,
               role: createdTenantAdmin.role,
               tenantId: createdTenantAdmin.tenantId,
               channelPartnerId: createdTenantAdmin.channelPartnerId
             },
             credentials: {
-              email: createdTenantAdmin.email,
+              identifier: createdTenantAdmin.mobile,
+              mobile: createdTenantAdmin.mobile,
+              email: createdTenantAdmin.email || null,
               temporaryPassword: tenantAdminPassword
             }
           }
