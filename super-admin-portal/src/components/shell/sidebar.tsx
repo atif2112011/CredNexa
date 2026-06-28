@@ -15,6 +15,7 @@ import {
   Landmark,
   LogOut,
   ScrollText,
+  SlidersHorizontal,
   Smartphone,
   TerminalSquare,
   Users
@@ -28,6 +29,7 @@ const navItems = [
   { href: "/builds", label: "Builds", icon: Boxes },
   { href: "/key-requests", label: "Key Requests", icon: KeyRound },
   { href: "/payout-requests", label: "Payout Requests", icon: HandCoins },
+  { href: "/payout-constants", label: "Payout Constants", icon: SlidersHorizontal },
   { href: "/partners", label: "Partners", icon: Landmark },
   { href: "/tenants", label: "Tenants", icon: Building2 },
   { href: "/accounts", label: "Accounts", icon: Users },

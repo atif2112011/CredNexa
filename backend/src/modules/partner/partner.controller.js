@@ -1737,7 +1737,7 @@ export const rejectPartnerEscalation = async (req, res) => {
       return sendError(res, 400, "Only partner-escalated cases can be rejected by partner");
     }
 
-    unlockRequest.status = "REJECTED";
+    unlockRequest.status = "REJECTED_PARTNER";
     unlockRequest.resolutionAction = "rejected";
     unlockRequest.resolutionNote = req.body.note;
     unlockRequest.resolvedBy = req.auth.id;

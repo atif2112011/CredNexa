@@ -120,7 +120,11 @@ export const checkAppUpdate = async (req, res) => {
 
     const build = await findPublishedBuild(identity.value);
     if (!build) {
-      return sendError(res, 503, "Published app build is not configured");
+      return sendError(
+        res,
+        503,
+        `Published app build is not configured for ${identity.value.platform}/${identity.value.packageName} on ${identity.value.channel} channel`
+      );
     }
 
     if (!build.apkUrl?.startsWith("https://")) {

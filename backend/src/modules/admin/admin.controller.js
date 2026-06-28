@@ -54,7 +54,7 @@ import {
   queueTenantAppNotification,
   safeQueueNotification
 } from "../../utils/appNotifications.js";
-import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
+import { uploadCompressedQrImageToFirebase, uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import {
   calculatePartnerCreditAmount,
   getOrCreatePayoutConstants,
@@ -721,6 +721,7 @@ export const getPayoutConstants = async (req, res) => {
 export const updatePayoutConstants = async (req, res) => {
   try {
     const updates = {};
+    const currentConstants = await getOrCreatePayoutConstants();
 
     if (req.body.defaultPartnerCreditPercentage !== undefined) {
       if (!isValidPercentage(req.body.defaultPartnerCreditPercentage)) {
@@ -793,11 +794,26 @@ export const updatePayoutConstants = async (req, res) => {
       updates.adminCreditPurchaseQrImageUrl = qrImageUrl;
     }
 
+    if (req.file) {
+      const uploadedQrImage = await uploadCompressedQrImageToFirebase({
+        file: req.file,
+        folder: "payout-constants/admin-credit-purchase-qr",
+        recordId: currentConstants._id,
+        userId: req.auth.id,
+        metadata: {
+          payoutConstantsId: currentConstants._id.toString(),
+          payoutConstantsKey: currentConstants.key
+        }
+      });
+
+      updates.adminCreditPurchaseQrImageUrl = uploadedQrImage.imageUrl;
+      updates.adminCreditPurchaseQrStoragePath = uploadedQrImage.storagePath;
+    }
+
     if (!Object.keys(updates).length) {
       return sendError(res, 400, "At least one payout constant is required");
     }
 
-    const currentConstants = await getOrCreatePayoutConstants();
     const nextMin = updates.minPartnerPayoutAmount ?? Number(currentConstants.minPartnerPayoutAmount || 0);
     const nextMax = updates.maxPartnerPayoutAmount ?? Number(currentConstants.maxPartnerPayoutAmount || 0);
 
@@ -2860,7 +2876,7 @@ export const rejectAdminEscalation = async (req, res) => {
       return sendError(res, 400, "Only open escalated cases can be rejected");
     }
 
-    unlockRequest.status = "REJECTED";
+    unlockRequest.status = "REJECTED_SUPER_ADMIN";
     unlockRequest.resolutionAction = "rejected";
     unlockRequest.resolutionNote = req.body.reason;
     unlockRequest.resolvedBy = req.auth.id;

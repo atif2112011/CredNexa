@@ -38,7 +38,9 @@ const unlockRequestSchema = new mongoose.Schema(
         "RESOLVED_TENANT",
         "RESOLVED_PARTNER",
         "RESOLVED_SUPER_ADMIN",
-        "REJECTED",
+        "REJECTED_TENANT",
+        "REJECTED_PARTNER",
+        "REJECTED_SUPER_ADMIN",
         "CLOSED"
       ],
       default: "PENDING_TENANT"

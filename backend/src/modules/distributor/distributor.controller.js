@@ -2614,7 +2614,7 @@ export const rejectTenantUnlockRequest = async (req, res) => {
       return sendError(res, 400, "Only PENDING_TENANT requests can be rejected by tenant admin");
     }
 
-    unlockRequest.status = "REJECTED";
+    unlockRequest.status = "REJECTED_TENANT";
     unlockRequest.resolutionAction = "rejected";
     unlockRequest.resolutionNote = req.body.note;
     unlockRequest.resolvedBy = req.auth.id;

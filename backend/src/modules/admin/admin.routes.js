@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { parseApkUpload } from "../../middleware/parseApkUpload.js";
-import { parsePaymentProofUpload } from "../../middleware/parsePaymentProofUpload.js";
+import { parseAdminCreditPurchaseQrImageUpload, parsePaymentProofUpload } from "../../middleware/parsePaymentProofUpload.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import {
@@ -95,7 +95,7 @@ adminRoutes.patch("/channel-partners/:id", updateChannelPartner);
 adminRoutes.patch("/channel-partners/:id/status", updateChannelPartnerStatus);
 
 adminRoutes.get("/payout/constants", getPayoutConstants);
-adminRoutes.patch("/payout/constants", updatePayoutConstants);
+adminRoutes.patch("/payout/constants", parseAdminCreditPurchaseQrImageUpload, updatePayoutConstants);
 adminRoutes.get("/partner-payouts", listPartnerPayoutRequests);
 adminRoutes.get("/partner-payouts/:payoutId", getPartnerPayoutRequestById);
 adminRoutes.post("/partner-payouts/:payoutId/approve", parsePaymentProofUpload, approvePartnerPayoutRequest);

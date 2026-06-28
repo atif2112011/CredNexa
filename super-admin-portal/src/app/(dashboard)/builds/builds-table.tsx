@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Eye, Loader2, PackagePlus, Upload } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, Loader2, PackagePlus, Rocket, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -25,6 +25,8 @@ import type { Pagination, RecordItem } from "@/types/api";
 type BuildsTableProps = {
   items: RecordItem[];
   pagination: Pagination;
+  selectedChannel: string;
+  selectedStatus: string;
 };
 
 type BuildFormState = {
@@ -102,7 +104,7 @@ function buildDetailRows(build: RecordItem): [string, unknown][] {
   ];
 }
 
-export function BuildsTable({ items, pagination }: BuildsTableProps) {
+export function BuildsTable({ items, pagination, selectedChannel, selectedStatus }: BuildsTableProps) {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -114,6 +116,7 @@ export function BuildsTable({ items, pagination }: BuildsTableProps) {
   const [selectedBuild, setSelectedBuild] = useState<RecordItem | null>(null);
   const [detailError, setDetailError] = useState("");
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const [publishingBuildId, setPublishingBuildId] = useState("");
 
   function updateForm(key: keyof BuildFormState, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -199,12 +202,75 @@ export function BuildsTable({ items, pagination }: BuildsTableProps) {
   }
 
   function goToPage(page: number) {
-    router.push(`/builds?page=${page}`);
+    const params = new URLSearchParams();
+    params.set("page", String(page));
+    if (selectedChannel !== "all") params.set("channel", selectedChannel);
+    if (selectedStatus !== "all") params.set("status", selectedStatus);
+    router.push(`/builds?${params.toString()}`);
+  }
+
+  function applyFilter(key: "channel" | "status", value: string) {
+    const params = new URLSearchParams();
+    params.set("page", "1");
+
+    const nextChannel = key === "channel" ? value : selectedChannel;
+    const nextStatus = key === "status" ? value : selectedStatus;
+    if (nextChannel !== "all") params.set("channel", nextChannel);
+    if (nextStatus !== "all") params.set("status", nextStatus);
+
+    router.push(`/builds?${params.toString()}`);
+  }
+
+  async function publishBuild(buildId: string) {
+    setPublishingBuildId(buildId);
+    try {
+      const response = await fetch(`/api/admin/app-builds/${buildId}/publish`, {
+        method: "PATCH"
+      });
+      if (!response.ok) throw new Error(await getApiError(response));
+
+      toast.success("Build published successfully");
+      router.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to publish build";
+      toast.error(message);
+    } finally {
+      setPublishingBuildId("");
+    }
   }
 
   return (
     <>
-      <div className="mb-4 flex justify-end">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="buildChannelFilter">Channel</Label>
+            <select
+              id="buildChannelFilter"
+              className="h-9 min-w-40 rounded-lg border border-input bg-background px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              value={selectedChannel}
+              onChange={(event) => applyFilter("channel", event.target.value)}
+            >
+              <option value="all">All</option>
+              <option value="production">Production</option>
+              <option value="qa">QA</option>
+            </select>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="buildStatusFilter">Status</Label>
+            <select
+              id="buildStatusFilter"
+              className="h-9 min-w-40 rounded-lg border border-input bg-background px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              value={selectedStatus}
+              onChange={(event) => applyFilter("status", event.target.value)}
+            >
+              <option value="all">All</option>
+              <option value="draft">Draft</option>
+              <option value="published">Published</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+        </div>
         <Button type="button" onClick={() => setIsUploadOpen(true)}>
           <PackagePlus className="h-4 w-4" aria-hidden="true" />
           Add Build
@@ -228,6 +294,8 @@ export function BuildsTable({ items, pagination }: BuildsTableProps) {
                 {items.length ? (
                   items.map((build) => {
                     const id = String(build._id || build.id || "");
+                    const isDraft = build.status === "draft";
+                    const isPublishing = publishingBuildId === id;
                     return (
                       <tr
                         key={id}
@@ -245,10 +313,39 @@ export function BuildsTable({ items, pagination }: BuildsTableProps) {
                         <td className="px-4 py-3.5">{formatBytes(build.apkSizeBytes)}</td>
                         <td className="px-4 py-3.5">{formatDate(build.createdAt as string)}</td>
                         <td className="px-4 py-3.5">
-                          <Button type="button" variant="ghost" size="sm">
-                            <Eye className="h-4 w-4" aria-hidden="true" />
-                            View
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            {isDraft ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={Boolean(publishingBuildId)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  publishBuild(id);
+                                }}
+                              >
+                                {isPublishing ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                                ) : (
+                                  <Rocket className="h-4 w-4" aria-hidden="true" />
+                                )}
+                                {isPublishing ? "Publishing..." : "Publish"}
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openDetail(id);
+                              }}
+                            >
+                              <Eye className="h-4 w-4" aria-hidden="true" />
+                              View
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     );

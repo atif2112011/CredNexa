@@ -5,6 +5,7 @@ import { sendError } from "../utils/apiResponse.js";
 export const PAYMENT_PROOF_FIELD_NAME = "proofImage";
 export const UNLOCK_REQUEST_IMAGE_FIELD_NAME = "image";
 export const TENANT_QR_IMAGE_FIELD_NAME = "qrImage";
+export const ADMIN_CREDIT_PURCHASE_QR_IMAGE_FIELD_NAME = "adminCreditPurchaseQrImage";
 export const MAX_PAYMENT_PROOF_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -15,8 +16,8 @@ const createUpload = ({ fieldName, label }) =>
     limits: {
       fileSize: MAX_PAYMENT_PROOF_IMAGE_BYTES,
       files: 1,
-      fields: 8,
-      parts: 10
+      fields: 16,
+      parts: 18
     },
     fileFilter: (req, file, cb) => {
       if (file.fieldname !== fieldName) {
@@ -87,4 +88,9 @@ export const parseUnlockRequestImageUpload = createImageUploadParser({
 export const parseTenantQrImageUpload = createImageUploadParser({
   fieldName: TENANT_QR_IMAGE_FIELD_NAME,
   label: "Tenant QR image"
+});
+
+export const parseAdminCreditPurchaseQrImageUpload = createImageUploadParser({
+  fieldName: ADMIN_CREDIT_PURCHASE_QR_IMAGE_FIELD_NAME,
+  label: "Admin credit purchase QR image"
 });
