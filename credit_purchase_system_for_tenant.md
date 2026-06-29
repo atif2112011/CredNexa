@@ -117,6 +117,8 @@ Max size:
 5 MB
 ```
 
+The backend accepts JPEG, PNG, or WebP for `proofImage`, then stores the optimized proof asset as WebP in Firebase. Clients should always use the returned URL and metadata instead of assuming the original extension is preserved.
+
 ## Submit Credit Purchase Request
 
 API:

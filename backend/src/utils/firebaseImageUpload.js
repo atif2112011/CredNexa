@@ -1,7 +1,7 @@
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
-import sharp from "sharp";
 
 import { firebaseStorage } from "../config/firebase.js";
+import { compressByPurpose } from "./imageCompression.js";
 
 const getImageExtension = (mimeType) => {
   if (mimeType === "image/jpeg") return "jpg";
@@ -10,23 +10,42 @@ const getImageExtension = (mimeType) => {
   return "bin";
 };
 
-export const uploadImageToFirebase = async ({ file, folder, recordId, userId, tenantId, metadata = {} }) => {
+const buildStoragePath = ({ folder, tenantId, userId, fileName }) =>
+  [folder, tenantId?.toString(), userId.toString(), fileName].filter(Boolean).join("/");
+
+export const uploadImageToFirebase = async ({ file, folder, recordId, userId, tenantId, metadata = {}, purpose = null }) => {
   if (!file) return null;
 
-  const extension = getImageExtension(file.mimetype);
-  const storagePath = [
+  const uploadPayload = purpose
+    ? await compressByPurpose(file.buffer, purpose)
+    : {
+        buffer: file.buffer,
+        contentType: file.mimetype,
+        extension: getImageExtension(file.mimetype)
+      };
+
+  const storagePath = buildStoragePath({
     folder,
-    tenantId.toString(),
-    userId.toString(),
-    `${recordId.toString()}-${Date.now()}.${extension}`
-  ].join("/");
+    tenantId,
+    userId,
+    fileName: `${recordId.toString()}-${Date.now()}.${uploadPayload.extension}`
+  });
   const storageRef = ref(firebaseStorage, storagePath);
 
-  await uploadBytes(storageRef, file.buffer, {
-    contentType: file.mimetype,
+  await uploadBytes(storageRef, uploadPayload.buffer, {
+    contentType: uploadPayload.contentType,
     customMetadata: {
       userId: userId.toString(),
-      tenantId: tenantId.toString(),
+      ...(tenantId ? { tenantId: tenantId.toString() } : {}),
+      ...(purpose
+        ? {
+            compressionPurpose: purpose,
+            originalMimeType: file.mimetype,
+            originalName: file.originalname || "",
+            originalSize: String(file.size || 0),
+            compressedSize: String(uploadPayload.buffer.length)
+          }
+        : {}),
       ...metadata
     }
   });
@@ -36,59 +55,11 @@ export const uploadImageToFirebase = async ({ file, folder, recordId, userId, te
   return {
     imageUrl,
     storagePath,
-    mimeType: file.mimetype,
-    originalName: file.originalname,
-    size: file.size,
-    uploadedAt: new Date()
-  };
-};
-
-export const uploadCompressedQrImageToFirebase = async ({ file, folder, recordId, userId, metadata = {} }) => {
-  if (!file) return null;
-
-  const compressedBuffer = await sharp(file.buffer)
-    .rotate()
-    .resize({
-      width: 1200,
-      height: 1200,
-      fit: "inside",
-      withoutEnlargement: true
-    })
-    .png({
-      compressionLevel: 9,
-      adaptiveFiltering: true
-    })
-    .toBuffer();
-
-  const storagePath = [
-    folder,
-    userId.toString(),
-    `${recordId.toString()}-${Date.now()}.png`
-  ].join("/");
-  const storageRef = ref(firebaseStorage, storagePath);
-
-  await uploadBytes(storageRef, compressedBuffer, {
-    contentType: "image/png",
-    customMetadata: {
-      userId: userId.toString(),
-      originalMimeType: file.mimetype,
-      originalName: file.originalname || "",
-      originalSize: String(file.size || 0),
-      compressedSize: String(compressedBuffer.length),
-      ...metadata
-    }
-  });
-
-  const imageUrl = await getDownloadURL(storageRef);
-
-  return {
-    imageUrl,
-    storagePath,
-    mimeType: "image/png",
+    mimeType: uploadPayload.contentType,
     originalName: file.originalname,
     originalMimeType: file.mimetype,
     originalSize: file.size,
-    size: compressedBuffer.length,
+    size: uploadPayload.buffer.length,
     uploadedAt: new Date()
   };
 };

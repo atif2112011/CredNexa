@@ -188,7 +188,8 @@ const buildCreditPurchaseProof = async ({ req, requestId, tenant }) => {
       metadata: {
         tenantId: tenant._id.toString(),
         creditPurchaseRequestId: requestId.toString()
-      }
+      },
+      purpose: "screenshot"
     });
   }
 
@@ -1851,7 +1852,8 @@ export const addQrCode = async (req, res) => {
           recordId: qrCodeId,
           userId: req.auth.id,
           tenantId: tenant._id,
-          metadata: { qrCodeId: qrCodeId.toString() }
+          metadata: { qrCodeId: qrCodeId.toString() },
+          purpose: "qr-code"
         })
       : null;
 

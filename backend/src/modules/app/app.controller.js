@@ -234,7 +234,8 @@ const uploadPaymentProofImage = async ({ file, paymentId, userId, tenantId }) =>
     recordId: paymentId,
     userId,
     tenantId,
-    metadata: { paymentId: paymentId.toString() }
+    metadata: { paymentId: paymentId.toString() },
+    purpose: "screenshot"
   });
 
 const uploadUnlockRequestImage = async ({ file, caseId, userId, tenantId }) =>
@@ -244,7 +245,8 @@ const uploadUnlockRequestImage = async ({ file, caseId, userId, tenantId }) =>
     recordId: caseId,
     userId,
     tenantId,
-    metadata: { caseId: caseId.toString() }
+    metadata: { caseId: caseId.toString() },
+    purpose: "screenshot"
   });
 
 const OTP_PURPOSES = Object.freeze({

@@ -18,6 +18,8 @@ Content-Type: multipart/form-data
 | `qrImage` | file | Yes | QR image file. Must be JPEG, PNG, or WebP. Max size is 5 MB. |
 | `activate` | boolean/string | No | Send `true` to make this QR active immediately. First QR is activated automatically. |
 
+The backend accepts JPEG, PNG, or WebP uploads, then stores the optimized QR asset as PNG in Firebase.
+
 ### Example Multipart Body
 
 ```text

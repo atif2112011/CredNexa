@@ -26,12 +26,12 @@ const createAuditLog = async (payload) => AuditLog.create(payload);
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 // Intended production intervals:
-// - FCM delivery: every 5 minutes, so queued admin/policy commands do not wait on EMI scans.
+// - FCM delivery: every 1 minutes, so queued admin/policy commands do not wait on EMI scans.
 // - Temp unlock expiry: every 10 minutes, so expired temporary unlocks are relocked promptly.
 // - SLA escalation: every 30 minutes, because SLA windows are hour-based.
 // - EMI policy: every 30 minutes, because reminders and lock thresholds are day-based.
 export const SCHEDULED_JOB_INTERVALS = Object.freeze({
-  fcmDeliveryMs: 5 * 60 * 1000,
+  fcmDeliveryMs: 60 * 1000,
   tempUnlockExpiryMs: 10 * 60 * 1000,
   slaEscalationMs: 30 * 60 * 1000,
   emiPolicyMs: 30 * 60 * 1000,

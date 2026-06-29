@@ -20,4 +20,4 @@ export type PaginatedResponse<T> = {
 export type RecordItem = Record<string, unknown> & {
   _id?: string;
   id?: string;
-};
+}

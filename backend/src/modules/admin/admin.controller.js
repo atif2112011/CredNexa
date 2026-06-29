@@ -54,7 +54,7 @@ import {
   queueTenantAppNotification,
   safeQueueNotification
 } from "../../utils/appNotifications.js";
-import { uploadCompressedQrImageToFirebase, uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
+import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import {
   calculatePartnerCreditAmount,
   getOrCreatePayoutConstants,
@@ -145,7 +145,8 @@ const buildPartnerPayoutProof = async ({ req, payoutRequest, channelPartner }) =
       metadata: {
         payoutRequestId: payoutRequest._id.toString(),
         channelPartnerId: channelPartner._id.toString()
-      }
+      },
+      purpose: "screenshot"
     });
   }
 
@@ -795,7 +796,7 @@ export const updatePayoutConstants = async (req, res) => {
     }
 
     if (req.file) {
-      const uploadedQrImage = await uploadCompressedQrImageToFirebase({
+      const uploadedQrImage = await uploadImageToFirebase({
         file: req.file,
         folder: "payout-constants/admin-credit-purchase-qr",
         recordId: currentConstants._id,
@@ -803,7 +804,8 @@ export const updatePayoutConstants = async (req, res) => {
         metadata: {
           payoutConstantsId: currentConstants._id.toString(),
           payoutConstantsKey: currentConstants.key
-        }
+        },
+        purpose: "qr-code"
       });
 
       updates.adminCreditPurchaseQrImageUrl = uploadedQrImage.imageUrl;

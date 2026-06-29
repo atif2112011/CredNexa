@@ -2,7 +2,7 @@ import { DEVICE_POLICY_KEYS } from "./deviceStates.js";
 
 export const DEFAULT_TENANT_POLICY = Object.freeze({
   lockRules: {
-    dpd: 30,
+    dpd: 0,
     gracePeriodDays: 7,
     lockOnGraceExpiry: true
   },
@@ -28,7 +28,10 @@ export const DEFAULT_TENANT_POLICY = Object.freeze({
       "ROOT_DETECTED",
       "TAMPER_DETECTED",
       "DEVICE_INTEGRITY_COMPROMISED",
-      "APP_INTEGRITY_COMPROMISED"
+      "APP_INTEGRITY_COMPROMISED",
+      // "DEBUGGABLE_BUILD_DETECTED",
+      // "APP_SIGNATURE_MISMATCH",
+      // "PLAY_INTEGRITY_REQUEST_HASH_MISMATCH"
     ]
   }
 });

@@ -102,12 +102,14 @@ const getSortHref = (params: FcmLogsTableProps["searchParams"], sortBy: string) 
   return `/fcm-logs?${nextParams.toString()}`;
 };
 
-const getDetailRows = (log: RecordItem): [string, unknown, "badge" | "text"][] => [
+
+const getDetailRows = (log: any): [string, unknown, "badge" | "text"][] => [
   ["Status", log.status, "badge"],
   ["Target App", log.targetApp || "borrower_app", "badge"],
   ["Recipient Type", log.recipientType || "device", "badge"],
   ["Message Type", log.messageType, "badge"],
   ["Notification Type", log.notificationType || "-", "badge"],
+  ["Notification Title", log?.notificationJobId?.title || "-", "text"],
   ["Tenant", labelFromObject(log.tenantId), "text"],
   ["Partner", labelFromObject(log.channelPartnerId), "text"],
   ["Device", formatDevice(log.deviceId), "text"],
