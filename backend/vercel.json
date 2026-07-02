@@ -1,9 +1,35 @@
 {
-    "version": 2,
-    "routes":[
-        {
-            "src": "/(.*)",
-            "dest": "/api/index.js"
-        }
-    ]
+  "version": 2,
+  "crons": [
+    {
+      "path": "/api/system/cron/fcm-delivery?secret=$VERCEL_CRON_SECRET",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/system/cron/temp-unlock-expiry?secret=$VERCEL_CRON_SECRET",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/system/cron/sla-escalation?secret=$VERCEL_CRON_SECRET",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/system/cron/emi-policy?secret=$VERCEL_CRON_SECRET",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/system/cron/manual-override-renewal?secret=$VERCEL_CRON_SECRET",
+      "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/system/cron/tenant-metrics-reconciliation?secret=$VERCEL_CRON_SECRET",
+      "schedule": "5 0 * * *"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.js"
+    }
+  ]
 }

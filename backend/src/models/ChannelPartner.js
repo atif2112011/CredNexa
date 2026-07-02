@@ -22,10 +22,26 @@ const channelPartnerSchema = new mongoose.Schema(
       trim: true
     },
     address: {
-      street: String,
-      city: String,
-      state: String,
-      pincode: String
+      street: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      city: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      state: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      pincode: {
+        type: String,
+        required: true,
+        trim: true
+      }
     },
     adminAccountId: {
       type: mongoose.Schema.Types.ObjectId,

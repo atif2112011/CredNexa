@@ -22,6 +22,8 @@ export default async function PartnersPage() {
           { key: "type", header: "Type" },
           { key: "isActive", header: "Status", type: "boolean" },
           { key: "contactEmail", header: "Email" },
+          { key: "contactPhone", header: "Phone" },
+          { key: "address.city", header: "City" },
           { key: "createdAt", header: "Created", type: "date" }
         ]}
       />

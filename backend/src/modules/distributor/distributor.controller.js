@@ -177,6 +177,44 @@ const createAuditLog = async (payload, options = {}) => {
   return AuditLog.create([payload], { ordered: true, ...options }).then((items) => items[0]);
 };
 
+/**
+ * Enable or disable borrower Aadhaar verification for the authenticated tenant.
+ * Sample body: { "isAdhaarVerificationEnabled": true, "reason": "Tenant requires Aadhaar consent flow" }
+ */
+export const updateTenantAdhaarVerification = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (typeof req.body.isAdhaarVerificationEnabled !== "boolean") {
+      return sendError(res, 400, "isAdhaarVerificationEnabled boolean is required");
+    }
+
+    const updatedTenant = await Tenant.findByIdAndUpdate(
+      tenant._id,
+      { isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled },
+      { new: true }
+    );
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.TENANT_ADHAAR_VERIFICATION_UPDATED,
+      actorId: req.auth.id,
+      actorCollection: "accounts",
+      tenantId: updatedTenant._id,
+      channelPartnerId: updatedTenant.channelPartnerId,
+      reason: req.body.reason,
+      metadata: { isAdhaarVerificationEnabled: updatedTenant.isAdhaarVerificationEnabled }
+    });
+
+    return sendSuccess(res, 200, "Tenant Aadhaar verification setting updated successfully", {
+      tenantId: updatedTenant._id,
+      isAdhaarVerificationEnabled: updatedTenant.isAdhaarVerificationEnabled
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
 const buildCreditPurchaseProof = async ({ req, requestId, tenant }) => {
   if (req.file) {
     return uploadImageToFirebase({

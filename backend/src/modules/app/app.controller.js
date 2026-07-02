@@ -49,6 +49,14 @@ const OTP_PROVIDERS = Object.freeze({
   TWILIO_VERIFY: "twilio_verify"
 });
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const OPEN_UNLOCK_REQUEST_STATUSES = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
+const RESOLVED_UNLOCK_REQUEST_STATUSES = [
+  "RESOLVED_TENANT",
+  "RESOLVED_PARTNER",
+  "RESOLVED_SUPER_ADMIN",
+  "CLOSED"
+];
+const REJECTED_UNLOCK_REQUEST_STATUSES = ["REJECTED_TENANT", "REJECTED_PARTNER", "REJECTED_SUPER_ADMIN"];
 
 let twilioClient = null;
 let playIntegrityClient = null;
@@ -255,6 +263,21 @@ const OTP_PURPOSES = Object.freeze({
   ONBOARDING_RESUME: "onboarding_resume",
   DEVICE_LOGIN: "device_login"
 });
+
+const getPagination = (query) => {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+  return { page, limit, skip: (page - 1) * limit };
+};
+
+const buildPagination = (page, limit, total) => ({
+  page,
+  limit,
+  total,
+  pages: Math.ceil(total / limit) || 1
+});
+
+const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
 const FLOW_TYPES = Object.freeze({
   ONBOARDING_CONSENT: "ONBOARDING_CONSENT",
@@ -1684,6 +1707,33 @@ export const getAppDashboard = async (req, res) => {
 };
 
 /**
+ * Fetch the authenticated borrower's tenant name.
+ * Sample request: GET /app/utility/tenant
+ */
+export const getTenantUtility = async (req, res) => {
+  try {
+    const user = await User.findById(req.auth.id).lean();
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const tenant = await Tenant.findById(user.tenantId).lean();
+
+    if (!tenant || !tenant.isActive) {
+      return sendError(res, 404, "Active tenant not found");
+    }
+
+    return sendSuccess(res, 200, "Tenant fetched successfully", {
+      tenantId: tenant._id,
+      tenantName: tenant.name
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Fetch all installments for the authenticated borrower's loan.
  * Sample request: GET /app/installments
  */
@@ -1923,7 +1973,7 @@ export const createUnlockRequest = async (req, res) => {
     const openCase = await UnlockRequest.findOne({
       userId: req.auth.id,
       deviceId: device._id,
-      status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
+      status: { $in: OPEN_UNLOCK_REQUEST_STATUSES }
     }).lean();
 
     if (openCase) {
@@ -2010,12 +2060,69 @@ export const getActiveUnlockRequest = async (req, res) => {
   try {
     const unlockRequest = await UnlockRequest.findOne({
       userId: req.auth.id,
-      status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
+      status: { $in: OPEN_UNLOCK_REQUEST_STATUSES }
     })
       .sort({ createdAt: -1 })
       .lean();
 
     return sendSuccess(res, 200, "Active unlock request fetched successfully", unlockRequest);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * List borrower unlock requests with pagination, filters, search, and sorting.
+ * Sample request: GET /app/unlock-requests?statusGroup=pending&page=1&limit=20&search=CASE&sortBy=createdAt&sortOrder=desc
+ */
+export const listBorrowerUnlockRequests = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = { userId: req.auth.id };
+
+    if (req.query.status) {
+      filter.status = String(req.query.status).trim();
+    } else if (req.query.statusGroup) {
+      const statusGroup = String(req.query.statusGroup).trim().toLowerCase();
+      if (statusGroup === "pending" || statusGroup === "open") {
+        filter.status = { $in: OPEN_UNLOCK_REQUEST_STATUSES };
+      } else if (statusGroup === "resolved") {
+        filter.status = { $in: RESOLVED_UNLOCK_REQUEST_STATUSES };
+      } else if (statusGroup === "rejected") {
+        filter.status = { $in: REJECTED_UNLOCK_REQUEST_STATUSES };
+      }
+    }
+
+    if (req.query.search) {
+      const search = buildSearchRegex(req.query.search);
+      filter.$or = [
+        { caseId: search },
+        { reason: search },
+        { details: search },
+        { reasonCategory: search },
+        { status: search },
+        { resolutionNote: search }
+      ];
+    }
+
+    const sortField = ["createdAt", "updatedAt", "resolvedAt", "status"].includes(String(req.query.sortBy || ""))
+      ? String(req.query.sortBy)
+      : "createdAt";
+    const sortOrder = String(req.query.sortOrder || "").trim().toLowerCase() === "asc" ? 1 : -1;
+
+    const [items, total] = await Promise.all([
+      UnlockRequest.find(filter)
+        .sort({ [sortField]: sortOrder, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      UnlockRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Unlock requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

@@ -18,6 +18,8 @@ import {
   getPaymentDetail,
   getPaymentHistory,
   getPaymentQr,
+  getTenantUtility,
+  listBorrowerUnlockRequests,
   generateTestUserAccessToken,
   initiateConsentOtp,
   pingDevice,
@@ -49,6 +51,7 @@ appRoutes.post("/device/ping", verifyJwt, requireTokenType("user"), pingDevice);
 appRoutes.post("/device/sync", verifyJwt, requireTokenType("user"), syncDevice);
 appRoutes.post("/device/command/ack", verifyJwt, requireTokenType("user"), acknowledgeDeviceCommand);
 appRoutes.post("/security/event", verifyJwt, requireTokenType("user"), reportSecurityEvent);
+appRoutes.get("/utility/tenant", verifyJwt, requireTokenType("user"), getTenantUtility);
 appRoutes.get("/dashboard", verifyJwt, requireTokenType("user"), getAppDashboard);
 appRoutes.get("/installments", verifyJwt, requireTokenType("user"), getInstallments);
 appRoutes.get("/installments/:installmentId", verifyJwt, requireTokenType("user"), getInstallmentDetail);
@@ -57,4 +60,5 @@ appRoutes.post("/payment/submit", verifyJwt, requireTokenType("user"), parsePaym
 appRoutes.get("/payment/history", verifyJwt, requireTokenType("user"), getPaymentHistory);
 appRoutes.get("/payment/:paymentId", verifyJwt, requireTokenType("user"), getPaymentDetail);
 appRoutes.post("/unlock-request", verifyJwt, requireTokenType("user"), parseUnlockRequestImageUpload, createUnlockRequest);
+appRoutes.get("/unlock-requests", verifyJwt, requireTokenType("user"), listBorrowerUnlockRequests);
 appRoutes.get("/unlock-request/active", verifyJwt, requireTokenType("user"), getActiveUnlockRequest);

@@ -39,6 +39,7 @@ import {
   submitCreditPurchaseRequest,
   tempUnlockTenantDevice,
   tempUnlockTenantUnlockRequest,
+  updateTenantAdhaarVerification,
   unlockTenantDevice
 } from "./distributor.controller.js";
 
@@ -47,6 +48,7 @@ export const distributorRoutes = Router();
 distributorRoutes.use(verifyJwt);
 distributorRoutes.use(requireTokenType("account"));
 distributorRoutes.get("/dashboard", getDashboard);
+distributorRoutes.patch("/settings/adhaar-verification", updateTenantAdhaarVerification);
 distributorRoutes.get("/credits/purchase/options", getCreditPurchaseOptions);
 distributorRoutes.get("/credits/purchase/requests", listCreditPurchaseRequests);
 distributorRoutes.post("/credits/purchase/requests", parsePaymentProofUpload, submitCreditPurchaseRequest);

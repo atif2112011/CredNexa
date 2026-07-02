@@ -1,6 +1,11 @@
 # Scheduled Jobs and Cron Behavior
 
-The backend uses in-process scheduled timers, not OS-level crontab. Timers start automatically in `backend/src/server.js` after the API server connects to MongoDB and begins listening, as long as `VERCEL !== "true"`.
+The backend supports two scheduler models:
+
+- in-process timers for traditional Node deployments
+- Vercel Cron calling dedicated internal HTTP endpoints for serverless deployments
+
+Timers still start automatically in `backend/src/server.js` after the API server connects to MongoDB and begins listening, as long as `VERCEL !== "true"`.
 
 Manual one-off execution:
 
@@ -17,6 +22,14 @@ Main file:
 
 `backend/src/jobs/scheduledJobs.js`
 
+Vercel trigger config:
+
+`backend/vercel.json`
+
+Internal cron routes:
+
+`backend/src/modules/system/system.routes.js`
+
 Intervals are controlled by:
 
 ```js
@@ -31,11 +44,11 @@ SCHEDULED_JOB_LIMITS
 
 Important: most intervals are currently code constants, not environment variables. To alter them, edit `SCHEDULED_JOB_INTERVALS` and redeploy/restart the backend. Manual override token validity and renewal window are env-driven and are listed below.
 
-## Current Scheduled Timers
+## Current Scheduled Timers / Vercel Cron Mapping
 
 | Job | Function | Current Interval | Batch Limit |
 | --- | --- | ---: | ---: |
-| FCM delivery | `runAllFcmDeliveryBatches` | 5 minutes | 100 |
+| FCM delivery | `runAllFcmDeliveryBatches` | 1 minute | 100 |
 | Temp unlock expiry | `runTempUnlockExpiryJob` | 10 minutes | 200 |
 | SLA escalation | `runSlaEscalationJob` | 30 minutes | 200 |
 | EMI policy | `runEmiPolicyJob` | 30 minutes | 500 |
@@ -43,6 +56,24 @@ Important: most intervals are currently code constants, not environment variable
 | Tenant metrics reconciliation | `runTenantMetricsReconciliationJob` | 24 hours | 500 |
 
 The scheduler prevents overlapping runs of the same timer. If a previous run is still active, the next run for that job is skipped and logged.
+
+## Vercel Cron Endpoints
+
+Vercel calls these internal GET endpoints in production:
+
+- `/api/system/cron/fcm-delivery`
+- `/api/system/cron/temp-unlock-expiry`
+- `/api/system/cron/sla-escalation`
+- `/api/system/cron/emi-policy`
+- `/api/system/cron/manual-override-renewal`
+- `/api/system/cron/tenant-metrics-reconciliation`
+
+Each endpoint requires:
+
+- the Vercel cron schedule header
+- the shared secret configured as `VERCEL_CRON_SECRET`
+
+The secret is passed through the cron path in `backend/vercel.json` as a query parameter because Vercel cron jobs issue plain GET requests.
 
 ## FCM Delivery Job
 
@@ -322,7 +353,8 @@ Logs:
 Vercel:
 
 - `server.js` does not start timers when `VERCEL=true`.
-- In Vercel/serverless deployments, these jobs need an external scheduler calling `npm run jobs:scheduled` or equivalent job endpoints/scripts.
+- In Vercel deployments, scheduled work runs through the dedicated `/api/system/cron/*` endpoints configured in `backend/vercel.json`.
+- The exported functions in `backend/src/jobs/scheduledJobs.js` remain the single source of truth for job behavior; Vercel only changes how they are triggered.
 
 Safe alteration process:
 

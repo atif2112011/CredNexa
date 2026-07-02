@@ -26,7 +26,7 @@ We are not introducing a separate backend device state for this. The device will
 
 ## Required App Change
 
-When the device sync API returns the risk auto-lock flag as `true`, the app must:
+When the app infers a risk auto-lock case from the sync/device command payload, it must:
 
 - hide the temp unlock section
 - show risk-specific lock-screen messaging

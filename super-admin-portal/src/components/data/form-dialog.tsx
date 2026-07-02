@@ -35,6 +35,30 @@ type FormDialogProps = {
   payloadMode?: "default" | "account";
 };
 
+function buildPartnerOrTenantPayload(values: Record<string, string | undefined>) {
+  const payload = Object.fromEntries(
+    Object.entries(values).map(([key, value]) => {
+      const normalizedValue = String(value ?? "");
+      if (key === "capabilities") return [key, normalizedValue.split(",").map((item) => item.trim()).filter(Boolean)];
+      return [key, normalizedValue];
+    })
+  ) as Record<string, unknown>;
+
+  payload.address = {
+    street: values.addressStreet || "",
+    city: values.addressCity || "",
+    state: values.addressState || "",
+    pincode: values.addressPincode || ""
+  };
+
+  delete payload.addressStreet;
+  delete payload.addressCity;
+  delete payload.addressState;
+  delete payload.addressPincode;
+
+  return payload;
+}
+
 function prepareAccountPayload(values: Record<string, string | undefined>) {
   const payload: Record<string, unknown> = {
     name: values.name || "",
@@ -116,12 +140,16 @@ export function FormDialog({
         const field = fields.find((item) => item.name === key);
         const normalizedValue = String(value ?? "");
         if (field?.type === "number") return [key, Number(normalizedValue)];
-        if (key === "capabilities") return [key, normalizedValue.split(",").map((item) => item.trim()).filter(Boolean)];
         if (key === "isActive") return [key, value === "true"];
         return [key, normalizedValue];
       })
     );
-    const payload = payloadMode === "account" ? prepareAccountPayload(values) : normalizedPayload;
+    const payload =
+      payloadMode === "account"
+        ? prepareAccountPayload(values)
+        : fields.some((field) => field.name.startsWith("address"))
+          ? buildPartnerOrTenantPayload(values)
+          : normalizedPayload;
 
     const response = await fetch(endpoint, {
       method,
@@ -146,38 +174,40 @@ export function FormDialog({
       <DialogTrigger asChild>
         <Button variant={variant}>{triggerLabel}</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
-        <form className="flex flex-col gap-4" onSubmit={form.handleSubmit(onSubmit)}>
-          {visibleFields.map((field) => (
-            <div key={field.name} className="flex flex-col gap-2">
-              <Label htmlFor={field.name}>{field.label}</Label>
-              {field.type === "textarea" ? (
-                <Textarea id={field.name} placeholder={field.placeholder} {...form.register(field.name)} />
-              ) : field.type === "select" ? (
-                <select
-                  id={field.name}
-                  className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                  {...form.register(field.name)}
-                >
-                  <option value="">Select</option>
-                  {field.options?.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <Input id={field.name} type={field.type || "text"} placeholder={field.placeholder} {...form.register(field.name)} />
-              )}
-              {form.formState.errors[field.name] ? (
-                <p className="text-sm text-destructive">{String(form.formState.errors[field.name]?.message)}</p>
-              ) : null}
-            </div>
-          ))}
+        <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={form.handleSubmit(onSubmit)}>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {visibleFields.map((field) => (
+              <div key={field.name} className="flex flex-col gap-2">
+                <Label htmlFor={field.name}>{field.label}</Label>
+                {field.type === "textarea" ? (
+                  <Textarea id={field.name} placeholder={field.placeholder} {...form.register(field.name)} />
+                ) : field.type === "select" ? (
+                  <select
+                    id={field.name}
+                    className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    {...form.register(field.name)}
+                  >
+                    <option value="">Select</option>
+                    {field.options?.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <Input id={field.name} type={field.type || "text"} placeholder={field.placeholder} {...form.register(field.name)} />
+                )}
+                {form.formState.errors[field.name] ? (
+                  <p className="text-sm text-destructive">{String(form.formState.errors[field.name]?.message)}</p>
+                ) : null}
+              </div>
+            ))}
+          </div>
           <div className="flex justify-end border-t pt-4">
             <Button type="submit" disabled={isSubmitting}>
               <Save className="h-4 w-4" aria-hidden="true" />

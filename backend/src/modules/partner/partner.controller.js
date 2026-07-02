@@ -77,6 +77,38 @@ const isValidPassword = (password) => {
 };
 const normalizeComparableName = (name) => String(name || "").trim().replace(/\s+/g, " ").toLowerCase();
 const normalizeTenantCreationVerificationMode = (mode) => String(mode || "mobile_otp").trim().toLowerCase();
+const normalizeAddressPayload = (payload = {}) => {
+  const addressInput = payload.address && typeof payload.address === "object" && !Array.isArray(payload.address) ? payload.address : {};
+
+  return {
+    street: String(addressInput.street || payload.street || payload.address || "").trim(),
+    city: String(addressInput.city || payload.city || "").trim(),
+    state: String(addressInput.state || payload.state || "").trim(),
+    pincode: String(addressInput.pincode || payload.pincode || "").trim()
+  };
+};
+
+const getAddressValidationError = (address) => {
+  if (!address.street) return "address.street is required";
+  if (!address.city) return "address.city is required";
+  if (!address.state) return "address.state is required";
+  if (!address.pincode) return "address.pincode is required";
+  return null;
+};
+
+const normalizeTenantPocPayload = (payload = {}) => ({
+  pocName: String(payload.pocName || "").trim(),
+  pocPhone: normalizeMobile(payload.pocPhone),
+  pocDesignation: String(payload.pocDesignation || "").trim()
+});
+
+const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
+  if (!pocName) return "pocName is required";
+  if (!pocPhone) return "pocPhone is required";
+  if (!isValidIndianMobile(pocPhone)) return "pocPhone must be a valid 10 digit mobile number";
+  if (!pocDesignation) return "pocDesignation is required";
+  return null;
+};
 
 const ensurePartnerSignupUnique = async ({ mobile, email }) => {
   const [accountByMobile, partnerByMobile, accountByEmail] = await Promise.all([
@@ -225,15 +257,7 @@ export const completePartnerSignup = async (req, res) => {
 
     const email = normalizeEmail(req.body.email);
     const type = String(req.body.type || "").trim();
-    const addressInput = req.body.address && typeof req.body.address === "object" && !Array.isArray(req.body.address)
-      ? req.body.address
-      : {};
-    const address = {
-      street: String(addressInput.street || req.body.address || "").trim(),
-      city: String(addressInput.city || req.body.city || "").trim(),
-      state: String(addressInput.state || req.body.state || "").trim(),
-      pincode: String(addressInput.pincode || req.body.pincode || "").trim()
-    };
+    const address = normalizeAddressPayload(req.body);
 
     if (!hasRequiredFields({ name, mobile, type, verificationSessionId: req.body.verificationSessionId }, [
       "name",
@@ -250,6 +274,11 @@ export const completePartnerSignup = async (req, res) => {
 
     if (!CHANNEL_PARTNER_TYPES.includes(type)) {
       return sendError(res, 400, "Invalid partner type");
+    }
+
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
     }
 
     if (!isValidEmail(email)) {
@@ -988,6 +1017,18 @@ export const createPartnerTenant = async (req, res) => {
       return sendError(res, 400, "creditPurchasePerKeyPrice must be a valid non-negative rupee amount");
     }
 
+    const address = normalizeAddressPayload(req.body);
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
+    }
+
+    const poc = normalizeTenantPocPayload(req.body);
+    const pocError = getTenantPocValidationError(poc);
+    if (pocError) {
+      return sendError(res, 400, pocError);
+    }
+
     if (req.body.parentTenantId) {
       const parentTenant = await validateTenantBelongsToPartner(req.body.parentTenantId, channelPartner._id);
       if (!parentTenant) {
@@ -1093,10 +1134,11 @@ export const createPartnerTenant = async (req, res) => {
           parentTenantId: req.body.parentTenantId || null,
           supportPhone,
           supportEmail: req.body.supportEmail,
-          address: req.body.address,
+          address,
+          ...poc,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
           metrics: buildEmptyTenantMetrics(),
-          isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
+          isAdhaarVerificationEnabled: false,
           createdBy: req.auth.id
         }
       ],

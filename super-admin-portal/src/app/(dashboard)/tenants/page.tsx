@@ -21,6 +21,8 @@ export default async function TenantsPage() {
           { key: "name", header: "Name" },
           { key: "type", header: "Type" },
           { key: "channelPartnerId.name", header: "Partner" },
+          { key: "pocName", header: "POC" },
+          { key: "supportPhone", header: "Support phone" },
           { key: "capabilities", header: "Capabilities" },
           { key: "isActive", header: "Status", type: "boolean" }
         ]}

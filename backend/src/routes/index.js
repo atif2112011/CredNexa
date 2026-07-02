@@ -6,6 +6,7 @@ import { adminRoutes } from "../modules/admin/admin.routes.js";
 import { distributorRoutes } from "../modules/distributor/distributor.routes.js";
 import { appRoutes } from "../modules/app/app.routes.js";
 import { partnerRoutes } from "../modules/partner/partner.routes.js";
+import { systemRoutes } from "../modules/system/system.routes.js";
 
 export const apiRoutes = Router();
 
@@ -16,3 +17,4 @@ apiRoutes.use("/partner", partnerRoutes);
 apiRoutes.use("/distributor", distributorRoutes);
 apiRoutes.use("/tenant", distributorRoutes);
 apiRoutes.use("/app", appRoutes);
+apiRoutes.use("/system", systemRoutes);

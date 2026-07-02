@@ -86,6 +86,41 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
 const parseBoolean = (value) => value === true || isTruthyQueryParam(value);
+const normalizeMobile = (mobile) => String(mobile || "").trim();
+const isValidIndianMobile = (mobile) => /^\d{10}$/.test(normalizeMobile(mobile));
+
+const normalizeAddressPayload = (payload = {}) => {
+  const addressInput = payload.address && typeof payload.address === "object" && !Array.isArray(payload.address) ? payload.address : {};
+
+  return {
+    street: String(addressInput.street || payload.street || payload.address || "").trim(),
+    city: String(addressInput.city || payload.city || "").trim(),
+    state: String(addressInput.state || payload.state || "").trim(),
+    pincode: String(addressInput.pincode || payload.pincode || "").trim()
+  };
+};
+
+const getAddressValidationError = (address) => {
+  if (!address.street) return "address.street is required";
+  if (!address.city) return "address.city is required";
+  if (!address.state) return "address.state is required";
+  if (!address.pincode) return "address.pincode is required";
+  return null;
+};
+
+const normalizeTenantPocPayload = (payload = {}) => ({
+  pocName: String(payload.pocName || "").trim(),
+  pocPhone: normalizeMobile(payload.pocPhone),
+  pocDesignation: String(payload.pocDesignation || "").trim()
+});
+
+const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
+  if (!pocName) return "pocName is required";
+  if (!pocPhone) return "pocPhone is required";
+  if (!isValidIndianMobile(pocPhone)) return "pocPhone must be a valid 10 digit mobile number";
+  if (!pocDesignation) return "pocDesignation is required";
+  return null;
+};
 
 const NOTIFICATION_TARGET_APPS = Object.freeze({
   BORROWER_APP: "borrower_app",
@@ -562,8 +597,15 @@ export const createChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    const address = normalizeAddressPayload(req.body);
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
+    }
+
     const channelPartner = await ChannelPartner.create({
       ...req.body,
+      address,
       createdBy: req.auth.id
     });
 
@@ -624,10 +666,17 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    const address = normalizeAddressPayload(req.body);
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
+    }
+
     const allowedUpdates = ["name", "type", "contactEmail", "contactPhone", "creditPercentage", "payoutUpiId", "payoutUpiName"];
-    const updates = Object.fromEntries(
-      Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))
-    );
+    const updates = {
+      ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      address
+    };
 
     const channelPartner = await ChannelPartner.findByIdAndUpdate(req.params.id, updates, {
       new: true,
@@ -931,6 +980,18 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, "creditPurchasePerKeyPrice must be a valid non-negative rupee amount");
     }
 
+    const address = normalizeAddressPayload(req.body);
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
+    }
+
+    const poc = normalizeTenantPocPayload(req.body);
+    const pocError = getTenantPocValidationError(poc);
+    if (pocError) {
+      return sendError(res, 400, pocError);
+    }
+
     const channelPartner = await ChannelPartner.findOne({
       _id: req.body.channelPartnerId,
       isActive: true
@@ -981,10 +1042,11 @@ export const createTenant = async (req, res) => {
           supportPhone: req.body.supportPhone,
           supportEmail: req.body.supportEmail,
           supportWhatsapp: req.body.supportWhatsapp,
-          address: req.body.address,
+          address,
+          ...poc,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
           metrics: buildEmptyTenantMetrics(),
-          isAdhaarVerificationEnabled: req.body.isAdhaarVerificationEnabled === true,
+          isAdhaarVerificationEnabled: false,
           createdBy: req.auth.id
         }
       ],
@@ -1161,10 +1223,24 @@ export const updateTenant = async (req, res) => {
       req.body.creditPurchasePerKeyPrice = creditPurchasePerKeyPrice;
     }
 
-    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "address", "parentTenantId", "creditPurchasePerKeyPrice"];
-    const updates = Object.fromEntries(
-      Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))
-    );
+    const address = normalizeAddressPayload(req.body);
+    const addressError = getAddressValidationError(address);
+    if (addressError) {
+      return sendError(res, 400, addressError);
+    }
+
+    const poc = normalizeTenantPocPayload(req.body);
+    const pocError = getTenantPocValidationError(poc);
+    if (pocError) {
+      return sendError(res, 400, pocError);
+    }
+
+    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "parentTenantId", "creditPurchasePerKeyPrice"];
+    const updates = {
+      ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      address,
+      ...poc
+    };
 
     const tenant = await Tenant.findByIdAndUpdate(req.params.id, updates, {
       new: true,

@@ -22,7 +22,12 @@ export const partnerFields: FieldConfig[] = [
     ]
   },
   { name: "contactEmail", label: "Contact email", type: "email" },
-  { name: "contactPhone", label: "Contact phone" }
+  { name: "contactPhone", label: "Contact phone" },
+  { name: "creditPercentage", label: "Credit percentage", type: "number" },
+  { name: "addressStreet", label: "Address", required: true },
+  { name: "addressCity", label: "City", required: true },
+  { name: "addressState", label: "State", required: true },
+  { name: "addressPincode", label: "Pincode", required: true }
 ];
 
 export const tenantFields: FieldConfig[] = [
@@ -43,7 +48,15 @@ export const tenantFields: FieldConfig[] = [
   { name: "channelPartnerId", label: "Channel partner ID", required: true },
   { name: "supportPhone", label: "Support phone" },
   { name: "supportEmail", label: "Support email", type: "email" },
-  { name: "supportWhatsapp", label: "Support WhatsApp" }
+  { name: "supportWhatsapp", label: "Support WhatsApp" },
+  { name: "creditPurchasePerKeyPrice", label: "Per key price", type: "number" },
+  { name: "pocName", label: "POC name", required: true },
+  { name: "pocPhone", label: "POC phone number", required: true },
+  { name: "pocDesignation", label: "POC designation", required: true },
+  { name: "addressStreet", label: "Address", required: true },
+  { name: "addressCity", label: "City", required: true },
+  { name: "addressState", label: "State", required: true },
+  { name: "addressPincode", label: "Pincode", required: true }
 ];
 
 export const buildTenantFields = (partners: RecordItem[]): FieldConfig[] =>
@@ -62,7 +75,15 @@ export const tenantUpdateFields: FieldConfig[] = [
   { name: "name", label: "Name" },
   { name: "supportPhone", label: "Support phone" },
   { name: "supportEmail", label: "Support email", type: "email" },
-  { name: "supportWhatsapp", label: "Support WhatsApp" }
+  { name: "supportWhatsapp", label: "Support WhatsApp" },
+  { name: "creditPurchasePerKeyPrice", label: "Per key price", type: "number" },
+  { name: "pocName", label: "POC name", required: true },
+  { name: "pocPhone", label: "POC phone number", required: true },
+  { name: "pocDesignation", label: "POC designation", required: true },
+  { name: "addressStreet", label: "Address", required: true },
+  { name: "addressCity", label: "City", required: true },
+  { name: "addressState", label: "State", required: true },
+  { name: "addressPincode", label: "Pincode", required: true }
 ];
 
 export const accountFields: FieldConfig[] = [

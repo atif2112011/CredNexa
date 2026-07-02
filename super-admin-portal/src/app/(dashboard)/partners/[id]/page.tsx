@@ -11,6 +11,13 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
   const { id } = await params;
   const data = await getDetail(`/admin/channel-partners/${id}`);
   const partner = data.channelPartner as RecordItem;
+  const partnerFormDefaults = {
+    ...partner,
+    addressStreet: String((partner.address as RecordItem | undefined)?.street || ""),
+    addressCity: String((partner.address as RecordItem | undefined)?.city || ""),
+    addressState: String((partner.address as RecordItem | undefined)?.state || ""),
+    addressPincode: String((partner.address as RecordItem | undefined)?.pincode || "")
+  };
 
   return (
     <>
@@ -19,7 +26,7 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
         description="Partner profile, mapped tenants, and scoped admin accounts."
         actions={
           <>
-            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerFields} defaultValues={partner} />
+            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerFields} defaultValues={partnerFormDefaults} />
             <FormDialog title="Change status" triggerLabel="Activate / Deactivate" endpoint={`/api/admin/channel-partners/${id}/status`} method="PATCH" fields={statusFields} defaultValues={{ isActive: partner.isActive ? "true" : "false" }} />
           </>
         }
@@ -34,6 +41,11 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
             { label: "Active", key: "isActive", type: "boolean" },
             { label: "Email", key: "contactEmail" },
             { label: "Phone", key: "contactPhone" },
+            { label: "Credit percentage", key: "creditPercentage" },
+            { label: "Address", key: "address.street" },
+            { label: "City", key: "address.city" },
+            { label: "State", key: "address.state" },
+            { label: "Pincode", key: "address.pincode" },
             { label: "Created", key: "createdAt", type: "date" }
           ]}
         />

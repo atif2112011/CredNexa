@@ -84,10 +84,41 @@ const tenantSchema = new mongoose.Schema(
       trim: true
     },
     address: {
-      street: String,
-      city: String,
-      state: String,
-      pincode: String
+      street: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      city: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      state: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      pincode: {
+        type: String,
+        required: true,
+        trim: true
+      }
+    },
+    pocName: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    pocPhone: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    pocDesignation: {
+      type: String,
+      required: true,
+      trim: true
     },
     qrCodes: [qrCodeSchema],
     creditBalance: {

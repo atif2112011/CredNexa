@@ -22,6 +22,8 @@ export const env = {
   cookieSecure: process.env.COOKIE_SECURE === "true",
   corsOrigin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : ["http://localhost:3000"],
   vercelDeploy: process.env.VERCEL === "true",
+  // Shared secret used by Vercel cron paths, passed as a query parameter in vercel.json.
+  vercelCronSecret: process.env.VERCEL_CRON_SECRET,
   otpProvider: (process.env.OTP_PROVIDER || "mock").trim().toLowerCase(),
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
