@@ -9,9 +9,16 @@ import { isInvalidFcmTokenError } from "../utils/pushTokens.js";
 let firebaseApp;
 
 const buildServiceAccountFromEnv = () => {
-  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const projectId =
+    process.env.ADMIN_FIREBASE_PROJECT_ID ||
+    process.env.FIREBASE_ADMIN_PROJECT_ID ||
+    process.env.APP_FIREBASE_PROJECT_ID ||
+    process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.ADMIN_FIREBASE_CLIENT_EMAIL || process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = (process.env.ADMIN_FIREBASE_PRIVATE_KEY || process.env.FIREBASE_ADMIN_PRIVATE_KEY)?.replace(
+    /\\n/g,
+    "\n"
+  );
 
   if (!projectId || !clientEmail || !privateKey) {
     return null;

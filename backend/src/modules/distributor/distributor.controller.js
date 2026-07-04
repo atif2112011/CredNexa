@@ -21,7 +21,7 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
-import { NOTIFICATION_AUDIENCES, queueNotification } from "../../utils/appNotifications.js";
+import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
@@ -2143,6 +2143,25 @@ export const approvePayment = async (req, res) => {
 
     await session.commitTransaction();
 
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.BORROWER,
+      tenantId: tenant._id,
+      deviceId: payment.deviceId,
+      userId: payment.userId,
+      title: "Payment approved",
+      text: "Your payment has been approved and your device unlock is being processed.",
+      notificationType: "PAYMENT_APPROVED",
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      data: {
+        paymentId: payment._id,
+        deviceId: payment.deviceId,
+        userId: payment.userId,
+        matchedInstallments,
+        unlockCommandId: command._id
+      }
+    });
+
     return sendSuccess(res, 200, "Payment approved and unlock queued successfully", {
       paymentId: payment._id,
       unlockCommandId: command._id,
@@ -2194,6 +2213,24 @@ export const rejectPayment = async (req, res) => {
       deviceId: payment.deviceId,
       reason: req.body.reason,
       metadata: { paymentId: payment._id }
+    });
+
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.BORROWER,
+      tenantId: tenant._id,
+      deviceId: payment.deviceId,
+      userId: payment.userId,
+      title: "Payment rejected",
+      text: "Your payment was rejected. Please review the reason and submit again if needed.",
+      notificationType: "PAYMENT_REJECTED",
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      data: {
+        paymentId: payment._id,
+        deviceId: payment.deviceId,
+        userId: payment.userId,
+        rejectionReason: req.body.reason
+      }
     });
 
     return sendSuccess(res, 200, "Payment rejected successfully", payment);

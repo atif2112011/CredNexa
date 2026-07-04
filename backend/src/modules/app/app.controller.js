@@ -1912,6 +1912,22 @@ export const submitPayment = async (req, res) => {
       metadata: { paymentId: payment._id, amount }
     });
 
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.TENANT,
+      tenantId: device.tenantId,
+      title: "New payment approval request",
+      text: "A borrower payment has been submitted for review.",
+      notificationType: "PAYMENT_SUBMITTED",
+      data: {
+        paymentId: payment._id,
+        tenantId: device.tenantId,
+        userId: req.auth.id,
+        deviceId: device._id,
+        amount,
+        reference: payment.metadata?.reference || null
+      }
+    });
+
     return sendSuccess(res, 201, "Payment submitted for tenant approval", {
       paymentId: payment._id,
       status: payment.status,

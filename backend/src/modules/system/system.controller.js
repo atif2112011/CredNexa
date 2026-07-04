@@ -10,29 +10,32 @@ import {
 import { runAllFcmDeliveryBatches } from "../../jobs/fcmDeliveryWorker.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 
+const CRON_SOURCE_HEADER = "x-cron-source";
 const VERCEL_CRON_HEADER = "x-vercel-cron-schedule";
+const FIREBASE_SCHEDULER_HEADER = "x-cloudscheduler";
 
 const verifyCronRequest = (req, res) => {
-  const schedule = req.get(VERCEL_CRON_HEADER);
+  const source =
+    req.get(CRON_SOURCE_HEADER) ||
+    (req.get(FIREBASE_SCHEDULER_HEADER) ? "firebase-scheduler" : null) ||
+    req.get(VERCEL_CRON_HEADER);
 
-  // Vercel cron requests include the schedule header. Reject direct/manual traffic.
-  if (!schedule) {
-    sendError(res, 401, "Missing Vercel cron schedule header");
+  if (!source) {
+    sendError(res, 401, "Missing scheduler identification header");
     return null;
   }
 
-  // The shared secret is passed as a query parameter because Vercel cron calls are plain GET requests.
-  if (!env.vercelCronSecret) {
-    sendError(res, 500, "Vercel cron secret is not configured");
+  if (!env.cronSecret) {
+    sendError(res, 500, "Cron secret is not configured");
     return null;
   }
 
-  if (String(req.query.secret || "") !== env.vercelCronSecret) {
-    sendError(res, 403, "Invalid Vercel cron secret");
+  if (String(req.query.secret || req.get("x-cron-secret") || "") !== env.cronSecret) {
+    sendError(res, 403, "Invalid cron secret");
     return null;
   }
 
-  return schedule;
+  return source;
 };
 
 const runCronJob = async ({ req, res, jobName, jobFn }) => {
@@ -48,7 +51,7 @@ const runCronJob = async ({ req, res, jobName, jobFn }) => {
 };
 
 /**
- * Vercel-only endpoint for queued device/app notification FCM delivery.
+ * Internal scheduler/manual endpoint for queued device/app notification FCM delivery.
  * Schedule intent: every minute so borrower-facing commands are not delayed behind other cron work.
  */
 export const runFcmDeliveryCron = async (req, res) => {
@@ -65,7 +68,7 @@ export const runFcmDeliveryCron = async (req, res) => {
 };
 
 /**
- * Vercel-only endpoint for relocking devices whose temporary unlock window has expired.
+ * Internal scheduler/manual endpoint for relocking devices whose temporary unlock window has expired.
  * Schedule intent: every 10 minutes to keep temporary unlock expiry enforcement reasonably fresh.
  */
 export const runTempUnlockExpiryCron = async (req, res) => {
@@ -82,7 +85,7 @@ export const runTempUnlockExpiryCron = async (req, res) => {
 };
 
 /**
- * Vercel-only endpoint for moving unlock requests across SLA breach thresholds.
+ * Internal scheduler/manual endpoint for moving unlock requests across SLA breach thresholds.
  * Schedule intent: every 30 minutes because the SLA windows are hour-based.
  */
 export const runSlaEscalationCron = async (req, res) => {
@@ -99,7 +102,7 @@ export const runSlaEscalationCron = async (req, res) => {
 };
 
 /**
- * Vercel-only endpoint for EMI reminder, grace-period, and lock state evaluation.
+ * Internal scheduler/manual endpoint for EMI reminder, grace-period, and lock state evaluation.
  * Schedule intent: every 30 minutes because reminders and lock transitions are day-based.
  */
 export const runEmiPolicyCron = async (req, res) => {
@@ -116,7 +119,7 @@ export const runEmiPolicyCron = async (req, res) => {
 };
 
 /**
- * Vercel-only endpoint for expiring and renewing manual override tokens in batches.
+ * Internal scheduler/manual endpoint for expiring and renewing manual override tokens in batches.
  * Schedule intent: once per day because token validity is measured in days, not minutes.
  */
 export const runManualOverrideRenewalCron = async (req, res) => {
@@ -134,7 +137,7 @@ export const runManualOverrideRenewalCron = async (req, res) => {
 };
 
 /**
- * Vercel-only endpoint for repairing stored tenant metrics from source collections.
+ * Internal scheduler/manual endpoint for repairing stored tenant metrics from source collections.
  * Schedule intent: once per day because this is a reconciliation/repair pass, not a hot-path update.
  */
 export const runTenantMetricsReconciliationCron = async (req, res) => {
