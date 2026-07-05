@@ -97,7 +97,7 @@ const getAddressValidationError = (address) => {
 };
 
 const normalizeTenantPocPayload = (payload = {}) => ({
-  pocName: String(payload.pocName || "").trim(),
+  pocName: String(payload.pocName || payload.pocname ||"").trim(),
   pocPhone: normalizeMobile(payload.pocPhone),
   pocDesignation: String(payload.pocDesignation || "").trim()
 });
