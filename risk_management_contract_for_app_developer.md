@@ -4,7 +4,7 @@ This document is the app-developer work contract for the EMI Shield Risk Managem
 
 It explains what the borrower Android app must implement, what screens are required, what backend APIs are used, what commands must be handled, and how each risk flow should behave.
 
-Backend owns final risk decisions. The app collects signals, requests Play Integrity tokens, sends evidence, receives backend decisions/commands, and shows the correct user/admin screens.
+Backend owns final risk decisions. The app collects signals, requests Play Integrity tokens, sends evidence, receives onboarding decisions, and performs risk actions only from backend commands.
 
 ## Golden Rules
 
@@ -19,7 +19,7 @@ Backend owns final risk decisions. The app collects signals, requests Play Integ
 
 ## Required Backend APIs
 
-### 1. Create Integrity Challenge
+### 1. Create Onboarding Integrity Challenge
 
 ```http
 POST /api/app/integrity/challenge
@@ -52,12 +52,12 @@ Response:
 
 App work:
 
-- call this before any Play Integrity token request
+- use this endpoint only for onboarding/consent/pre-registration style checks
 - pass backend `requestHash` into Google Play Integrity SDK
 - do not generate your own request hash
 - do not reuse old challenges
 
-### 2. Verify Integrity Token
+### 2. Verify Onboarding Integrity Token
 
 ```http
 POST /api/app/integrity/verify
@@ -143,7 +143,127 @@ App work:
 - always continue to process `/device/sync`
 - do not decide lock state only from `riskFlagIds`
 
-### 3. Device Sync
+Only this onboarding endpoint is decision-driven.
+
+### 3. Create Risk Integrity Challenge
+
+```http
+POST /api/app/integrity/risk/challenge
+Authorization: Bearer <userAccessToken>
+```
+
+Use this endpoint for ongoing risk management checks:
+
+- app startup
+- app foreground
+- boot completed
+- local app-side periodic/background scheduler
+- after settings remediation
+- after app update
+- after `RUN_INTEGRITY_CHECK`
+
+Request:
+
+```json
+{
+  "action": "APP_STARTUP",
+  "deviceContext": {
+    "imei": "device-imei",
+    "appVersion": "1.0.0",
+    "versionCode": 100
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "status": "challenge_created",
+  "challengeId": "challengeId",
+  "requestHash": "requestHash",
+  "expiresAt": "2026-07-05T10:00:00.000Z",
+  "action": "APP_STARTUP"
+}
+```
+
+App work:
+
+- call this before risk Play Integrity token requests
+- pass backend `requestHash` into Google Play Integrity SDK
+- do not use onboarding challenge for scheduled/background checks
+- do not use `ONBOARDING_PRE_REGISTRATION` action here
+
+### 4. Verify Risk Integrity Token
+
+```http
+POST /api/app/integrity/risk/verify
+Authorization: Bearer <userAccessToken>
+```
+
+Request:
+
+```json
+{
+  "challengeId": "challengeId",
+  "integrityToken": "googlePlayIntegrityToken",
+  "action": "APP_STARTUP",
+  "localSignals": {
+    "usbDebuggingEnabled": false,
+    "developerOptionsEnabled": false,
+    "unknownSourcesEnabled": false,
+    "installFromUnknownSourcesEnabled": false,
+    "adbEnabled": false,
+    "isRooted": false,
+    "isTampered": false,
+    "debuggable": false,
+    "rootIndicators": [],
+    "hookingIndicators": []
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [
+    {
+      "commandType": "LOCK",
+      "commandId": "commandId",
+      "riskFlagId": "riskFlagId",
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
+    }
+  ],
+  "syncRecommended": true
+}
+```
+
+Expired challenge response:
+
+```json
+{
+  "status": "retry_required",
+  "reasonCode": "CHALLENGE_EXPIRED",
+  "syncRecommended": false,
+  "commandsQueued": []
+}
+```
+
+App work:
+
+- do not lock/unlock/wipe from this response
+- do not show onboarding decision UI from this response
+- if `syncRecommended = true`, call `/api/app/device/sync`
+- perform actions only from commands returned by sync/FCM
+
+### 5. Device Sync
 
 ```http
 POST /api/app/device/sync
@@ -245,9 +365,9 @@ State behavior:
 - clear cached local risk-lock flag only after successful `UNLOCK` or `TEMP_UNLOCK` command processing
 - do not clear the server risk flag locally
 
-### 2. Integrity Retry Screen
+### 2. Onboarding Integrity Retry Screen
 
-Show when `/integrity/verify` returns:
+Show during onboarding when `/integrity/verify` returns:
 
 ```text
 decision = retry
@@ -267,9 +387,9 @@ Screen behavior:
 - do not show compromised-device language
 - do not cache risk-lock flag
 
-### 3. Manual Review / Contact Admin Screen
+### 3. Onboarding Manual Review / Contact Admin Screen
 
-Show when `/integrity/verify` returns:
+Show during onboarding when `/integrity/verify` returns:
 
 ```text
 decision = manual_review
@@ -401,7 +521,7 @@ Use the action sent by the backend command when present.
 
 ## Required Local Signals
 
-Send best-effort local signals in every `/integrity/verify` call:
+Send best-effort local signals in every onboarding `/integrity/verify` and risk `/integrity/risk/verify` call:
 
 ```json
 {
@@ -430,7 +550,7 @@ Rules:
 
 ## Risk Types The App May See
 
-The app generally does not need to interpret every risk type. It should follow backend decisions and commands.
+The app generally does not need to interpret every risk type. For onboarding it follows backend decisions. For risk management it follows backend commands from sync/FCM.
 
 For UI text and support logging, the app may display simplified categories:
 
@@ -487,10 +607,10 @@ App rule: do not hard-code this list for enforcement. The app should only enforc
 ## Flow 1: Normal Clean Device
 
 1. App starts.
-2. App calls `/integrity/challenge`.
+2. App calls `/integrity/risk/challenge`.
 3. App requests Play Integrity token.
-4. App calls `/integrity/verify`.
-5. Backend returns `decision = allow`.
+4. App calls `/integrity/risk/verify`.
+5. Backend returns `status = recorded` and `syncRecommended = true`.
 6. App calls `/device/sync`.
 7. No risk lock command is present.
 8. App continues normal borrower flow.
@@ -502,12 +622,13 @@ Expected app UI:
 
 ## Flow 2: Observe-Mode Risk Found
 
-1. App calls challenge/verify.
+1. App calls risk challenge/verify.
 2. Backend records `IntegrityCheck` and `RiskFlag`.
-3. Backend returns `decision = allow`, `integrityStatus = observed_failure`.
-4. `autoLocks = []`.
-5. App continues normal flow.
-6. App may log telemetry for support, but should not show risk-lock screen.
+3. Backend returns `status = recorded`, `riskFlagIds`, and `syncRecommended = true`.
+4. App calls `/device/sync`.
+5. No risk lock command is present.
+6. App continues normal flow.
+7. App may log telemetry for support, but should not show risk-lock screen.
 
 Expected app UI:
 
@@ -515,14 +636,15 @@ Expected app UI:
 
 ## Flow 3: Enforce-Mode Risk Auto-Lock
 
-1. App calls challenge/verify.
+1. App calls risk challenge/verify.
 2. Backend records risk.
 3. Backend queues `LOCK` with `payload.source = risk_auto_lock`.
-4. App calls `/device/sync`.
-5. App sees pending `LOCK` risk command.
-6. App applies lock.
-7. App caches risk-lock UI flag.
-8. App shows:
+4. Risk verify returns `syncRecommended = true`, not a lock decision.
+5. App calls `/device/sync`.
+6. App sees pending `LOCK` risk command.
+7. App applies lock.
+8. App caches risk-lock UI flag.
+9. App shows:
 
 ```text
 Risk Flag Detected! Contact Admin
@@ -544,16 +666,16 @@ Closure:
 1. Admin presses `Recheck` in risk detail.
 2. Backend queues `RUN_INTEGRITY_CHECK`.
 3. App receives command in sync.
-4. App calls `/integrity/challenge` with action from payload, usually `ADMIN_RECHECK`.
+4. App calls `/integrity/risk/challenge` with action from payload, usually `ADMIN_RECHECK`.
 5. App calls Play Integrity SDK.
-6. App calls `/integrity/verify`.
+6. App calls `/integrity/risk/verify`.
 7. App acknowledges command.
 
 Expected app UI:
 
 - show "Checking device security" progress if user-visible
 - if clean, return to normal eligible state
-- if failed, follow backend decision/commands
+- if failed, sync and follow backend commands
 
 Backend auto-resolution:
 
@@ -652,9 +774,11 @@ Please turn off the highlighted security setting and run verification again.
 
 - challenge API is called before Play Integrity SDK token request
 - backend `requestHash` is passed to Play Integrity SDK
-- verify API includes `challengeId`, `integrityToken`, `action`, and `localSignals`
-- app handles `allow`, `retry`, `manual_review`, and `block`
-- app keeps processing `/device/sync` after verify
+- onboarding verify API includes `challengeId`, `integrityToken`, `action`, and `localSignals`
+- onboarding flow handles `allow`, `retry`, `manual_review`, and `block`
+- risk verify API uses `/integrity/risk/verify`
+- risk verify response is not used to lock, unlock, wipe, or block UI
+- app calls `/device/sync` after risk verify when `syncRecommended = true`
 - app supports all new security command types
 - risk auto-lock is inferred only from `LOCK` plus `payload.source = risk_auto_lock`
 - risk-lock screen uses exact approved primary copy

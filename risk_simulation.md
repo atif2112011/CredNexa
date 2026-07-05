@@ -6,7 +6,7 @@ Purpose:
 
 - verify what the backend receives
 - verify what `IntegrityCheck`, `RiskFlag`, `DeviceCommand`, and audit data are created
-- verify what the app receives from `/integrity/verify` and `/device/sync`
+- verify what the app receives from `/integrity/risk/verify` and `/device/sync`
 - verify what the app should do
 - verify how the admin closes the risk
 
@@ -36,14 +36,22 @@ In enforce mode, critical eligible risks can queue `LOCK` with:
 }
 ```
 
-Required borrower app flow:
+Required borrower app risk flow:
+
+1. App-owned scheduler/startup/foreground/admin command decides a risk check is due.
+2. Call `POST /api/app/integrity/risk/challenge`.
+3. Use returned `requestHash` with Google Play Integrity SDK.
+4. Call `POST /api/app/integrity/risk/verify`.
+5. Do not lock/unlock/wipe from the risk verify response.
+6. If `syncRecommended = true`, call `POST /api/app/device/sync`.
+7. Process `pendingCommands`.
+
+Onboarding-only flow:
 
 1. Call `POST /api/app/integrity/challenge`.
 2. Use returned `requestHash` with Google Play Integrity SDK.
 3. Call `POST /api/app/integrity/verify`.
-4. Process verify response.
-5. Continue normal `POST /api/app/device/sync`.
-6. Process `pendingCommands`.
+4. Process onboarding `decision` response.
 
 App must infer risk auto-lock only from:
 
@@ -56,7 +64,7 @@ There is no separate `risk_flag_auto` sync field.
 
 ## Common Backend Records
 
-For every `/api/app/integrity/verify` call that reaches provider verification or local-signal evaluation, the backend should create an `IntegrityCheck`.
+For every `/api/app/integrity/risk/verify` call that reaches provider verification or local-signal evaluation, the backend should create an `IntegrityCheck`.
 
 Exception: if the backend challenge itself is already expired before verification starts, the backend updates the challenge and returns retry without creating an `IntegrityCheck`.
 
@@ -103,48 +111,52 @@ Important fields to inspect:
 
 If the same active risk repeats for the same device/user, backend should update the existing active risk flag rather than creating duplicate active rows.
 
-## Verify Response Shape
+## Risk Verify Response Shape
 
-Successful observe-mode verification with a detected risk can still return:
+Risk verify responses must not include app-action fields like `decision` or `nextStep`.
+
+Clean or failed risk verification returns a record-only response:
 
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "DEVICE_INTEGRITY_FAILED",
-  "observedDecision": "block",
+  "status": "recorded",
   "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
-Enforce-mode critical failure can return a failed/block response and may include:
+Enforce-mode critical risk can queue commands, but the app still acts only after sync:
 
 ```json
 {
-  "decision": "block",
-  "integrityStatus": "failed",
-  "reasonCode": "DEVICE_INTEGRITY_FAILED",
+  "status": "recorded",
   "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": [
+  "resolvedRiskIds": [],
+  "commandsQueued": [
     {
-      "riskFlagId": "riskFlagId",
-      "queued": true,
+      "commandType": "LOCK",
       "commandId": "commandId",
-      "deviceState": "LOCKED",
-      "policyKey": "EMI_LOCKED"
+      "riskFlagId": "riskFlagId",
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
     }
-  ]
+  ],
+  "syncRecommended": true
 }
 ```
+
+QA rule: any `decision` field below is a backend `IntegrityCheck` record field or onboarding-only field, never an ongoing-risk API instruction. In the risk flow, app actions must come from `/device/sync` commands.
 
 ## Scenario 1: Clean Integrity Pass
 
 ### Backend Receives
 
-`/integrity/verify` receives a valid token where:
+`/integrity/risk/verify` receives a valid token where:
 
 - request hash matches challenge
 - token timestamp is valid
@@ -195,10 +207,12 @@ If the device has no active risks, backend may set:
 
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "passed",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": [],
-  "autoLocks": []
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -242,40 +256,24 @@ summary.requestHash != challenge.requestHash
 
 ### App Receives
 
-Observe mode:
-
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "REQUEST_HASH_MISMATCH",
-  "observedDecision": "block",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
-Enforce mode:
-
-```json
-{
-  "decision": "block",
-  "integrityStatus": "failed",
-  "reasonCode": "REQUEST_HASH_MISMATCH",
-  "riskFlagIds": ["riskFlagId"],
-  "autoLocks": [
-    {
-      "queued": false,
-      "reason": "RISK_RULE_NOT_MATCHED"
-    }
-  ]
-}
-```
+No risk auto-lock command is expected by default for this type unless tenant policy explicitly adds it.
 
 ### App Does
 
-- in observe mode: continue but log telemetry
-- in enforce mode: stop sensitive flow and ask user to retry
+- do not block or lock from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
+- continue existing app flow unless sync returns a command that says otherwise
 - request a fresh challenge before retrying
 
 ### Closure
@@ -319,27 +317,14 @@ summary.packageName != PLAY_INTEGRITY_PACKAGE_NAME
 
 ### App Receives
 
-Observe mode allows but records:
-
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "PACKAGE_NAME_MISMATCH",
-  "observedDecision": "block",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
-}
-```
-
-Enforce mode blocks:
-
-```json
-{
-  "decision": "block",
-  "integrityStatus": "failed",
-  "reasonCode": "PACKAGE_NAME_MISMATCH",
-  "riskFlagIds": ["riskFlagId"]
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -347,7 +332,9 @@ Auto-lock should normally not queue unless this exact type is added to tenant `r
 
 ### App Does
 
-- stop sensitive flow in enforce mode
+- do not block or lock from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
+- follow only backend commands returned by sync
 - show support/update/reinstall path
 - do not execute wipe
 
@@ -397,21 +384,23 @@ Expired challenge returns retry:
 
 ```json
 {
-  "decision": "retry",
-  "integrityStatus": "temporary_failure",
+  "status": "retry_required",
   "reasonCode": "CHALLENGE_EXPIRED",
-  "retryAfterSeconds": 0
+  "syncRecommended": false,
+  "commandsQueued": []
 }
 ```
 
-Invalid token timestamp in observe mode can be recorded but allowed:
+Invalid token timestamp after provider verification is recorded:
 
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "TOKEN_TIMESTAMP_INVALID",
-  "observedDecision": "retry"
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -459,24 +448,14 @@ This is when backend cannot verify token with Google due to provider/network/API
 
 ### App Receives
 
-Observe mode:
-
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "PLAY_INTEGRITY_VERIFICATION_UNAVAILABLE"
-}
-```
-
-Enforce mode:
-
-```json
-{
-  "decision": "retry",
-  "integrityStatus": "temporary_failure",
-  "reasonCode": "PLAY_INTEGRITY_VERIFICATION_UNAVAILABLE",
-  "retryAfterSeconds": 30
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -524,27 +503,14 @@ This means Google app verdict does not match trusted Play-recognized app expecta
 
 ### App Receives
 
-Observe mode:
-
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "APP_INTEGRITY_UNRECOGNIZED",
-  "observedDecision": "manual_review",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
-}
-```
-
-Enforce mode:
-
-```json
-{
-  "decision": "manual_review",
-  "integrityStatus": "failed",
-  "reasonCode": "APP_INTEGRITY_UNRECOGNIZED",
-  "riskFlagIds": ["riskFlagId"]
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -552,7 +518,9 @@ Auto-lock can happen only if tenant policy includes `APP_INTEGRITY_COMPROMISED`.
 
 ### App Does
 
-- stop sensitive flow in enforce mode
+- do not block or lock from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
+- follow only backend commands returned by sync
 - show update/reinstall/support path
 - process `INSTALL_UPDATE` if admin queues it
 
@@ -606,35 +574,23 @@ Device:
 
 ### App Receives
 
-Observe mode:
-
 ```json
 {
-  "decision": "allow",
-  "integrityStatus": "observed_failure",
-  "reasonCode": "DEVICE_INTEGRITY_FAILED",
-  "observedDecision": "block",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
-}
-```
-
-Enforce mode:
-
-```json
-{
-  "decision": "block",
-  "integrityStatus": "failed",
-  "reasonCode": "DEVICE_INTEGRITY_FAILED",
-  "riskFlagIds": ["riskFlagId"],
-  "autoLocks": [
+  "resolvedRiskIds": [],
+  "commandsQueued": [
     {
-      "queued": true,
+      "commandType": "LOCK",
       "commandId": "commandId",
-      "deviceState": "LOCKED",
-      "policyKey": "EMI_LOCKED"
+      "riskFlagId": "riskFlagId",
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
     }
-  ]
+  ],
+  "syncRecommended": true
 }
 ```
 
@@ -677,7 +633,7 @@ Admin options:
 
 ### Backend Receives
 
-`/integrity/verify` body includes:
+`/integrity/risk/verify` body includes:
 
 ```json
 {
@@ -712,24 +668,32 @@ Device:
 
 ### App Receives
 
-If Play Integrity result itself was otherwise clean, current final decision may be:
-
 ```json
 {
-  "decision": "block",
-  "integrityStatus": "failed",
-  "reasonCode": "HIGH_RISK_LOCAL_SIGNAL",
-  "riskFlagIds": ["riskFlagId"]
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [
+    {
+      "commandType": "LOCK",
+      "commandId": "commandId",
+      "riskFlagId": "riskFlagId",
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
+    }
+  ],
+  "syncRecommended": true
 }
 ```
-
-Observe mode can convert this to allow with observed failure.
 
 In enforce mode, auto-lock can queue if tenant policy includes `ROOT_DETECTED`.
 
 ### App Does
 
-- in enforce mode: stop sensitive flow
+- do not stop sensitive flow directly from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
 - if sync has risk auto-lock command: apply lock and show risk contact-admin screen
 - do not offer borrower temp unlock during cached risk lock
 
@@ -771,14 +735,34 @@ Device:
 
 ### App Receives
 
-Same handling as root:
+Same risk API response shape as root:
 
-- observe mode: allow with observed failure
-- enforce mode: block and possibly auto-lock if tenant policy includes `TAMPER_DETECTED`
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [
+    {
+      "commandType": "LOCK",
+      "commandId": "commandId",
+      "riskFlagId": "riskFlagId",
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
+    }
+  ],
+  "syncRecommended": true
+}
+```
+
+Auto-lock queues only if tenant policy includes `TAMPER_DETECTED`.
 
 ### App Does
 
-- stop sensitive flow in enforce mode
+- do not stop sensitive flow directly from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
 - process risk auto-lock from `pendingCommands`
 
 ### Closure
@@ -816,17 +800,25 @@ Same as root:
 
 ### App Receives
 
-In enforce mode:
+With enforce policy enabled, risk verify still returns record-only data:
 
-- `decision = block`
-- `reasonCode = HIGH_RISK_LOCAL_SIGNAL`
-- `riskFlagIds` includes app tamper risk
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
+}
+```
 
 Auto-lock only if tenant policy includes `APP_TAMPER_DETECTED`.
 
 ### App Does
 
-- stop sensitive flow
+- do not stop sensitive flow directly from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
 - show support/reinstall/update path
 - process `INSTALL_UPDATE` if admin queues it
 
@@ -870,20 +862,19 @@ Usually no auto-lock:
 
 ```json
 {
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": [
-    {
-      "queued": false,
-      "reason": "RISK_RULE_NOT_MATCHED"
-    }
-  ]
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
 ### App Does
 
-- continue in observe mode
-- in enforce mode, stop sensitive flow if backend returns block
+- do not block or lock from the risk verify response
+- call `/device/sync` because `syncRecommended = true`
 - wait for `INSTALL_UPDATE` if admin queues it
 
 ### Closure
@@ -940,9 +931,12 @@ Usually:
 
 ```json
 {
-  "decision": "allow",
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["riskFlagId"],
-  "autoLocks": []
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
 }
 ```
 
@@ -988,7 +982,18 @@ No wipe. No auto-lock.
 
 ### App Receives
 
-Allow/warning style response. No auto-lock expected.
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
+}
+```
+
+No auto-lock expected.
 
 ### App Does
 
@@ -1040,7 +1045,18 @@ or:
 
 ### App Receives
 
-Allow/warning style response. No auto-lock expected.
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": ["riskFlagId"],
+  "resolvedRiskIds": [],
+  "commandsQueued": [],
+  "syncRecommended": true
+}
+```
+
+No auto-lock expected.
 
 ### App Does
 
@@ -1101,18 +1117,21 @@ Device:
 
 ```json
 {
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
   "riskFlagIds": ["deviceRiskId", "usbRiskId"],
-  "autoLocks": [
+  "resolvedRiskIds": [],
+  "commandsQueued": [
     {
+      "commandType": "LOCK",
+      "commandId": "commandId",
       "riskFlagId": "deviceRiskId",
-      "queued": true
-    },
-    {
-      "riskFlagId": "usbRiskId",
-      "queued": false,
-      "reason": "RISK_RULE_NOT_MATCHED"
+      "source": "risk_auto_lock",
+      "policyKey": "EMI_LOCKED",
+      "policyVersion": 7
     }
-  ]
+  ],
+  "syncRecommended": true
 }
 ```
 
@@ -1259,9 +1278,9 @@ From `/device/sync`:
 
 ### App Does
 
-1. immediately call `/integrity/challenge` with `action = ADMIN_RECHECK`
+1. immediately call `/integrity/risk/challenge` with `action = ADMIN_RECHECK`
 2. request Play Integrity token
-3. call `/integrity/verify`
+3. call `/integrity/risk/verify`
 4. acknowledge the command after processing
 
 ### Closure
@@ -1579,7 +1598,16 @@ Audit:
 
 ### App Receives
 
-Normal clean verify response.
+```json
+{
+  "status": "recorded",
+  "integrityCheckId": "integrityCheckId",
+  "riskFlagIds": [],
+  "resolvedRiskIds": ["riskFlagId"],
+  "commandsQueued": [],
+  "syncRecommended": true
+}
+```
 
 No special risk-clear command is required.
 

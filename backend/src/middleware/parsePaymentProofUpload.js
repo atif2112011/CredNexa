@@ -1,5 +1,6 @@
 import multer from "multer";
 
+import { runMultipartParser } from "./multipartFirebaseAdapter.js";
 import { sendError } from "../utils/apiResponse.js";
 
 export const PAYMENT_PROOF_FIELD_NAME = "proofImage";
@@ -60,17 +61,23 @@ const createImageUploadParser = ({ fieldName, label }) => {
       return next();
     }
 
-    return upload(req, res, (error) => {
-      if (error) {
-        const message = error.code === "LIMIT_FILE_SIZE" ? `${label} must be 5 MB or smaller` : error.message;
-        return sendError(res, 400, message || `Invalid ${label.toLowerCase()} upload`);
-      }
+    return runMultipartParser({
+      req,
+      res,
+      upload,
+      next,
+      onAfterParse: ({ error, req: parsedReq, next: parsedNext }) => {
+        if (error) {
+          const message = error.code === "LIMIT_FILE_SIZE" ? `${label} must be 5 MB or smaller` : error.message;
+          return sendError(res, 400, message || `Invalid ${label.toLowerCase()} upload`);
+        }
 
-      if (req.file && !isValidImageSignature(req.file.buffer, req.file.mimetype)) {
-        return sendError(res, 400, `${label} content does not match its MIME type`);
-      }
+        if (parsedReq.file && !isValidImageSignature(parsedReq.file.buffer, parsedReq.file.mimetype)) {
+          return sendError(res, 400, `${label} content does not match its MIME type`);
+        }
 
-      return next();
+        return parsedNext();
+      }
     });
   };
 };

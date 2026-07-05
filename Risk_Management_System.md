@@ -10,7 +10,8 @@ The Risk Management System moves enforcement-grade security decisions from app-r
 
 The backend now:
 
-- verifies Google Play Integrity tokens through `/api/app/integrity/verify`
+- verifies onboarding Play Integrity tokens through `/api/app/integrity/verify`
+- verifies ongoing risk-check Play Integrity tokens through `/api/app/integrity/risk/verify`
 - stores each verification attempt as an `IntegrityCheck`
 - maps failed verdicts and local evidence into `RiskFlag` records
 - deduplicates and escalates active risk flags
@@ -77,7 +78,8 @@ Behavior:
 
 - failed Play Integrity results are stored
 - `RiskFlag` records are created or escalated
-- `/api/app/integrity/verify` returns the real backend decision
+- onboarding `/api/app/integrity/verify` returns the real backend decision
+- risk `/api/app/integrity/risk/verify` records risk state and returns no app enforcement decision
 - critical configured risks can queue a `LOCK` command
 - auto-lock uses the existing device lock pipeline
 - wipe is still admin-only
@@ -93,7 +95,7 @@ In simple terms:
 | Mode | Backend records risk | App allowed to continue | Can auto-lock |
 | --- | --- | --- | --- |
 | `observe` | Yes | Yes | No |
-| `enforce` | Yes | Depends on decision | Yes, when tenant policy allows |
+| `enforce` | Yes | Onboarding only; risk API stays command-driven | Yes, when tenant policy allows |
 
 This is why the rollout question matters. Enforce mode can lock real borrower devices if a critical risk is verified and policy allows auto-lock.
 
@@ -123,8 +125,16 @@ Because `DEVICE_INTEGRITY_MODE` is an environment-level backend setting, tenant-
 
 ### 1. Challenge
 
+Onboarding challenge:
+
 ```http
 POST /api/app/integrity/challenge
+```
+
+Risk-management challenge:
+
+```http
+POST /api/app/integrity/risk/challenge
 ```
 
 The backend creates a challenge and returns:
@@ -137,9 +147,21 @@ The app requests the Google Play Integrity token using the backend-provided `req
 
 ### 2. Verify
 
+Onboarding verify:
+
 ```http
 POST /api/app/integrity/verify
 ```
+
+This endpoint is decision-based because onboarding needs immediate app flow control.
+
+Risk-management verify:
+
+```http
+POST /api/app/integrity/risk/verify
+```
+
+This endpoint is record-only and command-driven. It must not be used by the app to lock, unlock, wipe, or block UI directly. After a risk verify response with `syncRecommended = true`, the app must call `/api/app/device/sync` and act only on pending commands.
 
 The backend:
 
@@ -154,6 +176,8 @@ The backend:
 9. stores `IntegrityCheck`
 10. creates or updates `RiskFlag`
 11. optionally queues auto-lock in enforce mode
+
+Risk verify returns fields such as `status`, `integrityCheckId`, `riskFlagIds`, `resolvedRiskIds`, `commandsQueued`, and `syncRecommended`. It does not return onboarding-style `decision` or `nextStep`.
 
 ### 3. Risk Creation
 

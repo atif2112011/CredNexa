@@ -9,6 +9,7 @@ import {
   checkAppUpdate,
   createUnlockRequest,
   createIntegrityChallenge,
+  createRiskIntegrityChallenge,
   getActiveUnlockRequest,
   getAppDashboard,
   getConsentTerms,
@@ -28,6 +29,7 @@ import {
   submitPayment,
   syncDevice,
   verifyIntegrity,
+  verifyRiskIntegrity,
   verifyConsentOtp,
   registerDevice
 } from "./app.controller.js";
@@ -43,6 +45,8 @@ appRoutes.post("/consent/initiate", initiateConsentOtp);
 appRoutes.post("/consent/verify-otp", verifyConsentOtp);
 appRoutes.post("/integrity/challenge", verifyJwt, requireTokenType("user"), createIntegrityChallenge);
 appRoutes.post("/integrity/verify", verifyJwt, requireTokenType("user"), verifyIntegrity);
+appRoutes.post("/integrity/risk/challenge", verifyJwt, requireTokenType("user"), createRiskIntegrityChallenge);
+appRoutes.post("/integrity/risk/verify", verifyJwt, requireTokenType("user"), verifyRiskIntegrity);
 appRoutes.post("/consent/accept", verifyJwt, requireTokenType("user"), acceptConsent);
 
 appRoutes.post("/device/register", verifyJwt, requireTokenType("user"), registerDevice);

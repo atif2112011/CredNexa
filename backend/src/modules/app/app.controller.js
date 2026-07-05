@@ -580,6 +580,18 @@ const sendIntegrityDecision = (res, statusCode, success, message, data) => {
   });
 };
 
+const RISK_INTEGRITY_ACTIONS = new Set([
+  DEVICE_INTEGRITY_ACTIONS.APP_STARTUP,
+  DEVICE_INTEGRITY_ACTIONS.DAILY_HEARTBEAT,
+  DEVICE_INTEGRITY_ACTIONS.BEFORE_POLICY_SYNC,
+  DEVICE_INTEGRITY_ACTIONS.BEFORE_UNLOCK,
+  DEVICE_INTEGRITY_ACTIONS.SUSPICIOUS_SIGNAL,
+  DEVICE_INTEGRITY_ACTIONS.ADMIN_RECHECK,
+  DEVICE_INTEGRITY_ACTIONS.APP_FOREGROUND,
+  DEVICE_INTEGRITY_ACTIONS.BOOT_COMPLETED,
+  DEVICE_INTEGRITY_ACTIONS.REMEDIATION_RECHECK
+]);
+
 const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
 
 const getDeviceSyncState = async (device) => {
@@ -1045,6 +1057,68 @@ export const createIntegrityChallenge = async (req, res) => {
 };
 
 /**
+ * Create a Play Integrity challenge for app-owned recurring risk checks.
+ * This endpoint is not for onboarding and never returns an onboarding decision.
+ */
+export const createRiskIntegrityChallenge = async (req, res) => {
+  try {
+    const action = req.body.action || DEVICE_INTEGRITY_ACTIONS.APP_STARTUP;
+
+    if (!RISK_INTEGRITY_ACTIONS.has(action)) {
+      return sendError(res, 400, "Valid risk integrity action is required");
+    }
+
+    const user = await User.findById(req.auth.id);
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const device = await Device.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const now = new Date();
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    const expiresAt = new Date(now.getTime() + env.playIntegrityChallengeTtlSeconds * 1000);
+    const requestHash = createRequestHash({
+      nonce,
+      userId: user._id.toString(),
+      tenantId: user.tenantId.toString(),
+      deviceId: device._id.toString(),
+      action,
+      flow: "risk_check",
+      issuedAt: now.toISOString()
+    });
+
+    const challenge = await DeviceIntegrityChallenge.create({
+      userId: user._id,
+      tenantId: user.tenantId,
+      action,
+      requestHash,
+      nonce,
+      deviceContext: {
+        ...(req.body.deviceContext || {}),
+        deviceId: device._id,
+        flow: "risk_check"
+      },
+      expiresAt
+    });
+
+    return sendSuccess(res, 200, "Risk integrity challenge created successfully", {
+      status: "challenge_created",
+      challengeId: challenge._id,
+      requestHash: challenge.requestHash,
+      expiresAt: challenge.expiresAt,
+      action: challenge.action
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Verify Play Integrity token for a previously issued challenge.
  * Sample body: { "challengeId": "665f...", "integrityToken": "...", "action": "ONBOARDING_PRE_REGISTRATION", "localSignals": {} }
  */
@@ -1074,6 +1148,10 @@ export const verifyIntegrity = async (req, res) => {
     if (!challenge) {
       console.error("[verifyIntegrity] Valid integrity challenge not found", { challengeId: req.body.challengeId, userId: req.auth.id, action: req.body.action });
       return sendError(res, 400, "Valid integrity challenge not found");
+    }
+
+    if (challenge.deviceContext?.flow === "risk_check") {
+      return sendError(res, 400, "Use risk integrity verify for risk-check challenges");
     }
 
     if (challenge.consumedAt) {
@@ -1272,6 +1350,199 @@ export const verifyIntegrity = async (req, res) => {
     });
   } catch (error) {
     console.error("[verifyIntegrity] Internal server error", { error });
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Verify Play Integrity for app-owned recurring risk checks.
+ * This endpoint records backend risk state and queues commands; the app must act from sync/FCM commands, not this response.
+ */
+export const verifyRiskIntegrity = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["challengeId", "integrityToken", "action"])) {
+      return sendError(res, 400, "Challenge ID, integrity token, and action are required");
+    }
+
+    if (!mongoose.isValidObjectId(req.body.challengeId)) {
+      return sendError(res, 400, "Valid challenge ID is required");
+    }
+
+    if (!RISK_INTEGRITY_ACTIONS.has(req.body.action)) {
+      return sendError(res, 400, "Valid risk integrity action is required");
+    }
+
+    const challenge = await DeviceIntegrityChallenge.findOne({
+      _id: req.body.challengeId,
+      userId: req.auth.id,
+      action: req.body.action
+    });
+
+    if (!challenge) {
+      return sendError(res, 400, "Valid risk integrity challenge not found");
+    }
+
+    if (challenge.deviceContext?.flow !== "risk_check") {
+      return sendError(res, 400, "Risk integrity verify requires a risk-check challenge");
+    }
+
+    if (challenge.consumedAt) {
+      return sendError(res, 400, "Risk integrity challenge has already been used");
+    }
+
+    if (new Date(challenge.expiresAt) <= new Date()) {
+      challenge.integrityStatus = "temporary_failure";
+      challenge.reasonCode = "CHALLENGE_EXPIRED";
+      await challenge.save();
+      return sendSuccess(res, 200, "Risk integrity challenge expired. Please retry with a fresh challenge.", {
+        status: "retry_required",
+        reasonCode: "CHALLENGE_EXPIRED",
+        syncRecommended: false,
+        commandsQueued: []
+      });
+    }
+
+    const localSignals = req.body.localSignals || {};
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
+    const verifiedAt = new Date();
+    let verdict;
+
+    try {
+      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken });
+    } catch (error) {
+      console.error("Risk Play Integrity verification failed", {
+        challengeId: challenge._id,
+        userId: challenge.userId,
+        action: challenge.action,
+        status: error.status,
+        code: error.code,
+        message: error.message
+      });
+
+      const retryDecision = {
+        decision: "retry",
+        integrityStatus: "temporary_failure",
+        reasonCode: "PLAY_INTEGRITY_VERIFICATION_UNAVAILABLE"
+      };
+      const finalDecision = applyObserveModeDecision(retryDecision);
+
+      challenge.consumedAt = verifiedAt;
+      challenge.verifiedAt = verifiedAt;
+      challenge.decision = finalDecision.decision;
+      challenge.integrityStatus = finalDecision.integrityStatus;
+      challenge.reasonCode = finalDecision.reasonCode;
+      challenge.verificationSummary = {
+        mode: env.deviceIntegrityMode,
+        flow: "risk_check",
+        observedDecision: finalDecision.observedDecision,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        },
+        localSignals
+      };
+      await challenge.save();
+
+      const assessment = await recordIntegrityAssessment({
+        challenge,
+        device,
+        finalDecision,
+        localSignals,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        }
+      });
+
+      return sendSuccess(res, 200, "Risk integrity result recorded", {
+        status: "recorded",
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        resolvedRiskIds: assessment.integrityCheck.resolvedRiskIds || [],
+        commandsQueued: [],
+        syncRecommended: true
+      });
+    }
+
+    const summary = getPlayIntegritySummary(verdict);
+    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals });
+    const finalDecision = applyObserveModeDecision(evaluatedDecision);
+
+    challenge.consumedAt = verifiedAt;
+    challenge.verifiedAt = verifiedAt;
+    challenge.decision = finalDecision.decision;
+    challenge.integrityStatus = finalDecision.integrityStatus;
+    challenge.reasonCode = finalDecision.reasonCode;
+    challenge.verificationSummary = {
+      mode: env.deviceIntegrityMode,
+      flow: "risk_check",
+      observedDecision: finalDecision.observedDecision,
+      requiredLevel: env.playIntegrityRequiredDeviceVerdict,
+      packageName: summary.packageName,
+      requestHashMatched: summary.requestHash === challenge.requestHash,
+      appIntegrity: summary.appIntegrity,
+      deviceIntegrity: summary.deviceIntegrity,
+      appLicensingVerdict: summary.appLicensingVerdict,
+      localSignals
+    };
+    await challenge.save();
+
+    const assessment = await recordIntegrityAssessment({
+      challenge,
+      device,
+      summary,
+      finalDecision,
+      localSignals,
+      rawVerdictSafeSnapshot: {
+        requestDetails: verdict.requestDetails,
+        appIntegrity: verdict.appIntegrity,
+        deviceIntegrity: verdict.deviceIntegrity,
+        accountDetails: verdict.accountDetails
+      }
+    });
+
+    const commandsQueued = [];
+
+    if (enforcementEnabled) {
+      for (const riskFlag of assessment.riskFlags) {
+        const autoLock = await enforceRiskAutoLock({
+          device,
+          riskFlag,
+          eventType: riskFlag.type,
+          severity: riskFlag.severity,
+          enforce: enforcementEnabled
+        });
+
+        if (autoLock.queued) {
+          commandsQueued.push({
+            commandType: "LOCK",
+            commandId: autoLock.commandId,
+            riskFlagId: riskFlag._id,
+            source: "risk_auto_lock",
+            policyKey: autoLock.policyKey,
+            policyVersion: autoLock.policyVersion
+          });
+        }
+      }
+    }
+
+    return sendSuccess(res, 200, "Risk integrity result recorded", {
+      status: "recorded",
+      integrityCheckId: assessment.integrityCheck._id,
+      riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+      resolvedRiskIds: assessment.integrityCheck.resolvedRiskIds || [],
+      commandsQueued,
+      syncRecommended: true
+    });
+  } catch (error) {
+    console.error("[verifyRiskIntegrity] Internal server error", { error });
     return sendError(res, 500, error.message || "Internal server error");
   }
 };
