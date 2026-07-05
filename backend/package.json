@@ -13,6 +13,7 @@
     "worker:fcm": "node src/jobs/fcmDeliveryWorker.js",
     "jobs:scheduled": "node src/jobs/scheduledJobs.js",
     "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js",
+    "migrate:risk-auto-lock-types": "node src/scripts/migrateRiskAutoLockTypes.js",
     "backfill:tenant-poc": "node src/scripts/backfillTenantPoc.js"
   },
   "dependencies": {

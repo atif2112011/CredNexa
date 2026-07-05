@@ -13,16 +13,17 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
   const commands = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/commands`);
   const auditLogs = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/audit-logs`);
   const device = detail.device as RecordItem;
+  const riskFlags = (detail.riskFlags as RecordItem[]) || [];
 
   return (
     <>
       <PageHeader title={String(device.imei || "Device")} description="Device state, borrower mapping, policy snapshot, command history, and audit trail." />
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "updatedAt", type: "date" }]} />
-        <DeviceOverridePanel device={device} />
+        <DeviceOverridePanel device={device} riskFlags={riskFlags} />
         <div className="grid gap-6 xl:grid-cols-2">
           <ActivePolicyPanel policy={detail.policy} />
-          <RiskFlagMetricsPanel flags={detail.riskFlags} />
+          <RiskFlagMetricsPanel flags={riskFlags} />
         </div>
         <Card>
           <CardHeader><CardTitle>Command History</CardTitle></CardHeader>

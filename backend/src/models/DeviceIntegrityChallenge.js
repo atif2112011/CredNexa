@@ -6,7 +6,11 @@ const ALLOWED_ACTIONS = [
   "DAILY_HEARTBEAT",
   "BEFORE_POLICY_SYNC",
   "BEFORE_UNLOCK",
-  "SUSPICIOUS_SIGNAL"
+  "SUSPICIOUS_SIGNAL",
+  "ADMIN_RECHECK",
+  "APP_FOREGROUND",
+  "BOOT_COMPLETED",
+  "REMEDIATION_RECHECK"
 ];
 
 const deviceIntegrityChallengeSchema = new mongoose.Schema(

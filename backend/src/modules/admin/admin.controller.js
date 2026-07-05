@@ -8,7 +8,7 @@ import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../../constants/tenant.js";
 import { Account } from "../../models/Account.js";
-import { APP_BUILD_STATUSES, AppBuild } from "../../models/AppBuild.js";
+import { APP_BUILD_CHANNELS, APP_BUILD_PLATFORMS, APP_BUILD_STATUSES, APP_BUILD_TYPES, AppBuild } from "../../models/AppBuild.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ChannelPartner } from "../../models/ChannelPartner.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
@@ -17,6 +17,7 @@ import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { FcmDeliveryLog } from "../../models/FcmDeliveryLog.js";
+import { IntegrityCheck } from "../../models/IntegrityCheck.js";
 import { MANUAL_OVERRIDE_TOKEN_STATUSES, ManualOverrideToken } from "../../models/ManualOverrideToken.js";
 import {
   PARTNER_CREDIT_BALANCE_TYPES,
@@ -25,7 +26,7 @@ import {
 } from "../../models/PartnerCreditLedger.js";
 import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/PartnerPayoutRequest.js";
 import { PayoutConstants } from "../../models/PayoutConstants.js";
-import { RiskFlag } from "../../models/RiskFlag.js";
+import { INACTIVE_RISK_FLAG_STATUSES, RISK_FLAG_STATUSES, RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
@@ -34,6 +35,7 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import {
+  BORROWER_ANDROID_PACKAGE_NAME,
   publishBuild,
   uploadBuildApk,
   validateAppBuildIdentity,
@@ -44,6 +46,10 @@ import {
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
 } from "../../services/manualOverrideToken.service.js";
+import {
+  getActiveCriticalRiskFlagsForDevice,
+  getActiveRiskFilter
+} from "../../services/riskManagement.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
@@ -113,6 +119,25 @@ const normalizeTenantPocPayload = (payload = {}) => ({
   pocPhone: normalizeMobile(payload.pocPhone),
   pocDesignation: String(payload.pocDesignation || "").trim()
 });
+
+const WIPE_ELIGIBLE_RISK_TYPES = new Set([
+  "DEVICE_INTEGRITY_COMPROMISED",
+  "ROOT_DETECTED",
+  "TAMPER_DETECTED",
+  "SYSTEM_TAMPER_DETECTED",
+  "CUSTOM_ROM_DETECTED",
+  "BOOTLOADER_UNLOCKED"
+]);
+
+const isRiskFlagWipeEligible = (riskFlag) => {
+  const riskType = riskFlag?.riskType || riskFlag?.type;
+  return (
+    riskFlag?.severity === "critical" &&
+    (riskFlag?.riskBucket === "device_compromise" ||
+      riskFlag?.status === RISK_FLAG_STATUSES.COMPROMISED_PERMANENT ||
+      WIPE_ELIGIBLE_RISK_TYPES.has(riskType))
+  );
+};
 
 const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
   if (!pocName) return "pocName is required";
@@ -305,7 +330,7 @@ const getTenantDetailData = async (tenantId) => {
         tenantId,
         status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
       }).lean(),
-      RiskFlag.find({ tenantId, status: { $ne: "resolved" } }).lean()
+      RiskFlag.find(getActiveRiskFilter({ tenantId })).lean()
     ]);
 
   return {
@@ -370,7 +395,17 @@ const applyEscalationDeviceCommand = async ({
   return { device, command: command[0] };
 };
 
-const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetState, policyKey, reason, durationHours, session }) => {
+const queueAdminDeviceCommand = async ({
+  device,
+  accountId,
+  commandType,
+  targetState,
+  policyKey,
+  reason,
+  durationHours,
+  extraPayload = {},
+  session
+}) => {
   const activePolicy = await DevicePolicy.findOne({
     tenantId: device.tenantId,
     policyKey,
@@ -416,7 +451,8 @@ const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetS
           reason,
           durationHours,
           policyKey,
-          policyVersion: nextPolicyVersion
+          policyVersion: nextPolicyVersion,
+          ...extraPayload
         }
       }
     ],
@@ -424,6 +460,24 @@ const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetS
   );
 
   return { device: updatedDevice, command: command[0] };
+};
+
+const buildRiskWarningPayload = async (deviceId) => {
+  const activeCriticalRiskFlags = await getActiveCriticalRiskFlagsForDevice(deviceId);
+
+  return {
+    activeCriticalRiskFlags,
+    riskWarning: activeCriticalRiskFlags.length
+      ? {
+          hasActiveCriticalRisk: true,
+          riskFlagIds: activeCriticalRiskFlags.map((flag) => flag._id),
+          message: "Active critical security risks exist. Admin override is allowed, but the risk is not cleared."
+        }
+      : {
+          hasActiveCriticalRisk: false,
+          riskFlagIds: []
+        }
+  };
 };
 
 const resolveAllUnpaidInstallments = async ({ userId, tenantId, accountId, reason, emiAction, session }) => {
@@ -523,7 +577,7 @@ export const getAdminDashboard = async (req, res) => {
         .sort({ updatedAt: -1 })
         .limit(8)
         .lean(),
-      RiskFlag.find({ status: { $ne: "resolved" } }).sort({ createdAt: -1 }).limit(8).lean(),
+      RiskFlag.find(getActiveRiskFilter()).sort({ createdAt: -1 }).limit(8).lean(),
       AuditLog.find({}).sort({ timestamp: -1 }).limit(10).lean()
     ]);
 
@@ -3041,7 +3095,7 @@ export const getDeviceById = async (req, res) => {
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
-      RiskFlag.find({ deviceId: device._id, status: { $ne: "resolved" } }).lean()
+      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).lean()
     ]);
 
     return sendSuccess(res, 200, "Device fetched successfully", {
@@ -3158,6 +3212,7 @@ export const tempUnlockAdminDevice = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3169,6 +3224,9 @@ export const tempUnlockAdminDevice = async (req, res) => {
       policyKey: DEVICE_POLICY_KEYS.TEMP_UNLOCKED,
       reason: req.body.reason,
       durationHours,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3187,7 +3245,11 @@ export const tempUnlockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Temporary unlock queued successfully", result);
+    return sendSuccess(res, 200, "Temporary unlock queued successfully", {
+      ...result,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");
@@ -3216,6 +3278,7 @@ export const unlockAdminDevice = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3226,6 +3289,9 @@ export const unlockAdminDevice = async (req, res) => {
       targetState: DEVICE_STATES.UNLOCK_PENDING,
       policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
       reason: req.body.reason,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3244,7 +3310,11 @@ export const unlockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Device unlock queued successfully", result);
+    return sendSuccess(res, 200, "Device unlock queued successfully", {
+      ...result,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");
@@ -3277,6 +3347,7 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3302,6 +3373,9 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
       targetState: DEVICE_STATES.UNLOCK_PENDING,
       policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
       reason: req.body.reason,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3327,7 +3401,9 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
 
     return sendSuccess(res, 200, "Device unlock with EMI update queued successfully", {
       ...result,
-      updatedInstallmentIds: emiUpdate.updatedInstallmentIds
+      updatedInstallmentIds: emiUpdate.updatedInstallmentIds,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
     });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
@@ -3838,20 +3914,92 @@ export const getAdminRiskFlags = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
     const filter = {};
+    const allowedSortFields = new Set(["createdAt", "updatedAt", "lastDetectedAt", "severity", "status", "type", "riskBucket"]);
 
-    if (req.query.severity) filter.severity = req.query.severity;
-    if (req.query.status) filter.status = req.query.status;
+    if (req.query.severity && req.query.severity !== "all") filter.severity = req.query.severity;
+    if (req.query.status && req.query.status !== "all") {
+      filter.status = req.query.status === "active" ? { $nin: INACTIVE_RISK_FLAG_STATUSES } : req.query.status;
+    }
     if (req.query.type) filter.type = req.query.type;
+    if (req.query.riskBucket && req.query.riskBucket !== "all") filter.riskBucket = req.query.riskBucket;
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+    if (req.query.deviceId) filter.deviceId = req.query.deviceId;
+    if (req.query.userId) filter.userId = req.query.userId;
+    if (req.query.search) {
+      const search = new RegExp(escapeRegex(req.query.search), "i");
+      filter.$or = [{ type: search }, { riskType: search }, { message: search }, { caseId: search }];
+    }
+
+    const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder } : { [sortBy]: sortOrder, createdAt: -1 };
 
     const [items, total] = await Promise.all([
-      RiskFlag.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      RiskFlag.find(filter)
+        .populate("tenantId", "name")
+        .populate("deviceId", "imei deviceModel manufacturer state deviceSecurityState")
+        .populate("userId", "name mobile loanId")
+        .populate("acknowledgedBy", "name email role")
+        .populate("clearedBy", "name email role")
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .lean(),
       RiskFlag.countDocuments(filter)
     ]);
 
     return sendSuccess(res, 200, "Risk flags fetched successfully", {
       items,
       pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const getAdminRiskFlagById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await RiskFlag.findById(req.params.flagId)
+      .populate("tenantId", "name supportPhone supportEmail")
+      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey deviceSecurityState lastIntegrityCheckAt lastCleanIntegrityAt lastRiskAt")
+      .populate("userId", "name mobile email loanId")
+      .populate("acknowledgedBy", "name email role")
+      .populate("clearedBy", "name email role")
+      .lean();
+
+    if (!riskFlag) {
+      return sendError(res, 404, "Risk flag not found");
+    }
+
+    const deviceId = riskFlag.deviceId?._id || riskFlag.deviceId;
+    const [integrityChecks, commands, auditLogs, activeCriticalRiskFlags] = await Promise.all([
+      deviceId
+        ? IntegrityCheck.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean()
+        : IntegrityCheck.find({ userId: riskFlag.userId?._id || riskFlag.userId }).sort({ createdAt: -1 }).limit(10).lean(),
+      deviceId ? DeviceCommand.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean() : [],
+      AuditLog.find({
+        $or: [
+          { "metadata.riskFlagId": riskFlag._id },
+          { "metadata.riskFlagIds": riskFlag._id },
+          ...(deviceId ? [{ deviceId }] : [])
+        ]
+      })
+        .sort({ timestamp: -1 })
+        .limit(10)
+        .lean(),
+      deviceId ? getActiveCriticalRiskFlagsForDevice(deviceId) : []
+    ]);
+
+    return sendSuccess(res, 200, "Risk flag fetched successfully", {
+      riskFlag,
+      integrityChecks,
+      commands,
+      auditLogs,
+      activeCriticalRiskFlags
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -3873,7 +4021,8 @@ export const acknowledgeRiskFlag = async (req, res) => {
       {
         status: "acknowledged",
         acknowledgedBy: req.auth.id,
-        acknowledgedAt: new Date()
+        acknowledgedAt: new Date(),
+        acknowledgedNote: req.body.note
       },
       { new: true }
     );
@@ -3882,7 +4031,256 @@ export const acknowledgeRiskFlag = async (req, res) => {
       return sendError(res, 400, "Risk flag not found");
     }
 
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_FLAG_ACKNOWLEDGED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.note,
+      metadata: { riskFlagId: riskFlag._id }
+    });
+
     return sendSuccess(res, 200, "Risk flag acknowledged successfully", riskFlag);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const getActionableRiskFlag = async (flagId) => {
+  return RiskFlag.findById(flagId);
+};
+
+const getRiskFlagDevice = async (riskFlag) => {
+  if (!riskFlag.deviceId) return null;
+  return Device.findById(riskFlag.deviceId).lean();
+};
+
+export const requestRiskFlagRecheck = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "RUN_INTEGRITY_CHECK",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      payload: {
+        source: "risk_admin_recheck",
+        reason: req.body.reason || "Admin requested security recheck",
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        action: "ADMIN_RECHECK"
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_RECHECK_REQUESTED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id }
+    });
+
+    return sendSuccess(res, 201, "Security recheck command queued successfully", { command });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const clearRiskFlag = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const resolution =
+      req.body.resolution === RISK_FLAG_STATUSES.FALSE_POSITIVE
+        ? RISK_FLAG_STATUSES.FALSE_POSITIVE
+        : RISK_FLAG_STATUSES.CLEARED;
+
+    const riskFlag = await RiskFlag.findByIdAndUpdate(
+      req.params.flagId,
+      {
+        status: resolution,
+        clearedBy: req.auth.id,
+        clearedAt: new Date(),
+        clearanceReason: req.body.reason
+      },
+      { new: true }
+    );
+
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    if (riskFlag.deviceId) {
+      const hasOtherActiveRisk = await RiskFlag.exists({
+        deviceId: riskFlag.deviceId,
+        _id: { $ne: riskFlag._id },
+        ...getActiveRiskFilter()
+      });
+      const deviceUpdate = {
+        $pull: { currentRiskIds: riskFlag._id }
+      };
+      if (!hasOtherActiveRisk) {
+        deviceUpdate.$set = { deviceSecurityState: "HEALTHY" };
+      }
+      await Device.findByIdAndUpdate(riskFlag.deviceId, deviceUpdate);
+    }
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_FLAG_CLEARED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, resolution }
+    });
+
+    return sendSuccess(res, 200, "Risk flag updated successfully", riskFlag);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const queueRiskFlagAppUpdate = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const build = await AppBuild.findOne({
+      platform: APP_BUILD_PLATFORMS.ANDROID,
+      packageName: BORROWER_ANDROID_PACKAGE_NAME,
+      channel: APP_BUILD_CHANNELS.PRODUCTION,
+      buildType: APP_BUILD_TYPES.RELEASE,
+      status: APP_BUILD_STATUSES.PUBLISHED
+    })
+      .sort({ versionCode: -1, publishedAt: -1 })
+      .lean();
+
+    if (!build) {
+      return sendError(res, 404, "Published production Android build not found");
+    }
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "INSTALL_UPDATE",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      payload: {
+        source: "risk_admin_app_update",
+        reason: req.body.reason || "Admin pushed trusted app repair",
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        packageName: build.packageName,
+        versionName: build.versionName,
+        versionCode: build.versionCode,
+        apkUrl: build.apkUrl,
+        apkSha256: build.apkSha256,
+        checksumRequired: build.checksumRequired
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_APP_UPDATE_QUEUED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id, buildId: build._id }
+    });
+
+    return sendSuccess(res, 201, "App update command queued successfully", { command, build });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const queueRiskFlagWipe = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+    if (!isRiskFlagWipeEligible(riskFlag)) {
+      return sendError(res, 400, "Wipe is allowed only for critical permanent device-compromise risks");
+    }
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "WIPE_DEVICE",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      payload: {
+        source: "risk_admin_wipe",
+        reason: req.body.reason,
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        destructiveAction: true,
+        requireDeviceOwner: true
+      }
+    });
+
+    riskFlag.status = RISK_FLAG_STATUSES.WIPED_PENDING_REPROVISION;
+    riskFlag.metadata = {
+      ...(riskFlag.metadata || {}),
+      wipeCommandId: command._id,
+      wipeQueuedAt: new Date()
+    };
+    await riskFlag.save();
+
+    await Device.findByIdAndUpdate(device._id, {
+      $set: { deviceSecurityState: "WIPED_PENDING_REPROVISION" }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_WIPE_QUEUED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id }
+    });
+
+    return sendSuccess(res, 201, "Admin wipe command queued successfully", { command, riskFlag });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

@@ -36,7 +36,21 @@ We do not introduce a separate backend device state for this mechanism. Instead:
 
 ## Trigger Flow
 
-The flow starts when the borrower app sends a security event to:
+The preferred flow starts when the borrower app sends a Play Integrity token to:
+
+```http
+POST /api/app/integrity/verify
+```
+
+Backend behavior:
+
+1. Verifies the token with Google Play Integrity.
+2. Stores an `IntegrityCheck` history record.
+3. Maps failed request hash/package/timestamp/app/device verdicts and local evidence into a `RiskFlag`.
+4. Checks whether this risk qualifies for auto-lock.
+5. If it qualifies and `DEVICE_INTEGRITY_MODE` is `enforce` or `enforcement`, locks the device and queues a `LOCK` command with `payload.source = "risk_auto_lock"`.
+
+The compatibility flow still exists when the borrower app sends a local security event to:
 
 ```http
 POST /api/app/security/event
@@ -47,7 +61,7 @@ Reference:
 - [risk_flag.md](D:/Practise%20Projects/EMI%20Shield/risk_flag.md)
 - [backend/src/modules/app/app.controller.js](D:/Practise%20Projects/EMI%20Shield/backend/src/modules/app/app.controller.js)
 
-Backend behavior:
+Compatibility backend behavior:
 
 1. Validates the incoming event.
 2. Creates a `DeviceEvent` with `eventType: "security"`.
@@ -55,6 +69,8 @@ Backend behavior:
 4. Checks whether this event qualifies for auto-lock.
 5. If it qualifies, immediately updates the device record to locked state.
 6. Queues a `LOCK` device command with `payload.source = "risk_auto_lock"`.
+
+The app should not use `/api/app/security/event` to report final Play Integrity compromise. It should send the token to `/api/app/integrity/verify` and let the backend create server-owned risk flags.
 
 ## Auto-Lock Conditions
 
@@ -267,6 +283,8 @@ For this version:
 - do not add a separate device state such as `RISK_LOCKED`
 - use the existing `LOCKED` state and `EMI_LOCKED` policy
 - let the app infer the reason from the `LOCK` command payload and cache it locally
+- admin unlock is allowed with warning, but unlock does not clear the active risk flag
+- wipe is admin-only and is never auto-queued by the MVP
 
 ## End-to-End Summary
 

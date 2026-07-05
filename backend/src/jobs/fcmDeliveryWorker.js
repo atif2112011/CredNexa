@@ -64,6 +64,13 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
     commandId: command._id.toString(),
     commandType: command.commandType
   };
+  const securityCommandTypes = new Set([
+    "RUN_INTEGRITY_CHECK",
+    "SHOW_REMEDIATION",
+    "INSTALL_UPDATE",
+    "WIPE_DEVICE",
+    "REPROVISION_REQUIRED"
+  ]);
 
   if (command.commandType === "NOTIFICATION") {
     return {
@@ -106,10 +113,25 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
     };
   }
 
+  if (securityCommandTypes.has(command.commandType)) {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        ...stringifyDataPayload(command.payload),
+        type: command.commandType
+      },
+      android: {
+        priority: "high"
+      }
+    };
+  }
+
   return {
     token: device.fcmToken,
     data: {
       ...baseData,
+      ...stringifyDataPayload(command.payload),
       type: "POLICY_UPDATE",
       policyKey: String(command.payload?.policyKey || device.currentPolicyKey),
       policyVersion: String(command.payload?.policyVersion || device.desiredPolicyVersion)

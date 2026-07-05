@@ -14,17 +14,39 @@ const deviceCommandSchema = new mongoose.Schema(
     },
     commandType: {
       type: String,
-      enum: ["LOCK", "UNLOCK", "TEMP_UNLOCK", "POLICY_UPDATE", "UPCOMING_PAYMENT", "NOTIFICATION"],
+      enum: [
+        "LOCK",
+        "UNLOCK",
+        "TEMP_UNLOCK",
+        "POLICY_UPDATE",
+        "UPCOMING_PAYMENT",
+        "NOTIFICATION",
+        "RUN_INTEGRITY_CHECK",
+        "SHOW_REMEDIATION",
+        "INSTALL_UPDATE",
+        "WIPE_DEVICE",
+        "REPROVISION_REQUIRED"
+      ],
       required: true
     },
     status: {
       type: String,
-      enum: ["pending", "sent", "acknowledged", "failed"],
+      enum: ["pending", "sent", "acknowledged", "failed", "expired"],
       default: "pending"
     },
     triggeredBy: {
       type: String,
-      enum: ["auto_policy", "payment_unlock", "manual_tenant", "partner_admin", "super_admin", "temp_unlock_expiry", "system_notification"],
+      enum: [
+        "auto_policy",
+        "payment_unlock",
+        "manual_tenant",
+        "partner_admin",
+        "super_admin",
+        "temp_unlock_expiry",
+        "system_notification",
+        "risk_management",
+        "admin_security"
+      ],
       required: true
     },
     triggeredByAccountId: {
@@ -51,7 +73,8 @@ const deviceCommandSchema = new mongoose.Schema(
       type: Number,
       default: 5
     },
-    nextRetryAt: Date
+    nextRetryAt: Date,
+    expiresAt: Date
   },
   { timestamps: true }
 );

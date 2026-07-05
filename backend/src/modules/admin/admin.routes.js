@@ -12,6 +12,7 @@ import {
   approveTenantCreditPurchaseRequest,
   archiveAppBuild,
   backfillManualOverrideTokensForDevices,
+  clearRiskFlag,
   createAppBuild,
   createAdminAccount,
   createChannelPartner,
@@ -22,6 +23,7 @@ import {
   getAdminEscalationByCaseId,
   getAdminAccountById,
   getAdminRiskFlags,
+  getAdminRiskFlagById,
   getAppBuildById,
   getAuditLogs,
   getChannelPartnerById,
@@ -71,6 +73,9 @@ import {
   getProvisioningDetails,
   listAppBuilds,
   publishAppBuild,
+  queueRiskFlagAppUpdate,
+  queueRiskFlagWipe,
+  requestRiskFlagRecheck,
   updateAppBuild
 } from "./admin.controller.js";
 
@@ -148,7 +153,12 @@ adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 
 adminRoutes.get("/risk-flags", getAdminRiskFlags);
+adminRoutes.get("/risk-flags/:flagId", getAdminRiskFlagById);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
+adminRoutes.post("/risk-flags/:flagId/recheck", requestRiskFlagRecheck);
+adminRoutes.post("/risk-flags/:flagId/clear", clearRiskFlag);
+adminRoutes.post("/risk-flags/:flagId/app-update", queueRiskFlagAppUpdate);
+adminRoutes.post("/risk-flags/:flagId/wipe", queueRiskFlagWipe);
 adminRoutes.get("/audit-logs", getAuditLogs);
 
 adminRoutes.get("/notifications/targets", listNotificationTargets);

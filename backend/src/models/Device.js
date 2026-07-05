@@ -100,6 +100,34 @@ const deviceSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    deviceOwnerStatus: {
+      type: String,
+      enum: ["CONFIRMED", "UNKNOWN", "LOST"],
+      default: "UNKNOWN"
+    },
+    deviceSecurityState: {
+      type: String,
+      enum: ["HEALTHY", "WARNING", "LOCKED", "REMEDIATION", "COMPROMISED_PERMANENT", "WIPED_PENDING_REPROVISION"],
+      default: "HEALTHY"
+    },
+    lastIntegrityCheckAt: Date,
+    lastCleanIntegrityAt: Date,
+    lastRiskAt: Date,
+    integrityStaleAfter: Date,
+    autoWipeEnabled: {
+      type: Boolean,
+      default: false
+    },
+    destructiveEnforcementEnabled: {
+      type: Boolean,
+      default: false
+    },
+    currentRiskIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "RiskFlag"
+      }
+    ],
     simChangedAt: Date
   },
   { timestamps: true }

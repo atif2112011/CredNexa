@@ -35,6 +35,10 @@ import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
 } from "../../services/manualOverrideToken.service.js";
+import {
+  enforceRiskAutoLock,
+  recordIntegrityAssessment
+} from "../../services/riskManagement.service.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
@@ -488,6 +492,7 @@ const getPlayIntegritySummary = (verdict = {}) => {
   const appIntegrity = verdict.appIntegrity || {};
   const deviceIntegrity = verdict.deviceIntegrity || {};
   const accountDetails = verdict.accountDetails || {};
+  const environmentDetails = verdict.environmentDetails || {};
 
   return {
     requestHash: requestDetails.requestHash || requestDetails.nonce,
@@ -495,7 +500,9 @@ const getPlayIntegritySummary = (verdict = {}) => {
     timestampMillis: requestDetails.timestampMillis,
     appIntegrity: appIntegrity.appRecognitionVerdict,
     deviceIntegrity: deviceIntegrity.deviceRecognitionVerdict || [],
-    appLicensingVerdict: accountDetails.appLicensingVerdict
+    appLicensingVerdict: accountDetails.appLicensingVerdict,
+    playProtectVerdict: environmentDetails.playProtectVerdict,
+    appAccessRiskVerdict: environmentDetails.appAccessRiskVerdict
   };
 };
 
@@ -573,112 +580,7 @@ const sendIntegrityDecision = (res, statusCode, success, message, data) => {
   });
 };
 
-const DEFAULT_RISK_AUTO_LOCK_TYPES = [
-  "ROOT_DETECTED",
-  "TAMPER_DETECTED",
-  "DEVICE_INTEGRITY_COMPROMISED",
-  "APP_INTEGRITY_COMPROMISED"
-];
 const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
-
-const enforceRiskAutoLock = async ({ device, riskFlag, eventType, severity }) => {
-  const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId }).lean();
-  const riskRules = tenantPolicy?.riskRules || {};
-  const autoLockEnabled = riskRules.autoLockOnCriticalSecurityRisk !== false;
-  const autoLockTypes = riskRules.autoLockTypes?.length ? riskRules.autoLockTypes : DEFAULT_RISK_AUTO_LOCK_TYPES;
-
-  if (!autoLockEnabled || severity !== "critical" || !autoLockTypes.includes(eventType)) {
-    return { queued: false, reason: "RISK_RULE_NOT_MATCHED" };
-  }
-
-  if (device.state === DEVICE_STATES.LOCKED) {
-    return { queued: false, reason: "DEVICE_ALREADY_LOCKED" };
-  }
-
-  const policy = await DevicePolicy.findOne({
-    tenantId: device.tenantId,
-    policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-    isActive: true
-  }).lean();
-
-  if (!policy) {
-    return { queued: false, reason: "EMI_LOCKED_POLICY_NOT_FOUND" };
-  }
-
-  const existingCommand = await DeviceCommand.findOne({
-    deviceId: device._id,
-    commandType: "LOCK",
-    status: { $in: ["pending", "sent"] },
-    "payload.source": "risk_auto_lock",
-    "payload.riskFlagId": riskFlag._id.toString()
-  }).lean();
-
-  if (existingCommand) {
-    return { queued: false, reason: "LOCK_COMMAND_ALREADY_EXISTS", commandId: existingCommand._id };
-  }
-
-  const lockedDevice = await Device.findOneAndUpdate(
-    {
-      _id: device._id,
-      state: { $ne: DEVICE_STATES.LOCKED }
-    },
-    {
-      $set: {
-        state: DEVICE_STATES.LOCKED,
-        currentPolicyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-        currentPolicyId: policy._id,
-        stateUpdatedAt: new Date()
-      },
-      $inc: { desiredPolicyVersion: 1 },
-      $unset: { tempUnlockExpiresAt: "" }
-    },
-    { new: true }
-  );
-
-  if (!lockedDevice) {
-    return { queued: false, reason: "DEVICE_LOCK_CONDITION_FAILED" };
-  }
-
-  const command = await DeviceCommand.create({
-    deviceId: lockedDevice._id,
-    tenantId: lockedDevice.tenantId,
-    commandType: "LOCK",
-    triggeredBy: "auto_policy",
-    payload: {
-      source: "risk_auto_lock",
-      policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-      policyVersion: lockedDevice.desiredPolicyVersion,
-      reason: `Critical security risk: ${eventType}`,
-      riskFlagId: riskFlag._id.toString(),
-      riskType: eventType,
-      severity
-    }
-  });
-
-  await createAuditLog({
-    eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
-    actorCollection: "system",
-    tenantId: lockedDevice.tenantId,
-    userId: lockedDevice.userId,
-    deviceId: lockedDevice._id,
-    reason: `Critical security risk: ${eventType}`,
-    metadata: {
-      source: "risk_auto_lock",
-      riskFlagId: riskFlag._id,
-      commandId: command._id,
-      riskType: eventType,
-      severity
-    }
-  });
-
-  return {
-    queued: true,
-    commandId: command._id,
-    deviceState: lockedDevice.state,
-    policyKey: lockedDevice.currentPolicyKey,
-    policyVersion: lockedDevice.desiredPolicyVersion
-  };
-};
 
 const getDeviceSyncState = async (device) => {
   const [policy, pendingCommands] = await Promise.all([
@@ -1192,6 +1094,8 @@ export const verifyIntegrity = async (req, res) => {
     }
 
     const localSignals = req.body.localSignals || {};
+    const device = await Device.findOne({ userId: req.auth.id });
+    const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     let verdict;
 
     try {
@@ -1231,20 +1135,46 @@ export const verifyIntegrity = async (req, res) => {
       if (!["enforce", "enforcement"].includes(env.deviceIntegrityMode)) {
         challenge.consumedAt = new Date();
         await challenge.save();
+        const assessment = await recordIntegrityAssessment({
+          challenge,
+          device,
+          finalDecision,
+          localSignals,
+          providerError: {
+            status: error.status,
+            code: error.code,
+            message: error.message
+          }
+        });
         return sendSuccess(res, 200, "Device integrity observed successfully", {
           decision: "allow",
           integrityStatus: finalDecision.integrityStatus,
           reasonCode: finalDecision.reasonCode,
-          nextStep: NEXT_STEPS.SHOW_CONSENT
+          nextStep: NEXT_STEPS.SHOW_CONSENT,
+          integrityCheckId: assessment.integrityCheck._id,
+          riskFlagIds: assessment.riskFlags.map((flag) => flag._id)
         });
       }
 
       await challenge.save();
+      const assessment = await recordIntegrityAssessment({
+        challenge,
+        device,
+        finalDecision,
+        localSignals,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        }
+      });
       return sendIntegrityDecision(res, 503, false, "Unable to verify device security. Please try again.", {
         decision: "retry",
         integrityStatus: "temporary_failure",
         reasonCode: retryDecision.reasonCode,
-        retryAfterSeconds: 30
+        retryAfterSeconds: 30,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id)
       });
     }
 
@@ -1271,6 +1201,37 @@ export const verifyIntegrity = async (req, res) => {
     };
     await challenge.save();
 
+    const assessment = await recordIntegrityAssessment({
+      challenge,
+      device,
+      summary,
+      finalDecision,
+      localSignals,
+      rawVerdictSafeSnapshot: {
+        requestDetails: verdict.requestDetails,
+        appIntegrity: verdict.appIntegrity,
+        deviceIntegrity: verdict.deviceIntegrity,
+        accountDetails: verdict.accountDetails
+      }
+    });
+    const autoLocks = [];
+
+    if (device && enforcementEnabled) {
+      for (const riskFlag of assessment.riskFlags) {
+        const autoLock = await enforceRiskAutoLock({
+          device,
+          riskFlag,
+          eventType: riskFlag.type,
+          severity: riskFlag.severity,
+          enforce: enforcementEnabled
+        });
+        autoLocks.push({
+          riskFlagId: riskFlag._id,
+          ...autoLock
+        });
+      }
+    }
+
     if (finalDecision.decision === "allow") {
       return sendSuccess(res, 200, "Device integrity verified successfully", {
         decision: "allow",
@@ -1280,7 +1241,10 @@ export const verifyIntegrity = async (req, res) => {
         deviceIntegrity: summary.deviceIntegrity,
         appIntegrity: summary.appIntegrity,
         verifiedAt,
-        nextStep: NEXT_STEPS.SHOW_CONSENT
+        nextStep: NEXT_STEPS.SHOW_CONSENT,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        autoLocks
       });
     }
 
@@ -1290,7 +1254,10 @@ export const verifyIntegrity = async (req, res) => {
         decision: "retry",
         integrityStatus: finalDecision.integrityStatus,
         reasonCode: finalDecision.reasonCode,
-        retryAfterSeconds: 30
+        retryAfterSeconds: 30,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        autoLocks
       });
     }
     console.error("[verifyIntegrity] Device integrity verification failed", { challengeId: challenge._id });
@@ -1298,7 +1265,10 @@ export const verifyIntegrity = async (req, res) => {
       decision: finalDecision.decision,
       integrityStatus: finalDecision.integrityStatus,
       reasonCode: finalDecision.reasonCode,
-      nextStep: "DEVICE_INTEGRITY_FAILED"
+      nextStep: "DEVICE_INTEGRITY_FAILED",
+      integrityCheckId: assessment.integrityCheck._id,
+      riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+      autoLocks
     });
   } catch (error) {
     console.error("[verifyIntegrity] Internal server error", { error });
@@ -2266,6 +2236,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
       if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
       if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
+      if (command.commandType === "WIPE_DEVICE") device.deviceSecurityState = "WIPED_PENDING_REPROVISION";
+      if (command.commandType === "INSTALL_UPDATE" && req.body.appVersion) device.appVersion = req.body.appVersion;
       if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
         device.state = command.payload.targetState;
       }
@@ -2332,7 +2304,9 @@ export const reportSecurityEvent = async (req, res) => {
 
     const riskFlag = await RiskFlag.create({
       type: req.body.type,
+      riskType: req.body.type,
       severity,
+      source: "app_reported_security_event",
       tenantId: device.tenantId,
       deviceId: device._id,
       userId: req.auth.id,
