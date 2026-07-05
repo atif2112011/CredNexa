@@ -236,6 +236,15 @@ type RouteHandlerConfig<Route extends AppRouteHandlerRoutes = AppRouteHandlerRou
   type __Unused = __Check
 }
 
+// Validate ../../src/app/(dashboard)/risk-flags/[flagId]/page.tsx
+{
+  type __IsExpected<Specific extends AppPageConfig<"/risk-flags/[flagId]">> = Specific
+  const handler = {} as typeof import("../../src/app/(dashboard)/risk-flags/[flagId]/page.js")
+  type __Check = __IsExpected<typeof handler>
+  // @ts-ignore
+  type __Unused = __Check
+}
+
 // Validate ../../src/app/(dashboard)/risk-flags/page.tsx
 {
   type __IsExpected<Specific extends AppPageConfig<"/risk-flags">> = Specific
