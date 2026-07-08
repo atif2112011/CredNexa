@@ -42,6 +42,24 @@ const getAllowedTargetAppForRole = (role) => {
   return null;
 };
 
+const getRoleForTargetApp = (targetApp) => {
+  if (targetApp === ACCOUNT_PUSH_TARGET_APPS.TENANT_APP) return ACCOUNT_ROLES.TENANT_ADMIN;
+  if (targetApp === ACCOUNT_PUSH_TARGET_APPS.PARTNER_APP) return ACCOUNT_ROLES.PARTNER_ADMIN;
+  return null;
+};
+
+const getLoginRoleFilter = ({ role, targetApp }) => {
+  if (role) {
+    return Object.values(ACCOUNT_ROLES).includes(role) ? role : "__invalid_role__";
+  }
+
+  if (targetApp) {
+    return getRoleForTargetApp(String(targetApp).trim());
+  }
+
+  return null;
+};
+
 const validatePushTokenRequest = ({ account, targetApp, platform, fcmToken }) => {
   if (!Object.values(ACCOUNT_PUSH_TARGET_APPS).includes(targetApp)) {
     return "Invalid targetApp";
@@ -74,7 +92,28 @@ export const loginAccount = async (req, res) => {
     const identifierFilter = loginIdentifier.includes("@")
       ? { email: loginIdentifier.toLowerCase() }
       : { mobile: loginIdentifier };
-    const account = await Account.findOne({ ...identifierFilter, isActive: true });
+    const roleFilter = getLoginRoleFilter(req.body);
+
+    if (roleFilter === "__invalid_role__") {
+      return sendError(res, 400, "Invalid role");
+    }
+
+    if (req.body.targetApp && !getRoleForTargetApp(String(req.body.targetApp).trim())) {
+      return sendError(res, 400, "Invalid targetApp");
+    }
+
+    const accountFilter = {
+      ...identifierFilter,
+      isActive: true,
+      ...(roleFilter ? { role: roleFilter } : {})
+    };
+    const accounts = await Account.find(accountFilter).limit(2);
+
+    if (accounts.length > 1) {
+      return sendError(res, 409, "Multiple accounts found for this identifier. Provide role or targetApp to continue.");
+    }
+
+    const [account] = accounts;
 
     if (!account) {
       return sendError(res, 401, "Invalid credentials");

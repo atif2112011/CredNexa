@@ -19,7 +19,7 @@ Mock OTP for partner signup and tenant creation:
 Partner signup:
 
 - Public endpoints: `POST /api/partner/signup/initiate-otp`, `POST /api/partner/signup/verify-otp`, `POST /api/partner/signup/complete?createAccount=true`.
-- Partner fields: `name`, `mobile`, `type`, `verificationSessionId`, `password`, `confirmPassword`, optional `email`, optional `address`.
+- Partner fields: `name`, `mobile`, `type`, `verificationSessionId`, `password`, `confirmPassword`, optional `email`, required `address`.
 - Partner signup `email` is copied to both `ChannelPartner.contactEmail` and the created `partner_admin` `Account.email`.
 - Allowed partner `type`: `nbfc_group`, `retail_chain_group`, `independent`.
 - `password` must be at least 8 characters and include at least one letter and one number.
@@ -136,6 +136,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "2nd Floor, Apex Tower, FC Road",
     "city": "Pune",
+    "district": "Pune",
     "state": "Maharashtra",
     "pincode": "411004"
   }
@@ -168,6 +169,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Office 301, JM Road",
     "city": "Pune",
+    "district": "Pune",
     "state": "Maharashtra",
     "pincode": "411005"
   },
@@ -197,6 +199,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Shop 18, College Road",
     "city": "Nashik",
+    "district": "Nashik",
     "state": "Maharashtra",
     "pincode": "422005"
   },
@@ -225,6 +228,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Retail House, Ring Road",
     "city": "Ahmedabad",
+    "district": "Ahmedabad",
     "state": "Gujarat",
     "pincode": "380015"
   }
@@ -257,6 +261,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "C G Road Showroom",
     "city": "Ahmedabad",
+    "district": "Ahmedabad",
     "state": "Gujarat",
     "pincode": "380009"
   },
@@ -286,6 +291,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Adajan Main Road",
     "city": "Surat",
+    "district": "Surat",
     "state": "Gujarat",
     "pincode": "395009"
   },
@@ -314,6 +320,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "12 Civil Lines",
     "city": "Jaipur",
+    "district": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302006"
   }
@@ -346,6 +353,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "MI Road Branch",
     "city": "Jaipur",
+    "district": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302001"
   },
@@ -374,6 +382,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Salt Lake Sector V",
     "city": "Kolkata",
+    "district": "Kolkata",
     "state": "West Bengal",
     "pincode": "700091"
   }
@@ -406,6 +415,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Park Street Office",
     "city": "Kolkata",
+    "district": "Kolkata",
     "state": "West Bengal",
     "pincode": "700016"
   },
@@ -435,6 +445,7 @@ Use the tenant create payload from the profile below and replace `tenantCreation
   "address": {
     "street": "Sevoke Road Store",
     "city": "Siliguri",
+    "district": "Darjeeling",
     "state": "West Bengal",
     "pincode": "734001"
   },

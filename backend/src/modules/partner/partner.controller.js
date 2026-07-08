@@ -83,6 +83,7 @@ const normalizeAddressPayload = (payload = {}) => {
   return {
     street: String(addressInput.street || payload.street || payload.address || "").trim(),
     city: String(addressInput.city || payload.city || "").trim(),
+    district: String(addressInput.district || payload.district || "").trim(),
     state: String(addressInput.state || payload.state || "").trim(),
     pincode: String(addressInput.pincode || payload.pincode || "").trim()
   };
@@ -91,6 +92,7 @@ const normalizeAddressPayload = (payload = {}) => {
 const getAddressValidationError = (address) => {
   if (!address.street) return "address.street is required";
   if (!address.city) return "address.city is required";
+  if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
   return null;
@@ -112,9 +114,9 @@ const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
 
 const ensurePartnerSignupUnique = async ({ mobile, email }) => {
   const [accountByMobile, partnerByMobile, accountByEmail] = await Promise.all([
-    Account.findOne({ mobile }).lean(),
+    Account.findOne({ mobile, role: ACCOUNT_ROLES.PARTNER_ADMIN }).lean(),
     ChannelPartner.findOne({ contactPhone: mobile }).lean(),
-    email ? Account.findOne({ email }).lean() : null
+    email ? Account.findOne({ email, role: ACCOUNT_ROLES.PARTNER_ADMIN }).lean() : null
   ]);
 
   if (accountByMobile || partnerByMobile) {
@@ -154,6 +156,22 @@ const ensurePartnerAccess = async (req, res) => {
 const validateTenantBelongsToPartner = async (tenantId, channelPartnerId) => {
   if (!isValidObjectId(tenantId)) return null;
   return Tenant.findOne({ _id: tenantId, channelPartnerId });
+};
+
+const findExistingTenantAdminAccount = async ({ mobile, email }) => {
+  const filters = [{ role: ACCOUNT_ROLES.TENANT_ADMIN }];
+
+  if (mobile) {
+    filters.push({ role: ACCOUNT_ROLES.TENANT_ADMIN, mobile });
+  }
+
+  if (email) {
+    filters.push({ role: ACCOUNT_ROLES.TENANT_ADMIN, email });
+  }
+
+  if (filters.length === 1) return null;
+
+  return Account.findOne({ $or: filters.slice(1) }).lean();
 };
 
 export const initiatePartnerSignupOtp = async (req, res) => {
@@ -842,6 +860,11 @@ export const initiateTenantCreationVerification = async (req, res) => {
     const supportPhone = normalizeMobile(req.body.supportPhone);
     const tenantName = String(req.body.name || "").trim();
     const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+    const tenantAdminInput = req.body.tenantAdmin || {};
+    const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || "")
+      .trim()
+      .toLowerCase();
+    const tenantAdminMobile = normalizeMobile(tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone);
 
     if (!tenantName) {
       return sendError(res, 400, "Tenant name is required");
@@ -857,6 +880,19 @@ export const initiateTenantCreationVerification = async (req, res) => {
 
     if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
       return sendError(res, 400, "Invalid tenant creation verification mode");
+    }
+
+    const existingTenantAdminAccount = await findExistingTenantAdminAccount({
+      mobile: tenantAdminMobile,
+      email: tenantAdminEmail
+    });
+
+    if (existingTenantAdminAccount?.mobile === tenantAdminMobile) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+
+    if (tenantAdminEmail && existingTenantAdminAccount?.email === tenantAdminEmail) {
+      return sendError(res, 400, "Account with this email already exists");
     }
 
     const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
@@ -1100,12 +1136,10 @@ export const createPartnerTenant = async (req, res) => {
         return sendError(res, 400, "Valid 10 digit tenant admin mobile is required");
       }
 
-      const duplicateAccountFilters = [{ mobile: tenantAdminMobile }];
-      if (tenantAdminEmail) {
-        duplicateAccountFilters.push({ email: tenantAdminEmail });
-      }
-
-      const existingAccount = await Account.findOne({ $or: duplicateAccountFilters }).lean();
+      const existingAccount = await findExistingTenantAdminAccount({
+        mobile: tenantAdminMobile,
+        email: tenantAdminEmail
+      });
       if (existingAccount?.mobile === tenantAdminMobile) {
         return sendError(res, 400, "Account with this mobile already exists");
       }
@@ -1356,16 +1390,25 @@ export const createTenantAdminAccount = async (req, res) => {
       return sendError(res, 400, "Active tenant not found under this partner");
     }
 
-    const existingAccount = await Account.findOne({ email: req.body.email.toLowerCase() });
-    if (existingAccount) {
+    const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
+    const normalizedMobile = normalizeMobile(req.body.mobile);
+    const existingAccount = await findExistingTenantAdminAccount({
+      mobile: normalizedMobile,
+      email: normalizedEmail
+    });
+    if (existingAccount?.mobile === normalizedMobile) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+
+    if (existingAccount?.email === normalizedEmail) {
       return sendError(res, 400, "Account with this email already exists");
     }
 
     const passwordHash = await bcrypt.hash(req.body.temporaryPassword, 12);
     const account = await Account.create({
       name: req.body.name,
-      email: req.body.email,
-      mobile: req.body.mobile,
+      email: normalizedEmail,
+      mobile: normalizedMobile,
       role: ACCOUNT_ROLES.TENANT_ADMIN,
       tenantId: tenant._id,
       passwordHash,

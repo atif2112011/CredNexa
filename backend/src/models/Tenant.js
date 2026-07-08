@@ -94,6 +94,11 @@ const tenantSchema = new mongoose.Schema(
         required: true,
         trim: true
       },
+      district: {
+        type: String,
+        required: true,
+        trim: true
+      },
       state: {
         type: String,
         required: true,

@@ -101,6 +101,7 @@ const normalizeAddressPayload = (payload = {}) => {
   return {
     street: String(addressInput.street || payload.street || payload.address || "").trim(),
     city: String(addressInput.city || payload.city || "").trim(),
+    district: String(addressInput.district || payload.district || "").trim(),
     state: String(addressInput.state || payload.state || "").trim(),
     pincode: String(addressInput.pincode || payload.pincode || "").trim()
   };
@@ -109,6 +110,7 @@ const normalizeAddressPayload = (payload = {}) => {
 const getAddressValidationError = (address) => {
   if (!address.street) return "address.street is required";
   if (!address.city) return "address.city is required";
+  if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
   return null;

@@ -76,7 +76,14 @@ Body:
   "type": "independent",
   "verificationSessionId": "otp_...",
   "password": "Pass@123",
-  "email": "optional@example.com"
+  "email": "optional@example.com",
+  "address": {
+    "street": "Shop 12, Main Road",
+    "city": "Pune",
+    "district": "Pune",
+    "state": "Maharashtra",
+    "pincode": "411001"
+  }
 }
 ```
 
@@ -240,6 +247,7 @@ Body:
   "address": {
     "street": "20 MI Road",
     "city": "Jaipur",
+    "district": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302001"
   },
