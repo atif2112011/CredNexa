@@ -18,6 +18,10 @@ const SENSITIVE_LOG_FIELDS = new Set([
   "refresh_token",
   "cookie",
   "authorization",
+  "password",
+  "newpassword",
+  "confirmpassword",
+  "resettoken",
   "otp",
   "mobile",
   "mobilenumber",
@@ -46,8 +50,7 @@ const redactRequestBodyForLogs = (value) => {
   );
 };
 
-// morgan.token("body", (req) => JSON.stringify(redactRequestBodyForLogs(req.body)));
-morgan.token("body", (req) => JSON.stringify(req.body));
+morgan.token("body", (req) => JSON.stringify(redactRequestBodyForLogs(req.body)));
 
 export const createApp = ({ apiBasePath = "/api" } = {}) => {
   const app = express();

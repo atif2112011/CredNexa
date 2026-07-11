@@ -19,6 +19,8 @@ import {
   listPartnerEscalations,
   listPartnerPayoutRequests,
   rejectPartnerEscalation,
+  resendPartnerSignupOtp,
+  resendTenantCreationVerification,
   requestPartnerPayout,
   tempUnlockPartnerEscalation,
   unlockPartnerEscalation,
@@ -37,6 +39,7 @@ const requirePartnerAdmin = [
 ];
 
 partnerRoutes.post("/signup/initiate-otp", initiatePartnerSignupOtp);
+partnerRoutes.post("/signup/resend-otp", resendPartnerSignupOtp);
 partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
 partnerRoutes.post("/signup/complete", completePartnerSignup);
 
@@ -45,6 +48,7 @@ partnerRoutes.get("/payout/summary", ...requirePartnerAdmin, getPartnerPayoutSum
 partnerRoutes.get("/payout/requests", ...requirePartnerAdmin, listPartnerPayoutRequests);
 partnerRoutes.post("/payout/requests", ...requirePartnerAdmin, requestPartnerPayout);
 partnerRoutes.post("/tenants/initiate-verification", ...requirePartnerAdmin, initiateTenantCreationVerification);
+partnerRoutes.post("/tenants/resend-verification", ...requirePartnerAdmin, resendTenantCreationVerification);
 partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, verifyTenantCreationVerification);
 partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
 partnerRoutes.get("/tenants/:tenantId", ...requirePartnerAdmin, getPartnerTenantById);

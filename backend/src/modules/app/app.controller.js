@@ -1,9 +1,7 @@
-import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
-import twilio from "twilio";
 
 import { env } from "../../config/env.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
@@ -31,6 +29,7 @@ import {
   parsePositiveInteger,
   validateAppBuildIdentity
 } from "../../services/appUpdate.service.js";
+import { getOrCreateCompanySupportContact } from "../../services/companySupportContact.service.js";
 import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
@@ -40,18 +39,12 @@ import {
   recordIntegrityAssessment
 } from "../../services/riskManagement.service.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../../utils/appNotifications.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
-const MOCK_CASHFREE_OTP = "123456";
-const OTP_EXPIRES_IN_SECONDS = 600;
-const OTP_DELIVERY_ERROR_MESSAGE = "Unable to send OTP right now";
-const OTP_PROVIDERS = Object.freeze({
-  MOCK: "mock",
-  TWILIO_VERIFY: "twilio_verify"
-});
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const OPEN_UNLOCK_REQUEST_STATUSES = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
 const RESOLVED_UNLOCK_REQUEST_STATUSES = [
@@ -62,7 +55,6 @@ const RESOLVED_UNLOCK_REQUEST_STATUSES = [
 ];
 const REJECTED_UNLOCK_REQUEST_STATUSES = ["REJECTED_TENANT", "REJECTED_PARTNER", "REJECTED_SUPER_ADMIN"];
 
-let twilioClient = null;
 let playIntegrityClient = null;
 
 const createAuditLog = async (payload, options = {}) => {
@@ -145,6 +137,24 @@ export const checkAppUpdate = async (req, res) => {
 
     const response = buildUpdateCheckResponse({ build, currentVersionCode });
     return sendSuccess(res, 200, "App update check completed", response);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch company support contact details for borrower app help screens.
+ * Sample request: GET /app/support-contact
+ */
+export const getCompanySupportContact = async (req, res) => {
+  try {
+    const supportContact = await getOrCreateCompanySupportContact();
+    return sendSuccess(res, 200, "Company support contact fetched successfully", {
+      supportEmail: supportContact.supportEmail,
+      supportPhone: supportContact.supportPhone,
+      supportWhatsapp: supportContact.supportWhatsapp,
+      updatedAt: supportContact.updatedAt
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -301,152 +311,6 @@ const isMobileMatch = (user, mobile) => {
 };
 
 const maskMobile = (mobile) => `${mobile.slice(0, 2)}****${mobile.slice(-4)}`;
-
-const getTwilioClient = () => {
-  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioVerifyServiceSid) {
-    throw new Error("Twilio Verify configuration is missing");
-  }
-
-  if (!twilioClient) {
-    twilioClient = twilio(env.twilioAccountSid, env.twilioAuthToken);
-  }
-
-  return twilioClient;
-};
-
-const normalizeMobileForTwilio = (mobile) => {
-  const value = String(mobile || "").trim().replace(/[^\d+]/g, "");
-
-  if (value.startsWith("+")) {
-    return value;
-  }
-
-  const countryCode = String(env.twilioDefaultCountryCode || "+91").startsWith("+")
-    ? String(env.twilioDefaultCountryCode || "+91")
-    : `+${env.twilioDefaultCountryCode}`;
-  const countryDigits = countryCode.replace(/\D/g, "");
-  const digits = value.replace(/\D/g, "").replace(/^0+/, "");
-
-  if (digits.startsWith(countryDigits) && digits.length > 10) {
-    return `+${digits}`;
-  }
-
-  return `${countryCode}${digits}`;
-};
-
-const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
-  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-  const otpHash = await bcrypt.hash(MOCK_CASHFREE_OTP, 12);
-  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
-  const providerReferenceId = `mock_otp_ref_${crypto.randomBytes(8).toString("hex")}`;
-
-  await OtpRecord.create({
-    mobile,
-    otpHash,
-    purpose,
-    verificationSessionId,
-    enrollmentTokenId: enrollmentToken?._id,
-    userId: user._id,
-    provider: OTP_PROVIDERS.MOCK,
-    providerReferenceId,
-    expiresAt,
-    providerResponse: {
-      provider: OTP_PROVIDERS.MOCK,
-      mode: "mock",
-      status: "OTP_SENT",
-      flowType
-    }
-  });
-
-  return {
-    verificationSessionId,
-    providerReferenceId,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
-  };
-};
-
-const sendTwilioVerifyOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
-  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
-  const to = normalizeMobileForTwilio(mobile);
-  let verification;
-
-  try {
-    verification = await getTwilioClient()
-      .verify.v2.services(env.twilioVerifyServiceSid)
-      .verifications.create({ to, channel: "sms" });
-  } catch (error) {
-    console.error("OTP provider send failed", {
-      provider: OTP_PROVIDERS.TWILIO_VERIFY,
-      mobile,
-      normalizedMobile: to,
-      purpose,
-      flowType,
-      userId: user?._id,
-      enrollmentTokenId: enrollmentToken?._id,
-      status: error.status,
-      code: error.code,
-      message: error.message
-    });
-    throw new Error(OTP_DELIVERY_ERROR_MESSAGE);
-  }
-
-  await OtpRecord.create({
-    mobile,
-    purpose,
-    verificationSessionId,
-    enrollmentTokenId: enrollmentToken?._id,
-    userId: user._id,
-    provider: OTP_PROVIDERS.TWILIO_VERIFY,
-    providerReferenceId: verification.sid,
-    expiresAt,
-    providerResponse: {
-      provider: OTP_PROVIDERS.TWILIO_VERIFY,
-      status: verification.status,
-      channel: verification.channel,
-      to,
-      flowType
-    }
-  });
-
-  return {
-    verificationSessionId,
-    providerReferenceId: verification.sid,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
-  };
-};
-
-const sendOtp = async (payload) => {
-  if (env.otpProvider === OTP_PROVIDERS.TWILIO_VERIFY) {
-    return sendTwilioVerifyOtp(payload);
-  }
-
-  return sendMockOtp(payload);
-};
-
-const verifyOtpCode = async ({ otpRecord, otp }) => {
-  if (otpRecord.provider === OTP_PROVIDERS.TWILIO_VERIFY) {
-    const to = otpRecord.providerResponse?.to || normalizeMobileForTwilio(otpRecord.mobile);
-    const verificationCheck = await getTwilioClient()
-      .verify.v2.services(env.twilioVerifyServiceSid)
-      .verificationChecks.create({ to, code: otp });
-
-    otpRecord.providerResponse = {
-      ...(otpRecord.providerResponse || {}),
-      checkStatus: verificationCheck.status,
-      checkSid: verificationCheck.sid,
-      checkedAt: new Date()
-    };
-
-    return verificationCheck.status === "approved";
-  }
-
-  if (!otpRecord.otpHash) {
-    return false;
-  }
-
-  return bcrypt.compare(otp, otpRecord.otpHash);
-};
 
 const getPlayIntegrityClient = async () => {
   if (playIntegrityClient) {
@@ -824,6 +688,48 @@ export const initiateConsentOtp = async (req, res) => {
       flowType: FLOW_TYPES.DEVICE_LOGIN,
       nextStep: NEXT_STEPS.VERIFY_OTP,
       maskedMobile: maskMobile(mobile),
+      expiresInSeconds: otp.expiresInSeconds
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Resend an existing borrower OTP session.
+ * Sample body: { "mobile": "9876543210", "verificationSessionId": "otp_..." }
+ */
+export const resendConsentOtp = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId"])) {
+      return sendError(res, 400, "Mobile and verification session are required");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile: req.body.mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      verified: false,
+      purpose: {
+        $in: [
+          OTP_PURPOSES.CONSENT,
+          OTP_PURPOSES.AADHAAR_CONSENT,
+          OTP_PURPOSES.ONBOARDING_RESUME,
+          OTP_PURPOSES.DEVICE_LOGIN
+        ]
+      },
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Valid OTP session not found");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      maskedMobile: maskMobile(req.body.mobile),
       expiresInSeconds: otp.expiresInSeconds
     });
   } catch (error) {

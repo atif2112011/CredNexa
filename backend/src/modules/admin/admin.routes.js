@@ -27,6 +27,7 @@ import {
   getAppBuildById,
   getAuditLogs,
   getChannelPartnerById,
+  getCompanySupportContact,
   getConsentVersionById,
   getDeviceAuditLogs,
   getDeviceById,
@@ -66,6 +67,7 @@ import {
   updateAdminAccountStatus,
   updateChannelPartner,
   updateChannelPartnerStatus,
+  updateCompanySupportContact,
   updatePayoutConstants,
   updateTenant,
   updateTenantStatus,
@@ -85,6 +87,9 @@ adminRoutes.use(verifyJwt);
 adminRoutes.use(requireRole(ACCOUNT_ROLES.SUPER_ADMIN));
 
 adminRoutes.get("/dashboard", getAdminDashboard);
+
+adminRoutes.get("/support-contact", getCompanySupportContact);
+adminRoutes.patch("/support-contact", updateCompanySupportContact);
 
 adminRoutes.get("/app-builds", listAppBuilds);
 adminRoutes.post("/app-builds", parseApkUpload, createAppBuild);

@@ -42,6 +42,10 @@ import {
   validateBuildPayload
 } from "../../services/appUpdate.service.js";
 import {
+  getOrCreateCompanySupportContact,
+  validateCompanySupportContactPayload
+} from "../../services/companySupportContact.service.js";
+import {
   backfillManualOverrideTokens,
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
@@ -802,6 +806,46 @@ export const updateChannelPartnerStatus = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Channel partner status updated successfully", channelPartner);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch company support contact.
+ * Sample query: /admin/support-contact
+ */
+export const getCompanySupportContact = async (req, res) => {
+  try {
+    const supportContact = await getOrCreateCompanySupportContact();
+    return sendSuccess(res, 200, "Company support contact fetched successfully", supportContact);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update company support contact.
+ * Sample body: { "supportEmail": "support@example.com", "supportPhone": "+911234567890", "supportWhatsapp": "+911234567890" }
+ */
+export const updateCompanySupportContact = async (req, res) => {
+  try {
+    const validation = validateCompanySupportContactPayload(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const supportContact = await getOrCreateCompanySupportContact();
+    Object.assign(supportContact, validation.value, { updatedBy: req.auth.id });
+    await supportContact.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.COMPANY_SUPPORT_CONTACT_UPDATED,
+      actorId: req.auth.id,
+      metadata: validation.value
+    });
+
+    return sendSuccess(res, 200, "Company support contact updated successfully", supportContact);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

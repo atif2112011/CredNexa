@@ -19,6 +19,7 @@ import {
   getPaymentDetail,
   getPaymentHistory,
   getPaymentQr,
+  getCompanySupportContact,
   getTenantUtility,
   listBorrowerUnlockRequests,
   generateTestUserAccessToken,
@@ -26,6 +27,7 @@ import {
   pingDevice,
   reportSecurityEvent,
   refreshUserAccessToken,
+  resendConsentOtp,
   submitPayment,
   syncDevice,
   verifyIntegrity,
@@ -40,8 +42,10 @@ appRoutes.post("/testing/access-token", generateTestUserAccessToken);
 appRoutes.post("/refresh-token", refreshUserAccessToken);
 appRoutes.get("/update/check", checkAppUpdate);
 appRoutes.post("/update/check", checkAppUpdate);
+appRoutes.get("/support-contact", getCompanySupportContact);
 appRoutes.get("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", initiateConsentOtp);
+appRoutes.post("/consent/resend-otp", resendConsentOtp);
 appRoutes.post("/consent/verify-otp", verifyConsentOtp);
 appRoutes.post("/integrity/challenge", verifyJwt, requireTokenType("user"), createIntegrityChallenge);
 appRoutes.post("/integrity/verify", verifyJwt, requireTokenType("user"), verifyIntegrity);

@@ -24,6 +24,7 @@ import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
+import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
@@ -55,11 +56,7 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
-const PARTNER_SIGNUP_OTP = "123456";
-const PARTNER_SIGNUP_OTP_EXPIRY_SECONDS = 10 * 60;
 const PARTNER_SIGNUP_PURPOSE = "partner_signup";
-const TENANT_CREATION_OTP = "123456";
-const TENANT_CREATION_OTP_EXPIRY_SECONDS = 10 * 60;
 const TENANT_CREATION_PURPOSE = "tenant_creation";
 const TENANT_CREATION_VERIFICATION_MODES = ["mobile_otp", "aadhaar_otp"];
 const CHANNEL_PARTNER_TYPES = ["nbfc_group", "retail_chain_group", "independent"];
@@ -187,24 +184,52 @@ export const initiatePartnerSignupOtp = async (req, res) => {
       return sendError(res, 400, duplicateError);
     }
 
-    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-    const otpHash = await bcrypt.hash(PARTNER_SIGNUP_OTP, 12);
-
-    await OtpRecord.create({
+    const otp = await sendOtp({
       mobile,
-      otpHash,
       purpose: PARTNER_SIGNUP_PURPOSE,
-      verificationSessionId,
-      provider: "mock",
-      maxAttempts: 3,
-      expiresAt: new Date(Date.now() + PARTNER_SIGNUP_OTP_EXPIRY_SECONDS * 1000),
-      providerResponse: { mock: true }
+      flowType: "PARTNER_SIGNUP"
     });
 
     return sendSuccess(res, 200, "OTP sent successfully", {
-      verificationSessionId,
+      verificationSessionId: otp.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: PARTNER_SIGNUP_OTP_EXPIRY_SECONDS
+      expiresInSeconds: otp.expiresInSeconds
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const resendPartnerSignupOtp = async (req, res) => {
+  try {
+    const mobile = normalizeMobile(req.body.mobile);
+
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId"])) {
+      return sendError(res, 400, "Mobile and verificationSessionId are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Valid 10 digit mobile number is required");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: PARTNER_SIGNUP_PURPOSE,
+      verified: false,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      expiresInSeconds: otp.expiresInSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -242,9 +267,9 @@ export const verifyPartnerSignupOtp = async (req, res) => {
       return sendError(res, 429, "Maximum OTP attempts exceeded");
     }
 
-    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    otpRecord.attempts += 1;
+    const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });
     if (!otpMatches) {
-      otpRecord.attempts += 1;
       await otpRecord.save();
       return sendError(res, 400, "Invalid OTP");
     }
@@ -895,22 +920,11 @@ export const initiateTenantCreationVerification = async (req, res) => {
       return sendError(res, 400, "Account with this email already exists");
     }
 
-    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-    const otpHash = await bcrypt.hash(TENANT_CREATION_OTP, 12);
-    const providerReferenceId = `tenant_creation_mock_${crypto.randomBytes(8).toString("hex")}`;
-
-    await OtpRecord.create({
+    const otp = await sendOtp({
       mobile: supportPhone,
-      otpHash,
       purpose: TENANT_CREATION_PURPOSE,
-      verificationSessionId,
-      provider: "mock",
-      providerReferenceId,
-      maxAttempts: 3,
-      expiresAt: new Date(Date.now() + TENANT_CREATION_OTP_EXPIRY_SECONDS * 1000),
-      providerResponse: {
-        mock: true,
-        status: "OTP_SENT",
+      flowType: "TENANT_CREATION",
+      metadata: {
         channelPartnerId: channelPartner._id,
         tenantName,
         normalizedTenantName: normalizeComparableName(tenantName),
@@ -924,10 +938,64 @@ export const initiateTenantCreationVerification = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Tenant creation OTP sent successfully", {
-      verificationSessionId,
+      verificationSessionId: otp.verificationSessionId,
       otpSent: true,
       tenantCreationVerificationMode,
-      expiresInSeconds: TENANT_CREATION_OTP_EXPIRY_SECONDS
+      expiresInSeconds: otp.expiresInSeconds
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const resendTenantCreationVerification = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    if (!hasRequiredFields(req.body, ["supportPhone", "tenantCreationVerificationMode", "verificationSessionId"])) {
+      return sendError(res, 400, "Support phone, verification mode, and verification session are required");
+    }
+
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "Valid 10 digit support phone is required");
+    }
+
+    if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
+      return sendError(res, 400, "Invalid tenant creation verification mode");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile: supportPhone,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: TENANT_CREATION_PURPOSE,
+      verified: false,
+      consumedAt: null,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (String(otpRecord.providerResponse?.channelPartnerId) !== String(channelPartner._id)) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (otpRecord.providerResponse?.tenantCreationVerificationMode !== tenantCreationVerificationMode) {
+      return sendError(res, 400, "Tenant creation verification mode mismatch");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "Tenant creation OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      tenantCreationVerificationMode,
+      expiresInSeconds: otp.expiresInSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -981,14 +1049,13 @@ export const verifyTenantCreationVerification = async (req, res) => {
       return sendError(res, 429, "Maximum OTP attempts exceeded");
     }
 
-    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    otpRecord.attempts += 1;
+    const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });
     if (!otpMatches) {
-      otpRecord.attempts += 1;
       await otpRecord.save();
       return sendError(res, 400, "Invalid OTP");
     }
 
-    otpRecord.attempts += 1;
     otpRecord.verified = true;
     otpRecord.providerResponse = {
       ...(otpRecord.providerResponse || {}),
