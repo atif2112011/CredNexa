@@ -17,7 +17,7 @@ const deviceSchema = new mongoose.Schema(
     imei: {
       type: String,
       required: true,
-      unique: true,
+      index: true,
       trim: true
     },
     imei2: {

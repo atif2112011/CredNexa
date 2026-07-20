@@ -1629,12 +1629,6 @@ export const registerDevice = async (req, res) => {
       return sendError(res, 400, "User is already linked to a device");
     }
 
-    const existingDevice = await Device.findOne({ imei: req.body.imei }).lean();
-
-    if (existingDevice) {
-      return sendError(res, 400, "IMEI is already registered");
-    }
-
     const activePolicy = await DevicePolicy.findOne({
       tenantId: user.tenantId,
       policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
