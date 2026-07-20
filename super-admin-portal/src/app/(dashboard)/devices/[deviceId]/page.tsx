@@ -2,6 +2,7 @@ import { DetailGrid } from "@/components/data/detail-grid";
 import { ResourceTable } from "@/components/data/resource-table";
 import { ActivePolicyPanel, RiskFlagMetricsPanel } from "@/components/data/visual-panels";
 import { DeviceOverridePanel } from "@/components/devices/device-override-panel";
+import { ManualOverrideTokenPanel } from "@/components/devices/manual-override-token-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getDetail } from "@/services/admin";
@@ -12,6 +13,7 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
   const detail = await getDetail<RecordItem>(`/admin/devices/${deviceId}`);
   const commands = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/commands`);
   const auditLogs = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/audit-logs`);
+  const manualOverrideTokens = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/manual-override-tokens`);
   const device = detail.device as RecordItem;
   const riskFlags = (detail.riskFlags as RecordItem[]) || [];
 
@@ -21,6 +23,7 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "updatedAt", type: "date" }]} />
         <DeviceOverridePanel device={device} riskFlags={riskFlags} />
+        <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
         <div className="grid gap-6 xl:grid-cols-2">
           <ActivePolicyPanel policy={detail.policy} />
           <RiskFlagMetricsPanel flags={riskFlags} />
