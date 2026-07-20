@@ -9,6 +9,7 @@ import { connectDatabase } from "./config/database.js";
 import { apiRoutes } from "./routes/index.js";
 import { notFoundHandler } from "./middleware/notFoundHandler.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { generalRateLimiter } from "./middleware/rateLimiters.js";
 import { healthRoutes } from "./modules/health/health.routes.js";
 
 const SENSITIVE_LOG_FIELDS = new Set([
@@ -33,10 +34,15 @@ const SENSITIVE_LOG_FIELDS = new Set([
   "enrollmenttoken",
   "fcmtoken"
 ]);
+const MAX_LOG_DEPTH = 6;
 
-const redactRequestBodyForLogs = (value) => {
+const redactRequestBodyForLogs = (value, seen = new WeakSet(), depth = 0) => {
   if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(redactRequestBodyForLogs);
+  if (seen.has(value)) return "[Circular]";
+  if (depth >= MAX_LOG_DEPTH) return "[MaxDepth]";
+
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((entry) => redactRequestBodyForLogs(entry, seen, depth + 1));
 
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => {
@@ -45,12 +51,18 @@ const redactRequestBodyForLogs = (value) => {
         return [key, "[REDACTED]"];
       }
 
-      return [key, redactRequestBodyForLogs(entry)];
+      return [key, redactRequestBodyForLogs(entry, seen, depth + 1)];
     })
   );
 };
 
-morgan.token("body", (req) => JSON.stringify(redactRequestBodyForLogs(req.body)));
+morgan.token("body", (req) => {
+  try {
+    return JSON.stringify(redactRequestBodyForLogs(req.body));
+  } catch (error) {
+    return JSON.stringify({ logSerializationError: error.message });
+  }
+});
 
 export const createApp = ({ apiBasePath = "/api" } = {}) => {
   const app = express();
@@ -76,7 +88,7 @@ export const createApp = ({ apiBasePath = "/api" } = {}) => {
     app.use(morgan("Request Body: :body"));
   }
 
-  app.use(apiBasePath, apiRoutes);
+  app.use(apiBasePath, generalRateLimiter, apiRoutes);
   app.use("/", healthRoutes);
   app.use(notFoundHandler);
   app.use(errorHandler);

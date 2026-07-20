@@ -13,7 +13,7 @@ export default async function TenantsPage() {
 
   return (
     <>
-      <PageHeader title="Tenants" description="Manage tenant onboarding, support profile, status, and centrally copied policies." actions={<FormDialog title="Create tenant" triggerLabel="Create tenant" endpoint="/api/admin/tenants" fields={tenantFields} />} />
+      <PageHeader title="Tenants" description="Manage tenant onboarding, support profile, status, and centrally copied policies." actions={<FormDialog title="Create tenant" triggerLabel="Create tenant" endpoint="/api/admin/tenants" fields={tenantFields} successVariant="tenant" />} />
       <ResourceTable
         rows={data.items}
         detailBasePath="/tenants"
@@ -23,7 +23,7 @@ export default async function TenantsPage() {
           { key: "channelPartnerId.name", header: "Partner" },
           { key: "pocName", header: "POC" },
           { key: "supportPhone", header: "Support phone" },
-          { key: "capabilities", header: "Capabilities" },
+          { key: "address.district", header: "District" },
           { key: "isActive", header: "Status", type: "boolean" }
         ]}
       />

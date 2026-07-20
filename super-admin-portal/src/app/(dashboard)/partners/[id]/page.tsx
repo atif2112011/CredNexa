@@ -3,7 +3,7 @@ import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { partnerFields, statusFields } from "@/lib/forms";
+import { partnerUpdateFields, statusFields } from "@/lib/forms";
 import { getDetail } from "@/services/admin";
 import type { RecordItem } from "@/types/api";
 
@@ -15,6 +15,7 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
     ...partner,
     addressStreet: String((partner.address as RecordItem | undefined)?.street || ""),
     addressCity: String((partner.address as RecordItem | undefined)?.city || ""),
+    addressDistrict: String((partner.address as RecordItem | undefined)?.district || ""),
     addressState: String((partner.address as RecordItem | undefined)?.state || ""),
     addressPincode: String((partner.address as RecordItem | undefined)?.pincode || "")
   };
@@ -26,7 +27,7 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
         description="Partner profile, mapped tenants, and scoped admin accounts."
         actions={
           <>
-            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerFields} defaultValues={partnerFormDefaults} />
+            <FormDialog title="Update partner" triggerLabel="Update" endpoint={`/api/admin/channel-partners/${id}`} method="PATCH" fields={partnerUpdateFields} defaultValues={partnerFormDefaults} />
             <FormDialog title="Change status" triggerLabel="Activate / Deactivate" endpoint={`/api/admin/channel-partners/${id}/status`} method="PATCH" fields={statusFields} defaultValues={{ isActive: partner.isActive ? "true" : "false" }} />
           </>
         }
@@ -44,6 +45,7 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
             { label: "Credit percentage", key: "creditPercentage" },
             { label: "Address", key: "address.street" },
             { label: "City", key: "address.city" },
+            { label: "District", key: "address.district" },
             { label: "State", key: "address.state" },
             { label: "Pincode", key: "address.pincode" },
             { label: "Created", key: "createdAt", type: "date" }
@@ -62,7 +64,7 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
             <CardTitle>Admin Accounts</CardTitle>
           </CardHeader>
           <CardContent>
-            <ResourceTable rows={(data.accounts as RecordItem[]) || []} detailBasePath="/accounts" columns={[{ key: "name", header: "Name" }, { key: "email", header: "Email" }, { key: "role", header: "Role" }, { key: "isActive", header: "Status", type: "boolean" }]} />
+            <ResourceTable rows={(data.accounts as RecordItem[]) || []} detailBasePath="/accounts" columns={[{ key: "name", header: "Name" }, { key: "mobile", header: "Mobile" }, { key: "email", header: "Email" }, { key: "role", header: "Role" }, { key: "isActive", header: "Status", type: "boolean" }]} />
           </CardContent>
         </Card>
       </div>

@@ -87,6 +87,25 @@ const buildPagination = (page, limit, total) => ({
   pages: Math.ceil(total / limit)
 });
 
+const getDateRangeFilter = (query) => {
+  if (!query.from && !query.to) return { value: undefined };
+
+  const from = query.from ? new Date(query.from) : null;
+  const to = query.to ? new Date(query.to) : null;
+  if (to && /^\d{4}-\d{2}-\d{2}$/.test(String(query.to))) to.setUTCHours(23, 59, 59, 999);
+  if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+    return { error: "from and to must be valid dates" };
+  }
+  if (from && to && from > to) return { error: "from must be earlier than or equal to to" };
+
+  return {
+    value: {
+      ...(from ? { $gte: from } : {}),
+      ...(to ? { $lte: to } : {})
+    }
+  };
+};
+
 const buildRegex = (value) => new RegExp(String(value).trim(), "i");
 
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -96,8 +115,19 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
 const parseBoolean = (value) => value === true || isTruthyQueryParam(value);
-const normalizeMobile = (mobile) => String(mobile || "").trim();
+const normalizeMobile = (mobile) => {
+  const digits = String(mobile || "").trim().replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  return digits;
+};
 const isValidIndianMobile = (mobile) => /^\d{10}$/.test(normalizeMobile(mobile));
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+const isValidEmail = (email) => !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const isValidPassword = (password) => {
+  const value = String(password || "");
+  return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
+};
 
 const normalizeAddressPayload = (payload = {}) => {
   const addressInput = payload.address && typeof payload.address === "object" && !Array.isArray(payload.address) ? payload.address : {};
@@ -327,7 +357,7 @@ const getTenantDetailData = async (tenantId) => {
       Tenant.findById(tenantId).populate("channelPartnerId", "name type").lean(),
       TenantPolicy.findOne({ tenantId }).lean(),
       DevicePolicy.find({ tenantId }).sort({ policyKey: 1 }).lean(),
-      Account.find({ tenantId }).select("-passwordHash").lean(),
+      Account.find({ tenantId }).select("-passwordHash").sort({ createdAt: -1, _id: -1 }).lean(),
       Device.aggregate([
         { $match: { tenantId: new mongoose.Types.ObjectId(tenantId) } },
         { $group: { _id: "$state", count: { $sum: 1 } } }
@@ -335,8 +365,8 @@ const getTenantDetailData = async (tenantId) => {
       UnlockRequest.find({
         tenantId,
         status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
-      }).lean(),
-      RiskFlag.find(getActiveRiskFilter({ tenantId })).lean()
+      }).sort({ createdAt: -1, _id: -1 }).lean(),
+      RiskFlag.find(getActiveRiskFilter({ tenantId })).sort({ createdAt: -1, _id: -1 }).lean()
     ]);
 
   return {
@@ -630,7 +660,7 @@ export const listChannelPartners = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      ChannelPartner.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      ChannelPartner.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       ChannelPartner.countDocuments(filter)
     ]);
 
@@ -648,9 +678,27 @@ export const listChannelPartners = async (req, res) => {
  * Sample body: { "name": "Bharat Finance Group", "type": "nbfc_group", "contactEmail": "ops@bharatfinance.in", "contactPhone": "9800000001" }
  */
 export const createChannelPartner = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
-    if (!hasRequiredFields(req.body, ["name", "type"])) {
-      return sendError(res, 400, "Name and type are required");
+    const contactPhone = normalizeMobile(req.body.contactPhone);
+    const contactEmail = normalizeEmail(req.body.contactEmail);
+    const temporaryPassword = req.body.temporaryPassword || createTemporaryPassword();
+
+    if (!hasRequiredFields({ ...req.body, contactPhone }, ["name", "type", "contactPhone"])) {
+      return sendError(res, 400, "Name, type, and contactPhone are required");
+    }
+
+    if (!isValidIndianMobile(contactPhone)) {
+      return sendError(res, 400, "contactPhone must be a valid 10 digit mobile number");
+    }
+
+    if (!isValidEmail(contactEmail)) {
+      return sendError(res, 400, "contactEmail must be a valid email address");
+    }
+
+    if (req.body.temporaryPassword && !isValidPassword(req.body.temporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     if (req.body.creditPercentage !== undefined && !isValidPercentage(req.body.creditPercentage)) {
@@ -663,22 +711,102 @@ export const createChannelPartner = async (req, res) => {
       return sendError(res, 400, addressError);
     }
 
-    const channelPartner = await ChannelPartner.create({
-      ...req.body,
-      address,
-      createdBy: req.auth.id
-    });
+    const duplicateFilters = [
+      { mobile: contactPhone, role: ACCOUNT_ROLES.PARTNER_ADMIN },
+      ...(contactEmail ? [{ email: contactEmail }] : [])
+    ];
+    const [existingAccount, existingPartner] = await Promise.all([
+      Account.findOne({ $or: duplicateFilters }).lean(),
+      ChannelPartner.findOne({ contactPhone }).lean()
+    ]);
 
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.CHANNEL_PARTNER_CREATED,
-      actorId: req.auth.id,
-      channelPartnerId: channelPartner._id,
-      metadata: { name: channelPartner.name, type: channelPartner.type }
-    });
+    if (existingPartner || existingAccount?.mobile === contactPhone) {
+      return sendError(res, 400, "Phone number is already used");
+    }
+    if (contactEmail && existingAccount?.email === contactEmail) {
+      return sendError(res, 400, "Account with this email already exists");
+    }
 
-    return sendSuccess(res, 201, "Channel partner created successfully", channelPartner);
+    session.startTransaction();
+
+    const partnerDocuments = await ChannelPartner.create(
+      [
+        {
+          name: req.body.name,
+          type: req.body.type,
+          contactPhone,
+          ...(contactEmail ? { contactEmail } : {}),
+          ...(req.body.creditPercentage !== undefined ? { creditPercentage: req.body.creditPercentage } : {}),
+          address,
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+    const channelPartner = partnerDocuments[0];
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
+    const accountDocuments = await Account.create(
+      [
+        {
+          name: `${String(req.body.name).trim()} Admin`,
+          ...(contactEmail ? { email: contactEmail } : {}),
+          mobile: contactPhone,
+          role: ACCOUNT_ROLES.PARTNER_ADMIN,
+          channelPartnerId: channelPartner._id,
+          passwordHash,
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+    const partnerAdmin = accountDocuments[0];
+    channelPartner.adminAccountId = partnerAdmin._id;
+    await channelPartner.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.CHANNEL_PARTNER_CREATED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        metadata: { name: channelPartner.name, type: channelPartner.type, source: "admin_portal" }
+      },
+      { session }
+    );
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        metadata: { accountId: partnerAdmin._id, role: partnerAdmin.role, source: "admin_partner_create" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Channel partner created successfully", {
+      channelPartner,
+      partnerAdmin: {
+        accountId: partnerAdmin._id,
+        name: partnerAdmin.name,
+        email: partnerAdmin.email || null,
+        mobile: partnerAdmin.mobile,
+        role: partnerAdmin.role,
+        channelPartnerId: partnerAdmin.channelPartnerId
+      },
+      credentials: {
+        identifier: partnerAdmin.mobile,
+        mobile: partnerAdmin.mobile,
+        email: partnerAdmin.email || null,
+        temporaryPassword
+      }
+    });
   } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    if (error?.code === 11000) return sendError(res, 400, "Phone number or email is already used");
     return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 
@@ -694,8 +822,8 @@ export const getChannelPartnerById = async (req, res) => {
 
     const [channelPartner, tenants, accounts] = await Promise.all([
       ChannelPartner.findById(req.params.id).lean(),
-      Tenant.find({ channelPartnerId: req.params.id }).lean(),
-      Account.find({ channelPartnerId: req.params.id }).select("-passwordHash").lean()
+      Tenant.find({ channelPartnerId: req.params.id }).sort({ createdAt: -1, _id: -1 }).lean(),
+      Account.find({ channelPartnerId: req.params.id }).select("-passwordHash").sort({ createdAt: -1, _id: -1 }).lean()
     ]);
 
     if (!channelPartner) {
@@ -726,6 +854,15 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    const contactPhone = normalizeMobile(req.body.contactPhone);
+    const contactEmail = normalizeEmail(req.body.contactEmail);
+    if (!isValidIndianMobile(contactPhone)) {
+      return sendError(res, 400, "contactPhone must be a valid 10 digit mobile number");
+    }
+    if (!isValidEmail(contactEmail)) {
+      return sendError(res, 400, "contactEmail must be a valid email address");
+    }
+
     const address = normalizeAddressPayload(req.body);
     const addressError = getAddressValidationError(address);
     if (addressError) {
@@ -735,6 +872,8 @@ export const updateChannelPartner = async (req, res) => {
     const allowedUpdates = ["name", "type", "contactEmail", "contactPhone", "creditPercentage", "payoutUpiId", "payoutUpiName"];
     const updates = {
       ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      contactPhone,
+      contactEmail: contactEmail || undefined,
       address
     };
 
@@ -1019,7 +1158,7 @@ export const listTenants = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      Tenant.find(filter).populate("channelPartnerId", "name type").skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      Tenant.find(filter).populate("channelPartnerId", "name type").skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       Tenant.countDocuments(filter)
     ]);
 
@@ -1040,11 +1179,10 @@ export const createTenant = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
-    const shouldCreateTenantAdmin = isTruthyQueryParam(req.query.app);
-    const requiredFields = ["name", "type", "capabilities", "channelPartnerId"];
+    const requiredFields = ["name", "type", "channelPartnerId", "supportPhone"];
 
     if (!hasRequiredFields(req.body, requiredFields)) {
-      return sendError(res, 400, "Name, type, capabilities, and channelPartnerId are required");
+      return sendError(res, 400, "Name, type, channelPartnerId, and supportPhone are required");
     }
 
     if (req.body.tenantPolicy || req.body.devicePolicies) {
@@ -1059,18 +1197,22 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, "Invalid channel partner ID");
     }
 
-    const capabilities = req.body.capabilities;
+    const capabilities = [TENANT_CAPABILITIES.LEND, TENANT_CAPABILITIES.DISTRIBUTE];
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const supportEmail = normalizeEmail(req.body.supportEmail);
+    const requestedTemporaryPassword = req.body.temporaryPassword;
+    const tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
 
-    if (!Array.isArray(capabilities) || capabilities.length === 0) {
-      return sendError(res, 400, "At least one tenant capability is required");
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "supportPhone must be a valid 10 digit mobile number");
     }
 
-    const invalidCapability = capabilities.find(
-      (capability) => !Object.values(TENANT_CAPABILITIES).includes(capability)
-    );
+    if (!isValidEmail(supportEmail)) {
+      return sendError(res, 400, "supportEmail must be a valid email address");
+    }
 
-    if (invalidCapability) {
-      return sendError(res, 400, `Invalid capability: ${invalidCapability}`);
+    if (requestedTemporaryPassword && !isValidPassword(requestedTemporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     const creditPurchasePerKeyPrice =
@@ -1101,32 +1243,16 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, "Active channel partner not found");
     }
 
-    let tenantAdminInput = null;
-    let tenantAdminPassword = null;
-
-    if (shouldCreateTenantAdmin) {
-      tenantAdminInput = req.body.tenantAdmin || {};
-      const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
-        .trim()
-        .toLowerCase();
-      const requestedTemporaryPassword = tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
-
-      if (!tenantAdminEmail) {
-        return sendError(res, 400, "Tenant admin email is required when app=true");
-      }
-
-      const existingAccount = await Account.findOne({ email: tenantAdminEmail }).lean();
-      if (existingAccount) {
-        return sendError(res, 400, "Account with this email already exists");
-      }
-
-      tenantAdminInput = {
-        name: tenantAdminInput.name || req.body.adminName || `${req.body.name} Admin`,
-        email: tenantAdminEmail,
-        mobile: tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone,
-        channelPartnerId: req.body.channelPartnerId
-      };
-      tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
+    const duplicateFilters = [
+      { mobile: supportPhone, role: ACCOUNT_ROLES.TENANT_ADMIN },
+      ...(supportEmail ? [{ email: supportEmail }] : [])
+    ];
+    const existingAccount = await Account.findOne({ $or: duplicateFilters }).lean();
+    if (existingAccount?.mobile === supportPhone) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+    if (supportEmail && existingAccount?.email === supportEmail) {
+      return sendError(res, 400, "Account with this email already exists");
     }
 
     session.startTransaction();
@@ -1139,9 +1265,8 @@ export const createTenant = async (req, res) => {
           capabilities,
           channelPartnerId: req.body.channelPartnerId,
           parentTenantId: req.body.parentTenantId || null,
-          supportPhone: req.body.supportPhone,
-          supportEmail: req.body.supportEmail,
-          supportWhatsapp: req.body.supportWhatsapp,
+          supportPhone,
+          ...(supportEmail ? { supportEmail } : {}),
           address,
           ...poc,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
@@ -1178,44 +1303,41 @@ export const createTenant = async (req, res) => {
       { session, ordered: true }
     );
 
-    if (shouldCreateTenantAdmin) {
-      const passwordHash = await bcrypt.hash(tenantAdminPassword, 12);
-      const tenantAdminAccounts = await Account.create(
-        [
-          {
-            name: tenantAdminInput.name,
-            email: tenantAdminInput.email,
-            mobile: tenantAdminInput.mobile,
-            role: ACCOUNT_ROLES.TENANT_ADMIN,
-            tenantId: createdTenant._id,
-            channelPartnerId: tenantAdminInput.channelPartnerId,
-            passwordHash,
-            createdBy: req.auth.id
-          }
-        ],
-        { session, ordered: true }
-      );
-
-      createdTenantAdmin = tenantAdminAccounts[0];
-      createdTenant.adminAccountId = createdTenantAdmin._id;
-      await createdTenant.save({ session });
-
-      await createAuditLog(
+    const passwordHash = await bcrypt.hash(tenantAdminPassword, 12);
+    const tenantAdminAccounts = await Account.create(
+      [
         {
-          eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
-          actorId: req.auth.id,
+          name: `${String(req.body.name).trim()} Admin`,
+          ...(supportEmail ? { email: supportEmail } : {}),
+          mobile: supportPhone,
+          role: ACCOUNT_ROLES.TENANT_ADMIN,
           tenantId: createdTenant._id,
-          channelPartnerId: createdTenant.channelPartnerId,
-          metadata: {
-            accountId: createdTenantAdmin._id,
-            role: createdTenantAdmin.role,
-            email: createdTenantAdmin.email,
-            source: "tenant_create_app"
-          }
-        },
-        { session }
-      );
-    }
+          channelPartnerId: req.body.channelPartnerId,
+          passwordHash,
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    createdTenantAdmin = tenantAdminAccounts[0];
+    createdTenant.adminAccountId = createdTenantAdmin._id;
+    await createdTenant.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+        actorId: req.auth.id,
+        tenantId: createdTenant._id,
+        channelPartnerId: createdTenant.channelPartnerId,
+        metadata: {
+          accountId: createdTenantAdmin._id,
+          role: createdTenantAdmin.role,
+          source: "admin_tenant_create"
+        }
+      },
+      { session }
+    );
 
     await createAuditLog(
       {
@@ -1255,28 +1377,27 @@ export const createTenant = async (req, res) => {
       tenant: createdTenant,
       tenantPolicy,
       devicePolicies,
-      ...(createdTenantAdmin
-        ? {
-            tenantAdmin: {
-              accountId: createdTenantAdmin._id,
-              name: createdTenantAdmin.name,
-              email: createdTenantAdmin.email,
-              mobile: createdTenantAdmin.mobile,
-              role: createdTenantAdmin.role,
-              tenantId: createdTenantAdmin.tenantId,
-              channelPartnerId: createdTenantAdmin.channelPartnerId
-            },
-            credentials: {
-              email: createdTenantAdmin.email,
-              temporaryPassword: tenantAdminPassword
-            }
-          }
-        : {})
+      tenantAdmin: {
+        accountId: createdTenantAdmin._id,
+        name: createdTenantAdmin.name,
+        email: createdTenantAdmin.email || null,
+        mobile: createdTenantAdmin.mobile,
+        role: createdTenantAdmin.role,
+        tenantId: createdTenantAdmin.tenantId,
+        channelPartnerId: createdTenantAdmin.channelPartnerId
+      },
+      credentials: {
+        identifier: createdTenantAdmin.mobile,
+        mobile: createdTenantAdmin.mobile,
+        email: createdTenantAdmin.email || null,
+        temporaryPassword: tenantAdminPassword
+      }
     });
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
+    if (error?.code === 11000) return sendError(res, 400, "Phone number or email is already used");
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
     session.endSession();
@@ -1335,9 +1456,20 @@ export const updateTenant = async (req, res) => {
       return sendError(res, 400, pocError);
     }
 
-    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "parentTenantId", "creditPurchasePerKeyPrice"];
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const supportEmail = normalizeEmail(req.body.supportEmail);
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "supportPhone must be a valid 10 digit mobile number");
+    }
+    if (!isValidEmail(supportEmail)) {
+      return sendError(res, 400, "supportEmail must be a valid email address");
+    }
+
+    const allowedUpdates = ["name", "supportPhone", "supportEmail", "parentTenantId", "creditPurchasePerKeyPrice"];
     const updates = {
       ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      supportPhone,
+      supportEmail: supportEmail || undefined,
       address,
       ...poc
     };
@@ -1558,6 +1690,116 @@ export const adjustTenantCredits = async (req, res) => {
  * List tenant credit purchase requests.
  * Sample query: /admin/tenant-credit-purchases?status=PENDING&tenantId=665f...&sortBy=requestedAt&sortOrder=desc&page=1&limit=20
  */
+export const listPartnerCreditLedger = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) return sendError(res, 400, "Invalid channel partner ID");
+      filter.channelPartnerId = req.query.channelPartnerId;
+    }
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) return sendError(res, 400, "Invalid tenant ID");
+      filter.tenantId = req.query.tenantId;
+    }
+    if (req.query.type && req.query.type !== "all") {
+      if (!Object.values(PARTNER_CREDIT_LEDGER_TYPES).includes(req.query.type)) {
+        return sendError(res, 400, "Invalid partner ledger type");
+      }
+      filter.type = req.query.type;
+    }
+    if (req.query.balanceType && req.query.balanceType !== "all") {
+      if (!Object.values(PARTNER_CREDIT_BALANCE_TYPES).includes(req.query.balanceType)) {
+        return sendError(res, 400, "Invalid partner ledger balance type");
+      }
+      filter.balanceType = req.query.balanceType;
+    }
+    if (req.query.direction && req.query.direction !== "all") {
+      if (!['credit', 'debit'].includes(req.query.direction)) return sendError(res, 400, "direction must be credit or debit");
+      filter.delta = req.query.direction === "credit" ? { $gt: 0 } : { $lt: 0 };
+    }
+
+    const dateRange = getDateRangeFilter(req.query);
+    if (dateRange.error) return sendError(res, 400, dateRange.error);
+    if (dateRange.value) filter.createdAt = dateRange.value;
+
+    const [items, total] = await Promise.all([
+      PartnerCreditLedger.find(filter)
+        .populate("channelPartnerId", "name type")
+        .populate("tenantId", "name type")
+        .populate("payoutRequestId", "amount status adminReferenceId requestedAt")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      PartnerCreditLedger.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Partner credit ledger fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const listTenantCreditLedger = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) return sendError(res, 400, "Invalid tenant ID");
+      filter.tenantId = req.query.tenantId;
+    }
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) return sendError(res, 400, "Invalid channel partner ID");
+      const tenantFilter = { channelPartnerId: req.query.channelPartnerId };
+      if (filter.tenantId) tenantFilter._id = filter.tenantId;
+      const tenantIds = await Tenant.find(tenantFilter).distinct("_id");
+      filter.tenantId = { $in: tenantIds };
+    }
+    if (req.query.type && req.query.type !== "all") {
+      if (!Object.values(TENANT_CREDIT_LEDGER_TYPES).includes(req.query.type)) {
+        return sendError(res, 400, "Invalid tenant ledger type");
+      }
+      filter.type = req.query.type;
+    }
+    if (req.query.direction && req.query.direction !== "all") {
+      if (!["credit", "debit"].includes(req.query.direction)) return sendError(res, 400, "direction must be credit or debit");
+      filter.delta = req.query.direction === "credit" ? { $gt: 0 } : { $lt: 0 };
+    }
+
+    const dateRange = getDateRangeFilter(req.query);
+    if (dateRange.error) return sendError(res, 400, dateRange.error);
+    if (dateRange.value) filter.createdAt = dateRange.value;
+
+    const [items, total] = await Promise.all([
+      TenantCreditLedger.find(filter)
+        .populate({
+          path: "tenantId",
+          select: "name type channelPartnerId",
+          populate: { path: "channelPartnerId", select: "name type" }
+        })
+        .populate("userId", "name mobile loanId")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      TenantCreditLedger.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Tenant credit ledger fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
 export const listTenantCreditPurchaseRequests = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
@@ -2453,43 +2695,60 @@ export const getAdminAccountById = async (req, res) => {
  */
 export const createAdminAccount = async (req, res) => {
   try {
-    if (!hasRequiredFields(req.body, ["name", "email", "role", "temporaryPassword"])) {
-      return sendError(res, 400, "Name, email, role, and temporaryPassword are required");
+    const mobile = normalizeMobile(req.body.mobile);
+    const email = normalizeEmail(req.body.email);
+
+    if (!hasRequiredFields({ ...req.body, mobile }, ["name", "mobile", "role", "temporaryPassword"])) {
+      return sendError(res, 400, "Name, mobile, role, and temporaryPassword are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Mobile must be a valid 10 digit number");
+    }
+
+    if (!isValidEmail(email)) {
+      return sendError(res, 400, "Email must be a valid email address");
+    }
+
+    if (!isValidPassword(req.body.temporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     if (![ACCOUNT_ROLES.PARTNER_ADMIN, ACCOUNT_ROLES.TENANT_ADMIN].includes(req.body.role)) {
       return sendError(res, 400, "Only partner_admin and tenant_admin can be created here");
     }
 
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && !isValidObjectId(req.body.tenantId)) {
-      return sendError(res, 400, "Valid tenantId is required for tenant_admin");
+    if (
+      req.body.role === ACCOUNT_ROLES.TENANT_ADMIN &&
+      (!isValidObjectId(req.body.tenantId) || !isValidObjectId(req.body.channelPartnerId))
+    ) {
+      return sendError(res, 400, "Valid tenantId and channelPartnerId are required for tenant_admin");
     }
 
     if (req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN && !isValidObjectId(req.body.channelPartnerId)) {
       return sendError(res, 400, "Valid channelPartnerId is required for partner_admin");
     }
 
-    const existingAccount = await Account.findOne({ email: req.body.email.toLowerCase() });
+    const duplicateFilters = [
+      { mobile, role: req.body.role },
+      ...(email ? [{ email }] : [])
+    ];
+    const existingAccount = await Account.findOne({ $or: duplicateFilters });
 
-    if (existingAccount) {
+    if (existingAccount?.mobile === mobile && existingAccount?.role === req.body.role) {
+      return sendError(res, 400, "Account with this mobile and role already exists");
+    }
+    if (email && existingAccount?.email === email) {
       return sendError(res, 400, "Account with this email already exists");
     }
 
     if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN) {
-      const tenant = await Tenant.findOne({ _id: req.body.tenantId, isActive: true });
-      if (!tenant) return sendError(res, 400, "Active tenant not found");
-    }
-
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId && !isValidObjectId(req.body.channelPartnerId)) {
-      return sendError(res, 400, "Valid channelPartnerId is required when provided");
-    }
-
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId) {
-      const channelPartner = await ChannelPartner.findOne({
-        _id: req.body.channelPartnerId,
+      const tenant = await Tenant.findOne({
+        _id: req.body.tenantId,
+        channelPartnerId: req.body.channelPartnerId,
         isActive: true
       });
-      if (!channelPartner) return sendError(res, 400, "Active channel partner not found");
+      if (!tenant) return sendError(res, 400, "Active tenant not found under the selected channel partner");
     }
 
     if (req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN) {
@@ -2503,8 +2762,8 @@ export const createAdminAccount = async (req, res) => {
     const passwordHash = await bcrypt.hash(req.body.temporaryPassword, 12);
     const account = await Account.create({
       name: req.body.name,
-      email: req.body.email,
-      mobile: req.body.mobile,
+      ...(email ? { email } : {}),
+      mobile,
       role: req.body.role,
       tenantId: req.body.role === ACCOUNT_ROLES.TENANT_ADMIN ? req.body.tenantId : undefined,
       channelPartnerId:
@@ -2647,7 +2906,7 @@ export const listConsentVersions = async (req, res) => {
     if (req.query.status === "draft") filter.isCurrent = false;
 
     const [items, total] = await Promise.all([
-      ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       ConsentVersion.countDocuments(filter)
     ]);
 
@@ -3141,7 +3400,7 @@ export const getDeviceById = async (req, res) => {
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
-      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).lean()
+      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).sort({ createdAt: -1, _id: -1 }).lean()
     ]);
 
     return sendSuccess(res, 200, "Device fetched successfully", {
@@ -3903,7 +4162,7 @@ export const listFcmDeliveryLogs = async (req, res) => {
 
     const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
     const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
-    const sort = sortBy === "createdAt" ? { createdAt: sortOrder } : { [sortBy]: sortOrder, createdAt: -1 };
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder, _id: -1 } : { [sortBy]: sortOrder, createdAt: -1, _id: -1 };
 
     const [rawItems, total] = await Promise.all([
       FcmDeliveryLog.find(filter)
@@ -3978,7 +4237,7 @@ export const getAdminRiskFlags = async (req, res) => {
 
     const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
     const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
-    const sort = sortBy === "createdAt" ? { createdAt: sortOrder } : { [sortBy]: sortOrder, createdAt: -1 };
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder, _id: -1 } : { [sortBy]: sortOrder, createdAt: -1, _id: -1 };
 
     const [items, total] = await Promise.all([
       RiskFlag.find(filter)

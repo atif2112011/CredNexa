@@ -699,5 +699,7 @@ export const getActiveCriticalRiskFlagsForDevice = (deviceId) => {
     deviceId,
     severity: "critical",
     ...ACTIVE_RISK_FILTER
-  }).lean();
+  })
+    .sort({ createdAt: -1, _id: -1 })
+    .lean();
 };

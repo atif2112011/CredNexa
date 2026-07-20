@@ -162,7 +162,8 @@ export const forgotPasswordSendOtp = async (req, res) => {
     return sendSuccess(res, 200, "OTP sent successfully", {
       verificationSessionId: otpSession.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: otpSession.expiresInSeconds
+      expiresInSeconds: otpSession.expiresInSeconds,
+      retryAfterSeconds: otpSession.retryAfterSeconds
     });
   } catch (error) {
     console.error("Forgot password OTP send failed", {
@@ -211,7 +212,8 @@ export const forgotPasswordResendOtp = async (req, res) => {
     return sendSuccess(res, 200, "OTP resent successfully", {
       verificationSessionId: otpRecord.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: resendResult.expiresInSeconds
+      expiresInSeconds: resendResult.expiresInSeconds,
+      retryAfterSeconds: resendResult.retryAfterSeconds
     });
   } catch (error) {
     console.error("Forgot password OTP resend failed", {
@@ -220,7 +222,12 @@ export const forgotPasswordResendOtp = async (req, res) => {
       verificationSessionId: req.body?.verificationSessionId
     });
 
-    return sendError(res, 500, error.message || "Unable to send OTP right now");
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Unable to send OTP right now",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 

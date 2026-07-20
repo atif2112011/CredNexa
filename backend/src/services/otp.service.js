@@ -5,7 +5,9 @@ import { env } from "../config/env.js";
 import { OtpRecord } from "../models/OtpRecord.js";
 
 export const MOCK_OTP = "123456";
-export const OTP_EXPIRES_IN_SECONDS = 600;
+export const OTP_EXPIRES_IN_SECONDS = Number.isFinite(env.otpExpiresInSeconds) && env.otpExpiresInSeconds > 0 ? env.otpExpiresInSeconds : 900;
+export const OTP_RESEND_COOLDOWN_SECONDS =
+  Number.isFinite(env.otpResendCooldownSeconds) && env.otpResendCooldownSeconds > 0 ? env.otpResendCooldownSeconds : 30;
 export const OTP_DELIVERY_ERROR_MESSAGE = "Unable to send OTP right now";
 
 export const OTP_PROVIDERS = Object.freeze({
@@ -40,6 +42,30 @@ export const normalizeMobileForMsg91 = (mobile) => {
 };
 
 const createVerificationSessionId = () => `otp_${crypto.randomBytes(12).toString("hex")}`;
+const generateOtpCode = () => String(crypto.randomInt(100000, 1000000));
+const getOtpExpiryMinutes = () => Math.ceil(OTP_EXPIRES_IN_SECONDS / 60);
+
+const getRemainingSeconds = (date) => Math.max(Math.ceil((date.getTime() - Date.now()) / 1000), 0);
+
+const getLastOtpSentAt = (otpRecord) => {
+  const timestamp = otpRecord.providerResponse?.lastResentAt || otpRecord.providerResponse?.lastSentAt || otpRecord.createdAt;
+  const date = timestamp ? new Date(timestamp) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : null;
+};
+
+const assertResendCooldownElapsed = (otpRecord) => {
+  const lastOtpSentAt = getLastOtpSentAt(otpRecord);
+  if (!lastOtpSentAt) return;
+
+  const elapsedSeconds = Math.floor((Date.now() - lastOtpSentAt.getTime()) / 1000);
+  const retryAfterSeconds = OTP_RESEND_COOLDOWN_SECONDS - elapsedSeconds;
+  if (retryAfterSeconds > 0) {
+    const error = new Error(`Please wait ${retryAfterSeconds} seconds before requesting OTP again`);
+    error.statusCode = 429;
+    error.retryAfterSeconds = retryAfterSeconds;
+    throw error;
+  }
+};
 
 const parseProviderResponse = async (response) => {
   const text = await response.text();
@@ -128,6 +154,10 @@ const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType, m
       mode: "mock",
       status: "OTP_SENT",
       flowType,
+      otpLength: 6,
+      expiresInSeconds: OTP_EXPIRES_IN_SECONDS,
+      retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      lastSentAt: new Date(),
       ...metadata
     }
   });
@@ -135,13 +165,16 @@ const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType, m
   return {
     verificationSessionId,
     providerReferenceId,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
+    expiresInSeconds: OTP_EXPIRES_IN_SECONDS,
+    retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS
   };
 };
 
 const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, metadata = {} }) => {
   const config = getMsg91Config();
   const verificationSessionId = createVerificationSessionId();
+  const otp = generateOtpCode();
+  const otpHash = await bcrypt.hash(otp, 12);
   const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
   const normalizedMobile = normalizeMobileForMsg91(mobile);
   const url = new URL(MSG91_OTP_BASE_URL);
@@ -149,6 +182,9 @@ const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, 
   url.searchParams.set("template_id", config.templateId);
   url.searchParams.set("mobile", normalizedMobile);
   url.searchParams.set("authkey", config.authKey);
+  url.searchParams.set("otp", otp);
+  url.searchParams.set("otp_expiry", String(getOtpExpiryMinutes()));
+  url.searchParams.set("otp_length", "6");
 
   const body = await callMsg91({
     url,
@@ -162,6 +198,7 @@ const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, 
 
   await OtpRecord.create({
     mobile,
+    otpHash,
     purpose,
     verificationSessionId,
     enrollmentTokenId: enrollmentToken?._id,
@@ -175,6 +212,10 @@ const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, 
       status: "OTP_SENT",
       to: normalizedMobile,
       flowType,
+      otpLength: 6,
+      expiresInSeconds: OTP_EXPIRES_IN_SECONDS,
+      retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      lastSentAt: new Date(),
       response: body,
       ...metadata
     }
@@ -183,7 +224,8 @@ const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, 
   return {
     verificationSessionId,
     providerReferenceId,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
+    expiresInSeconds: OTP_EXPIRES_IN_SECONDS,
+    retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS
   };
 };
 
@@ -252,6 +294,8 @@ export const resendOtp = async ({ otpRecord, retryType } = {}) => {
     throw new Error("OTP record is required");
   }
 
+  assertResendCooldownElapsed(otpRecord);
+
   if (otpRecord.provider === OTP_PROVIDERS.MSG91) {
     const config = getMsg91Config();
     const normalizedMobile = otpRecord.providerResponse?.to || normalizeMobileForMsg91(otpRecord.mobile);
@@ -281,7 +325,8 @@ export const resendOtp = async ({ otpRecord, retryType } = {}) => {
 
     return {
       providerReferenceId: otpRecord.providerReferenceId,
-      expiresInSeconds: Math.max(Math.ceil((otpRecord.expiresAt.getTime() - Date.now()) / 1000), 0)
+      expiresInSeconds: getRemainingSeconds(otpRecord.expiresAt),
+      retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS
     };
   }
 
@@ -295,6 +340,7 @@ export const resendOtp = async ({ otpRecord, retryType } = {}) => {
 
   return {
     providerReferenceId: otpRecord.providerReferenceId,
-    expiresInSeconds: Math.max(Math.ceil((otpRecord.expiresAt.getTime() - Date.now()) / 1000), 0)
+    expiresInSeconds: getRemainingSeconds(otpRecord.expiresAt),
+    retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS
   };
 };

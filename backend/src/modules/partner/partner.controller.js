@@ -24,6 +24,7 @@ import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
+import { sendPayoutMail } from "../../services/mail.service.js";
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
@@ -193,7 +194,8 @@ export const initiatePartnerSignupOtp = async (req, res) => {
     return sendSuccess(res, 200, "OTP sent successfully", {
       verificationSessionId: otp.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -229,10 +231,16 @@ export const resendPartnerSignupOtp = async (req, res) => {
     return sendSuccess(res, 200, "OTP resent successfully", {
       verificationSessionId: otpRecord.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -772,6 +780,18 @@ export const requestPartnerPayout = async (req, res) => {
 
     await session.commitTransaction();
 
+    try {
+      await sendPayoutMail({ payoutRequest, channelPartner: partnerBeforeHold });
+    } catch (mailError) {
+      console.error("Failed to send partner payout request email", {
+        payoutRequestId: payoutRequest._id.toString(),
+        channelPartnerId: partnerBeforeHold._id.toString(),
+        errorCode: mailError.code || "MAIL_SEND_FAILED",
+        smtpCommand: mailError.command || null,
+        responseCode: mailError.responseCode || null
+      });
+    }
+
     return sendSuccess(res, 201, "Partner payout requested successfully", {
       payoutRequest,
       ledgerEntryId: ledgerEntries[0]._id,
@@ -809,7 +829,7 @@ export const listPartnerPayoutRequests = async (req, res) => {
 
     const [items, total] = await Promise.all([
       PartnerPayoutRequest.find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .select("-__v")
@@ -844,7 +864,7 @@ export const getPartnerTenants = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      Tenant.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Tenant.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
       Tenant.countDocuments(filter)
     ]);
 
@@ -941,7 +961,8 @@ export const initiateTenantCreationVerification = async (req, res) => {
       verificationSessionId: otp.verificationSessionId,
       otpSent: true,
       tenantCreationVerificationMode,
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -995,10 +1016,16 @@ export const resendTenantCreationVerification = async (req, res) => {
       verificationSessionId: otpRecord.verificationSessionId,
       otpSent: true,
       tenantCreationVerificationMode,
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -1423,7 +1450,7 @@ export const listPartnerAccounts = async (req, res) => {
       Account.find(filter)
         .select("-passwordHash")
         .populate("tenantId", "name type")
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -1634,7 +1661,7 @@ export const listPartnerEscalations = async (req, res) => {
         .populate("tenantId", "name type")
         .populate("userId", "name mobile loanId")
         .populate("deviceId", "imei deviceModel manufacturer state")
-        .sort({ updatedAt: -1 })
+        .sort({ updatedAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),

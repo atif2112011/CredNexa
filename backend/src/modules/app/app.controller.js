@@ -641,7 +641,8 @@ export const initiateConsentOtp = async (req, res) => {
           flowType: FLOW_TYPES.ONBOARDING_CONSENT,
           nextStep: NEXT_STEPS.VERIFY_OTP,
           maskedMobile: maskMobile(mobile),
-          expiresInSeconds: otp.expiresInSeconds
+          expiresInSeconds: otp.expiresInSeconds,
+          retryAfterSeconds: otp.retryAfterSeconds
         });
       }
 
@@ -664,7 +665,8 @@ export const initiateConsentOtp = async (req, res) => {
           flowType: FLOW_TYPES.ONBOARDING_RESUME,
           nextStep: NEXT_STEPS.VERIFY_OTP,
           maskedMobile: maskMobile(mobile),
-          expiresInSeconds: otp.expiresInSeconds
+          expiresInSeconds: otp.expiresInSeconds,
+          retryAfterSeconds: otp.retryAfterSeconds
         });
       }
     }
@@ -688,7 +690,8 @@ export const initiateConsentOtp = async (req, res) => {
       flowType: FLOW_TYPES.DEVICE_LOGIN,
       nextStep: NEXT_STEPS.VERIFY_OTP,
       maskedMobile: maskMobile(mobile),
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -730,10 +733,16 @@ export const resendConsentOtp = async (req, res) => {
       verificationSessionId: otpRecord.verificationSessionId,
       otpSent: true,
       maskedMobile: maskMobile(req.body.mobile),
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -1895,7 +1904,7 @@ export const getInstallments = async (req, res) => {
     return sendSuccess(res, 200, "Installments fetched successfully", {
       loanDetails: buildLoanDetails(user, schedule),
       installments: [...schedule.installments]
-        .sort((a, b) => Number(a.installmentNumber || 0) - Number(b.installmentNumber || 0))
+        .sort((a, b) => Number(b.installmentNumber || 0) - Number(a.installmentNumber || 0))
         .map(buildInstallmentSummary)
     });
   } catch (error) {
@@ -2086,7 +2095,7 @@ export const submitPayment = async (req, res) => {
  */
 export const getPaymentHistory = async (req, res) => {
   try {
-    const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1 }).lean();
+    const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1, _id: -1 }).lean();
     return sendSuccess(res, 200, "Payment history fetched successfully", payments);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2269,7 +2278,7 @@ export const listBorrowerUnlockRequests = async (req, res) => {
 
     const [items, total] = await Promise.all([
       UnlockRequest.find(filter)
-        .sort({ [sortField]: sortOrder, createdAt: -1 })
+        .sort({ [sortField]: sortOrder, createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),

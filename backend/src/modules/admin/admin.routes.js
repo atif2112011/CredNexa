@@ -35,6 +35,8 @@ import {
   getManualOverrideTokenById,
   listFcmDeliveryLogs,
   listDeviceManualOverrideTokens,
+  listPartnerCreditLedger,
+  listTenantCreditLedger,
   getPartnerPayoutRequestById,
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
@@ -106,6 +108,8 @@ adminRoutes.patch("/channel-partners/:id/status", updateChannelPartnerStatus);
 
 adminRoutes.get("/payout/constants", getPayoutConstants);
 adminRoutes.patch("/payout/constants", parseAdminCreditPurchaseQrImageUpload, updatePayoutConstants);
+adminRoutes.get("/ledgers/partners", listPartnerCreditLedger);
+adminRoutes.get("/ledgers/tenants", listTenantCreditLedger);
 adminRoutes.get("/partner-payouts", listPartnerPayoutRequests);
 adminRoutes.get("/partner-payouts/:payoutId", getPartnerPayoutRequestById);
 adminRoutes.post("/partner-payouts/:payoutId/approve", parsePaymentProofUpload, approvePartnerPayoutRequest);

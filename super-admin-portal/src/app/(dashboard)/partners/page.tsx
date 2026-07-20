@@ -1,7 +1,7 @@
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
-import { partnerFields } from "@/lib/forms";
+import { partnerCreateFields } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
 export default async function PartnersPage() {
@@ -12,7 +12,7 @@ export default async function PartnersPage() {
       <PageHeader
         title="Channel Partners"
         description="Create, inspect, update, activate, and deactivate partner organizations."
-        actions={<FormDialog title="Create partner" triggerLabel="Create partner" endpoint="/api/admin/channel-partners" fields={partnerFields} />}
+        actions={<FormDialog title="Create partner" triggerLabel="Create partner" endpoint="/api/admin/channel-partners" fields={partnerCreateFields} successVariant="partner" />}
       />
       <ResourceTable
         rows={data.items}

@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Save } from "lucide-react";
+import { Copy, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -19,7 +19,7 @@ export type FieldConfig = {
   label: string;
   type?: "text" | "email" | "password" | "number" | "textarea" | "select";
   required?: boolean;
-  options?: { label: string; value: string }[];
+  options?: { label: string; value: string; parentValue?: string }[];
   placeholder?: string;
 };
 
@@ -33,26 +33,33 @@ type FormDialogProps = {
   defaultValues?: Record<string, unknown>;
   variant?: "default" | "outline" | "secondary" | "destructive";
   payloadMode?: "default" | "account";
+  successVariant?: "partner" | "tenant";
+};
+
+type ApiEnvelope = {
+  success?: boolean;
+  error?: string;
+  data?: Record<string, unknown>;
 };
 
 function buildPartnerOrTenantPayload(values: Record<string, string | undefined>) {
   const payload = Object.fromEntries(
-    Object.entries(values).map(([key, value]) => {
-      const normalizedValue = String(value ?? "");
-      if (key === "capabilities") return [key, normalizedValue.split(",").map((item) => item.trim()).filter(Boolean)];
-      return [key, normalizedValue];
-    })
+    Object.entries(values)
+      .filter(([, value]) => String(value ?? "").trim() !== "")
+      .map(([key, value]) => [key, String(value ?? "")])
   ) as Record<string, unknown>;
 
   payload.address = {
     street: values.addressStreet || "",
     city: values.addressCity || "",
+    district: values.addressDistrict || "",
     state: values.addressState || "",
     pincode: values.addressPincode || ""
   };
 
   delete payload.addressStreet;
   delete payload.addressCity;
+  delete payload.addressDistrict;
   delete payload.addressState;
   delete payload.addressPincode;
 
@@ -107,17 +114,20 @@ export function FormDialog({
   fields,
   defaultValues,
   variant = "default",
-  payloadMode = "default"
+  payloadMode = "default",
+  successVariant
 }: FormDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [creationResult, setCreationResult] = useState<Record<string, unknown> | null>(null);
   const schema = buildSchema(fields);
   const form = useForm<Record<string, string | undefined>>({
     resolver: zodResolver(schema),
     defaultValues: Object.fromEntries(fields.map((field) => [field.name, String(defaultValues?.[field.name] ?? "")]))
   });
   const role = form.watch("role");
+  const selectedPartnerId = form.watch("channelPartnerId");
   const visibleFields = fields.filter((field) => {
     if (field.name === "tenantId" && role === "partner_admin") return false;
     return true;
@@ -129,8 +139,12 @@ export function FormDialog({
       return;
     }
 
-    if (values.role === "tenant_admin" && (!values.tenantId || values.tenantId === "none")) {
-      toast.error("Tenant is required for tenant admin");
+    if (
+      values.role === "tenant_admin" &&
+      ((!values.tenantId || values.tenantId === "none") ||
+        (!values.channelPartnerId || values.channelPartnerId === "none"))
+    ) {
+      toast.error("Channel partner and tenant are required for tenant admin");
       return;
     }
 
@@ -156,11 +170,17 @@ export function FormDialog({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
+    const result = (await response.json().catch(() => null)) as ApiEnvelope | null;
     setIsSubmitting(false);
 
     if (!response.ok) {
-      const result = (await response.json()) as { error?: string };
-      toast.error(result.error || "Action failed");
+      toast.error(result?.error || "Action failed");
+      return;
+    }
+
+    if (successVariant && result?.data) {
+      setCreationResult(result.data);
+      toast.success("Created successfully");
       return;
     }
 
@@ -169,8 +189,31 @@ export function FormDialog({
     router.refresh();
   }
 
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      const shouldRefresh = Boolean(creationResult);
+      setCreationResult(null);
+      form.reset();
+      if (shouldRefresh) router.refresh();
+    }
+  }
+
+  async function copyValue(value: unknown, label: string) {
+    await navigator.clipboard.writeText(String(value || ""));
+    toast.success(`${label} copied`);
+  }
+
+  const organization = creationResult
+    ? (creationResult[successVariant === "partner" ? "channelPartner" : "tenant"] as Record<string, unknown> | undefined)
+    : undefined;
+  const adminAccount = creationResult
+    ? (creationResult[successVariant === "partner" ? "partnerAdmin" : "tenantAdmin"] as Record<string, unknown> | undefined)
+    : undefined;
+  const credentials = creationResult?.credentials as Record<string, unknown> | undefined;
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant={variant}>{triggerLabel}</Button>
       </DialogTrigger>
@@ -179,6 +222,44 @@ export function FormDialog({
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
+        {creationResult ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-4">
+            <div className="space-y-4 overflow-y-auto pr-1">
+              <div className="rounded-lg border bg-muted/20 p-4">
+                <p className="text-sm font-medium text-muted-foreground">Created {successVariant === "partner" ? "partner" : "tenant"}</p>
+                <p className="mt-1 text-base font-semibold">{String(organization?.name || "-")}</p>
+              </div>
+              <div className="space-y-3 rounded-lg border p-4">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Admin account</p>
+                  <p className="font-semibold">{String(adminAccount?.name || "-")}</p>
+                </div>
+                {[
+                  ["Mobile", credentials?.mobile],
+                  ["Email", credentials?.email],
+                  ["Password", credentials?.temporaryPassword]
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="flex items-center justify-between gap-3 border-t pt-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-muted-foreground">{String(label)}</p>
+                      <p className="break-all text-sm font-medium">{String(value || "-")}</p>
+                    </div>
+                    {value ? (
+                      <Button type="button" variant="ghost" size="icon" title={`Copy ${String(label).toLowerCase()}`} onClick={() => copyValue(value, String(label))}>
+                        <Copy className="h-4 w-4" aria-hidden="true" />
+                        <span className="sr-only">Copy {String(label).toLowerCase()}</span>
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              <p className="text-sm text-muted-foreground">This password is shown only once. Store it before closing.</p>
+            </div>
+            <div className="flex justify-end border-t pt-4">
+              <Button type="button" onClick={() => handleOpenChange(false)}>Done</Button>
+            </div>
+          </div>
+        ) : (
         <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={form.handleSubmit(onSubmit)}>
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
             {visibleFields.map((field) => (
@@ -190,10 +271,13 @@ export function FormDialog({
                   <select
                     id={field.name}
                     className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    disabled={payloadMode === "account" && field.name === "tenantId" && role === "tenant_admin" && (!selectedPartnerId || selectedPartnerId === "none")}
                     {...form.register(field.name)}
                   >
                     <option value="">Select</option>
-                    {field.options?.map((option) => (
+                    {field.options
+                      ?.filter((option) => field.name !== "tenantId" || !option.parentValue || option.parentValue === selectedPartnerId)
+                      .map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -215,6 +299,7 @@ export function FormDialog({
             </Button>
           </div>
         </form>
+        )}
       </DialogContent>
     </Dialog>
   );

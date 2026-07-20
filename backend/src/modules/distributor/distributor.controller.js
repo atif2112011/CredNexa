@@ -21,6 +21,7 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
+import { sendApprovalMail } from "../../services/mail.service.js";
 import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
@@ -913,6 +914,18 @@ export const submitCreditPurchaseRequest = async (req, res) => {
       }
     });
 
+    try {
+      await sendApprovalMail({ creditPurchaseRequest, tenant });
+    } catch (mailError) {
+      console.error("Failed to send key purchase request email", {
+        creditPurchaseRequestId: creditPurchaseRequest._id.toString(),
+        tenantId: tenant._id.toString(),
+        errorCode: mailError.code || "MAIL_SEND_FAILED",
+        smtpCommand: mailError.command || null,
+        responseCode: mailError.responseCode || null
+      });
+    }
+
     return sendSuccess(res, 201, "Credit purchase request submitted successfully", {
       creditPurchaseRequest
     });
@@ -941,7 +954,7 @@ export const listCreditPurchaseRequests = async (req, res) => {
     }
 
     const [items, total] = await Promise.all([
-      TenantCreditPurchaseRequest.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      TenantCreditPurchaseRequest.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
       TenantCreditPurchaseRequest.countDocuments(filter)
     ]);
 
@@ -1452,7 +1465,9 @@ export const getUserEmiInstallments = async (req, res) => {
         loanId: user.loanId
       },
       emiScheduleId: schedule._id,
-      installments: schedule.installments,
+      installments: [...schedule.installments].sort(
+        (a, b) => new Date(b.dueDate || 0) - new Date(a.dueDate || 0)
+      ),
       overdueAmount: schedule.overdueAmount,
       overdueInstallments: schedule.overdueInstallments,
       dpd: schedule.dpd
@@ -1590,7 +1605,10 @@ export const getDistributorDeviceById = async (req, res) => {
     }
 
     const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id })
-      .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths consentRecordId aadhaarVerified")
+      .populate(
+        "userId",
+        "name mobile email loanId loanAmount emiAmount tenureMonths disbursementDate consentRecordId aadhaarVerified"
+      )
       .lean();
 
     if (!device) {
@@ -1612,9 +1630,13 @@ export const getDistributorDeviceById = async (req, res) => {
       EmiSchedule.findOne({ userId: device.userId?._id || device.userId, tenantId: tenant._id }).lean()
     ]);
 
+    const borrower = device.userId
+      ? { ...device.userId, disbursementDate: device.userId.disbursementDate ?? null }
+      : null;
+
     return sendSuccess(res, 200, "Device detail fetched successfully", {
       device,
-      borrower: device.userId,
+      borrower,
       emiSchedule,
       currentPolicy: policy
         ? {
@@ -1860,7 +1882,11 @@ export const listQrCodes = async (req, res) => {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    return sendSuccess(res, 200, "QR codes fetched successfully", tenant.qrCodes || []);
+    const qrCodes = [...(tenant.qrCodes || [])].sort(
+      (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+    );
+
+    return sendSuccess(res, 200, "QR codes fetched successfully", qrCodes);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -1989,7 +2015,7 @@ export const listPendingPayments = async (req, res) => {
     const payments = await Payment.find({ tenantId: tenant._id, approvalStatus: "pending_approval" })
       .populate("userId", "name mobile loanId")
       .populate("deviceId", "imei deviceModel manufacturer state")
-      .sort({ submittedAt: -1 })
+      .sort({ submittedAt: -1, _id: -1 })
       .lean();
 
     return sendSuccess(res, 200, "Pending payments fetched successfully", payments);
@@ -2030,7 +2056,7 @@ export const listPaymentApprovalRequests = async (req, res) => {
       Payment.find(filter)
         .populate("userId", "name mobile email loanId")
         .populate("deviceId", "imei deviceModel manufacturer state")
-        .sort({ submittedAt: -1 })
+        .sort({ submittedAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),

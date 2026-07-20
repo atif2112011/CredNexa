@@ -16,6 +16,7 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
     ...tenant,
     addressStreet: String((tenant.address as RecordItem | undefined)?.street || ""),
     addressCity: String((tenant.address as RecordItem | undefined)?.city || ""),
+    addressDistrict: String((tenant.address as RecordItem | undefined)?.district || ""),
     addressState: String((tenant.address as RecordItem | undefined)?.state || ""),
     addressPincode: String((tenant.address as RecordItem | undefined)?.pincode || "")
   };
@@ -33,12 +34,12 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
         }
       />
       <div className="space-y-6">
-        <DetailGrid title="Tenant Detail" data={tenant} fields={[{ label: "Name", key: "name" }, { label: "Type", key: "type" }, { label: "Partner", key: "channelPartnerId.name" }, { label: "Active", key: "isActive", type: "boolean" }, { label: "Support email", key: "supportEmail" }, { label: "Support phone", key: "supportPhone" }, { label: "Per key price", key: "creditPurchasePerKeyPrice" }, { label: "POC name", key: "pocName" }, { label: "POC phone", key: "pocPhone" }, { label: "POC designation", key: "pocDesignation" }, { label: "Address", key: "address.street" }, { label: "City", key: "address.city" }, { label: "State", key: "address.state" }, { label: "Pincode", key: "address.pincode" }]} />
+        <DetailGrid title="Tenant Detail" data={tenant} fields={[{ label: "Name", key: "name" }, { label: "Type", key: "type" }, { label: "Partner", key: "channelPartnerId.name" }, { label: "Active", key: "isActive", type: "boolean" }, { label: "Support email", key: "supportEmail" }, { label: "Support phone", key: "supportPhone" }, { label: "Per key price", key: "creditPurchasePerKeyPrice" }, { label: "POC name", key: "pocName" }, { label: "POC phone", key: "pocPhone" }, { label: "POC designation", key: "pocDesignation" }, { label: "Address", key: "address.street" }, { label: "City", key: "address.city" }, { label: "District", key: "address.district" }, { label: "State", key: "address.state" }, { label: "Pincode", key: "address.pincode" }]} />
         <TenantPolicyPanel policy={data.tenantPolicy} />
         <DevicePoliciesPanel policies={data.devicePolicies} />
         <Card>
           <CardHeader><CardTitle>Admin Accounts</CardTitle></CardHeader>
-          <CardContent><ResourceTable rows={(data.accounts as RecordItem[]) || []} detailBasePath="/accounts" columns={[{ key: "name", header: "Name" }, { key: "email", header: "Email" }, { key: "role", header: "Role" }, { key: "isActive", header: "Status", type: "boolean" }]} /></CardContent>
+          <CardContent><ResourceTable rows={(data.accounts as RecordItem[]) || []} detailBasePath="/accounts" columns={[{ key: "name", header: "Name" }, { key: "mobile", header: "Mobile" }, { key: "email", header: "Email" }, { key: "role", header: "Role" }, { key: "isActive", header: "Status", type: "boolean" }]} /></CardContent>
         </Card>
         <div className="grid gap-6 xl:grid-cols-2">
           <DeviceSummaryPanel summary={data.deviceSummary} />

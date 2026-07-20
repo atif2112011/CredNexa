@@ -21,6 +21,7 @@ export default async function AccountsPage() {
         columns={[
           { key: "name", header: "Name" },
           { key: "email", header: "Email" },
+          { key: "mobile", header: "Mobile" },
           { key: "role", header: "Role" },
           { key: "tenantId.name", header: "Tenant" },
           { key: "channelPartnerId.name", header: "Partner" },

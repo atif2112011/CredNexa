@@ -8,7 +8,16 @@ const optionFromRecord = (item: RecordItem) => ({
   value: String(item._id || item.id || "")
 });
 
-export const partnerFields: FieldConfig[] = [
+const tenantOptionFromRecord = (item: RecordItem) => ({
+  ...optionFromRecord(item),
+  parentValue: String(
+    item.channelPartnerId && typeof item.channelPartnerId === "object"
+      ? (item.channelPartnerId as RecordItem)._id || (item.channelPartnerId as RecordItem).id || ""
+      : item.channelPartnerId || ""
+  )
+});
+
+const partnerProfileFields: FieldConfig[] = [
   { name: "name", label: "Name", required: true },
   {
     name: "type",
@@ -22,13 +31,21 @@ export const partnerFields: FieldConfig[] = [
     ]
   },
   { name: "contactEmail", label: "Contact email", type: "email" },
-  { name: "contactPhone", label: "Contact phone" },
+  { name: "contactPhone", label: "Contact phone", required: true },
   { name: "creditPercentage", label: "Credit percentage", type: "number" },
   { name: "addressStreet", label: "Address", required: true },
   { name: "addressCity", label: "City", required: true },
+  { name: "addressDistrict", label: "District", required: true },
   { name: "addressState", label: "State", required: true },
   { name: "addressPincode", label: "Pincode", required: true }
 ];
+
+export const partnerCreateFields: FieldConfig[] = [
+  ...partnerProfileFields,
+  { name: "temporaryPassword", label: "Password (optional)", type: "password" }
+];
+
+export const partnerUpdateFields: FieldConfig[] = partnerProfileFields;
 
 export const tenantFields: FieldConfig[] = [
   { name: "name", label: "Name", required: true },
@@ -44,19 +61,19 @@ export const tenantFields: FieldConfig[] = [
       { label: "POS outlet", value: "pos_outlet" }
     ]
   },
-  { name: "capabilities", label: "Capabilities", required: true, placeholder: "lend, distribute" },
   { name: "channelPartnerId", label: "Channel partner ID", required: true },
-  { name: "supportPhone", label: "Support phone" },
+  { name: "supportPhone", label: "Support phone", required: true },
   { name: "supportEmail", label: "Support email", type: "email" },
-  { name: "supportWhatsapp", label: "Support WhatsApp" },
   { name: "creditPurchasePerKeyPrice", label: "Per key price", type: "number" },
   { name: "pocName", label: "POC name", required: true },
   { name: "pocPhone", label: "POC phone number", required: true },
   { name: "pocDesignation", label: "POC designation", required: true },
   { name: "addressStreet", label: "Address", required: true },
   { name: "addressCity", label: "City", required: true },
+  { name: "addressDistrict", label: "District", required: true },
   { name: "addressState", label: "State", required: true },
-  { name: "addressPincode", label: "Pincode", required: true }
+  { name: "addressPincode", label: "Pincode", required: true },
+  { name: "temporaryPassword", label: "Password (optional)", type: "password" }
 ];
 
 export const buildTenantFields = (partners: RecordItem[]): FieldConfig[] =>
@@ -73,23 +90,23 @@ export const buildTenantFields = (partners: RecordItem[]): FieldConfig[] =>
 
 export const tenantUpdateFields: FieldConfig[] = [
   { name: "name", label: "Name" },
-  { name: "supportPhone", label: "Support phone" },
+  { name: "supportPhone", label: "Support phone", required: true },
   { name: "supportEmail", label: "Support email", type: "email" },
-  { name: "supportWhatsapp", label: "Support WhatsApp" },
   { name: "creditPurchasePerKeyPrice", label: "Per key price", type: "number" },
   { name: "pocName", label: "POC name", required: true },
   { name: "pocPhone", label: "POC phone number", required: true },
   { name: "pocDesignation", label: "POC designation", required: true },
   { name: "addressStreet", label: "Address", required: true },
   { name: "addressCity", label: "City", required: true },
+  { name: "addressDistrict", label: "District", required: true },
   { name: "addressState", label: "State", required: true },
   { name: "addressPincode", label: "Pincode", required: true }
 ];
 
 export const accountFields: FieldConfig[] = [
   { name: "name", label: "Name", required: true },
-  { name: "email", label: "Email", type: "email", required: true },
-  { name: "mobile", label: "Mobile" },
+  { name: "email", label: "Email", type: "email" },
+  { name: "mobile", label: "Mobile", required: true },
   {
     name: "role",
     label: "Role",
@@ -112,7 +129,7 @@ export const buildAccountFields = (partners: RecordItem[], tenants: RecordItem[]
         ...field,
         label: "Tenant",
         type: "select",
-        options: [noneOption, ...tenants.map(optionFromRecord)]
+        options: [noneOption, ...tenants.map(tenantOptionFromRecord)]
       };
     }
 

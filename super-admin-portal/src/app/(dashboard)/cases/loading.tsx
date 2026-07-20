@@ -1,5 +1,5 @@
 import { GlobalLoader } from "@/components/shell/global-loader";
 
 export default function LoadingCases() {
-  return <GlobalLoader label="Loading cases" />;
+  return <GlobalLoader label="Loading temp unlock requests" />;
 }

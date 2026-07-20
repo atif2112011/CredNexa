@@ -20,7 +20,7 @@ export function CasesTable({ rows }: { rows: RecordItem[] }) {
   const columns: ColumnDef<RecordItem>[] = [
     {
       accessorKey: "caseId",
-      header: "Case",
+      header: "Request",
       cell: ({ row }) => <span className="font-medium">{text(row.original, "caseId")}</span>
     },
     {
