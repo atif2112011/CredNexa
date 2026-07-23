@@ -1,6 +1,29 @@
 import mongoose from "mongoose";
 
+import { DEFAULT_DEVICE_RESTRICTIONS } from "../constants/deviceRestrictions.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../constants/deviceStates.js";
+
+const deviceRestrictionValuesSchema = new mongoose.Schema(
+  {
+    dialer: { type: Boolean, default: false },
+    camera: { type: Boolean, default: false },
+    whatsapp: { type: Boolean, default: false },
+    youtube: { type: Boolean, default: false },
+    playStore: { type: Boolean, default: false }
+  },
+  { _id: false }
+);
+
+const locationSchema = new mongoose.Schema(
+  {
+    latitude: { type: Number, required: true },
+    longitude: { type: Number, required: true },
+    accuracyMeters: { type: Number, required: true },
+    capturedAt: { type: Date, required: true },
+    receivedAt: { type: Date, required: true }
+  },
+  { _id: false }
+);
 
 const deviceSchema = new mongoose.Schema(
   {
@@ -88,6 +111,34 @@ const deviceSchema = new mongoose.Schema(
     lastSyncAt: Date,
     batteryLevel: Number,
     networkType: String,
+    lastLocation: {
+      type: locationSchema,
+      default: null
+    },
+    restrictionState: {
+      desired: {
+        type: deviceRestrictionValuesSchema,
+        default: () => ({ ...DEFAULT_DEVICE_RESTRICTIONS })
+      },
+      applied: {
+        type: deviceRestrictionValuesSchema,
+        default: () => ({ ...DEFAULT_DEVICE_RESTRICTIONS })
+      },
+      desiredVersion: {
+        type: Number,
+        default: 0
+      },
+      appliedVersion: {
+        type: Number,
+        default: 0
+      },
+      updatedAt: Date,
+      appliedAt: Date,
+      updatedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Account"
+      }
+    },
     isOnline: {
       type: Boolean,
       default: false

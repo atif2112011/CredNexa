@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEFAULT_DEVICE_POLICIES, DEFAULT_TENANT_POLICY } from "../../constants/defaultPolicies.js";
+import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../../constants/tenant.js";
@@ -45,6 +46,10 @@ import {
   getOrCreateCompanySupportContact,
   validateCompanySupportContactPayload
 } from "../../services/companySupportContact.service.js";
+import {
+  queueDeviceRestrictionUpdate,
+  validateDeviceRestrictionUpdate
+} from "../../services/deviceRestrictions.service.js";
 import {
   backfillManualOverrideTokens,
   generateManualOverrideTokenForDevice,
@@ -3395,6 +3400,7 @@ export const getDeviceById = async (req, res) => {
     if (!device) {
       return sendError(res, 400, "Device not found");
     }
+    device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
 
     const [policy, commands, cases, riskFlags] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
@@ -3432,6 +3438,68 @@ export const getDeviceCommands = async (req, res) => {
     return sendSuccess(res, 200, "Device commands fetched successfully", commands);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update one persistent per-device restriction and queue the complete desired
+ * restriction snapshot for device-owner enforcement.
+ * Sample body: { "restriction": "camera", "locked": true }
+ */
+export const updateAdminDeviceRestrictions = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    const validation = validateDeviceRestrictionUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceRestrictionUpdate({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          restriction: validation.value.restriction,
+          locked: validation.value.locked,
+          restrictionVersion: result.restrictionState.desiredVersion,
+          retry: validation.value.retry,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device restriction update queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 

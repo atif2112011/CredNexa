@@ -5,6 +5,10 @@ import mongoose from "mongoose";
 
 import { env } from "../../config/env.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
+import {
+  normalizeDeviceRestrictionState,
+  normalizeDeviceRestrictions
+} from "../../constants/deviceRestrictions.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ConsentRecord } from "../../models/ConsentRecord.js";
@@ -34,6 +38,11 @@ import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
 } from "../../services/manualOverrideToken.service.js";
+import {
+  applyDevicePingTelemetry,
+  sanitizePingEventPayload
+} from "../../services/deviceTelemetry.service.js";
+import { shouldAdvanceAppliedRestrictionState } from "../../services/deviceRestrictions.service.js";
 import {
   enforceRiskAutoLock,
   recordIntegrityAssessment
@@ -468,6 +477,7 @@ const getDeviceSyncState = async (device) => {
     deviceState: device.state,
     currentPolicyKey: device.currentPolicyKey,
     desiredPolicyVersion: device.desiredPolicyVersion,
+    restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
     policy,
     pendingCommands
   };
@@ -2305,15 +2315,21 @@ export const pingDevice = async (req, res) => {
       return sendError(res, 400, "Registered device not found");
     }
 
-    device.lastSeenAt = new Date();
+    const now = new Date();
+    device.lastSeenAt = now;
     device.isOnline = true;
     device.batteryLevel = req.body.batteryLevel ?? device.batteryLevel;
     device.networkType = req.body.networkType ?? device.networkType;
     device.appVersion = req.body.appVersion ?? device.appVersion;
     if (req.body.fcmToken && req.body.fcmToken !== device.fcmToken) {
       device.fcmToken = req.body.fcmToken;
-      device.fcmTokenUpdatedAt = new Date();
+      device.fcmTokenUpdatedAt = now;
     }
+    const { telemetryWarnings } = applyDevicePingTelemetry({
+      device,
+      body: req.body,
+      now
+    });
     await device.save();
 
     await DeviceEvent.create({
@@ -2321,14 +2337,16 @@ export const pingDevice = async (req, res) => {
       userId: req.auth.id,
       tenantId: device.tenantId,
       eventType: "ping",
-      payload: req.body
+      payload: sanitizePingEventPayload(req.body)
     });
 
+    const syncState = await getDeviceSyncState(device);
     return sendSuccess(res, 200, "Device ping received", {
       deviceId: device._id,
-      serverTime: new Date(),
-      desiredPolicyVersion: device.desiredPolicyVersion,
-      lastAppliedPolicyVersion: device.lastAppliedPolicyVersion
+      serverTime: now,
+      lastAppliedPolicyVersion: device.lastAppliedPolicyVersion,
+      telemetryWarnings,
+      ...syncState
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2412,17 +2430,47 @@ export const acknowledgeDeviceCommand = async (req, res) => {
     command.failureReason = req.body.failureReason;
     if (req.body.status === "acknowledged") {
       command.acknowledgedAt = new Date();
-      device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
-      if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
-      if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
-      if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
-      if (command.commandType === "WIPE_DEVICE") device.deviceSecurityState = "WIPED_PENDING_REPROVISION";
-      if (command.commandType === "INSTALL_UPDATE" && req.body.appVersion) device.appVersion = req.body.appVersion;
-      if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
-        device.state = command.payload.targetState;
+      if (command.commandType === "RESTRICTIONS_UPDATE") {
+        const appliedRestrictionsVersion = Number(req.body.appliedRestrictionsVersion);
+        const commandVersion = Number(command.payload?.restrictionVersion);
+        if (
+          !Number.isInteger(appliedRestrictionsVersion) ||
+          appliedRestrictionsVersion < 0 ||
+          appliedRestrictionsVersion !== commandVersion
+        ) {
+          return sendError(
+            res,
+            400,
+            "appliedRestrictionsVersion must match the restriction command version"
+          );
+        }
+
+        const currentRestrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+        if (
+          shouldAdvanceAppliedRestrictionState({
+            currentAppliedVersion: currentRestrictionState.appliedVersion,
+            acknowledgedVersion: appliedRestrictionsVersion
+          })
+        ) {
+          device.restrictionState.applied = normalizeDeviceRestrictions(
+            req.body.appliedRestrictions || command.payload?.restrictions
+          );
+          device.restrictionState.appliedVersion = appliedRestrictionsVersion;
+          device.restrictionState.appliedAt = new Date();
+        }
+      } else {
+        device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
+        if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
+        if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
+        if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
+        if (command.commandType === "WIPE_DEVICE") device.deviceSecurityState = "WIPED_PENDING_REPROVISION";
+        if (command.commandType === "INSTALL_UPDATE" && req.body.appVersion) device.appVersion = req.body.appVersion;
+        if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
+          device.state = command.payload.targetState;
+        }
+        device.lastPolicyAppliedAt = new Date();
+        device.stateUpdatedAt = new Date();
       }
-      device.lastPolicyAppliedAt = new Date();
-      device.stateUpdatedAt = new Date();
       await device.save();
     }
     await command.save();
@@ -2440,7 +2488,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
     return sendSuccess(res, 200, "Device command acknowledgement saved", {
       commandId: command._id,
       status: command.status,
-      deviceState: device.state
+      deviceState: device.state,
+      restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

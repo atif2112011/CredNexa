@@ -40,6 +40,7 @@ import {
   tempUnlockTenantDevice,
   tempUnlockTenantUnlockRequest,
   updateTenantAdhaarVerification,
+  updateTenantDeviceRestrictions,
   unlockTenantDevice
 } from "./distributor.controller.js";
 
@@ -70,6 +71,7 @@ distributorRoutes.post("/devices/:id/upcoming-payment-reminder", sendUpcomingPay
 distributorRoutes.post("/devices/:id/lock", lockTenantDevice);
 distributorRoutes.post("/devices/:id/unlock", unlockTenantDevice);
 distributorRoutes.post("/devices/:id/temp-unlock", tempUnlockTenantDevice);
+distributorRoutes.patch("/devices/:id/restrictions", updateTenantDeviceRestrictions);
 distributorRoutes.get("/qr-codes", listQrCodes);
 distributorRoutes.post("/qr-codes", parseTenantQrImageUpload, addQrCode);
 distributorRoutes.patch("/qr-codes/:qrId/activate", activateQrCode);

@@ -1,0 +1,267 @@
+# Borrower App Device Telemetry and Restrictions Contract
+
+This contract is for the managed Borrower App running as Android Device Owner. It covers heartbeat telemetry, restriction-command recovery and enforcement, and command acknowledgement.
+
+## 1. Authentication and response envelope
+
+All routes in this contract require a borrower `user` access token.
+
+```http
+Authorization: Bearer <user-access-token>
+```
+
+Successful responses:
+
+```json
+{
+  "success": true,
+  "message": "Human-readable message",
+  "data": {}
+}
+```
+
+Error responses:
+
+```json
+{
+  "success": false,
+  "error": "Human-readable error"
+}
+```
+
+## 2. Device ping
+
+```text
+POST /api/app/device/ping
+Content-Type: application/json
+```
+
+Example request:
+
+```json
+{
+  "batteryLevel": 78,
+  "networkType": "WIFI",
+  "appVersion": "1.4.0",
+  "fcmToken": "<current-fcm-token>",
+  "location": {
+    "latitude": 12.9716,
+    "longitude": 77.5946,
+    "accuracyMeters": 18.4,
+    "capturedAt": "2026-07-24T10:30:00.000Z"
+  },
+  "simInfo": {
+    "simOperator": "Airtel",
+    "simSerial": "8991000000000000000",
+    "phoneNumber": "9876543210"
+  }
+}
+```
+
+### Location behavior
+
+- `location` is optional. Omit it when permission is unavailable or no valid location fix exists.
+- Latitude must be between `-90` and `90`.
+- Longitude must be between `-180` and `180`.
+- `accuracyMeters` must be non-negative.
+- `capturedAt` must be a valid timestamp and no more than five minutes ahead of server time.
+- The backend ignores a location older than the currently stored location.
+- Invalid, future, or stale locations do not fail the heartbeat.
+- Only the latest accepted location is retained in the device record.
+
+### SIM behavior
+
+- `simInfo` is optional.
+- Supported fields are `simOperator`, `simSerial`, and `phoneNumber`.
+- The app may send the complete SIM object or only fields that changed.
+- A changed field replaces the stored value and updates `simChangedAt`.
+- A SIM change does not create a risk or automatically lock the device.
+
+### Ping response
+
+```json
+{
+  "success": true,
+  "message": "Device ping received",
+  "data": {
+    "deviceId": "665f6f0b6f0f6f0b6f0f6f0b",
+    "serverTime": "2026-07-24T10:30:02.000Z",
+    "deviceState": "ACTIVE",
+    "currentPolicyKey": "EMI_PAID",
+    "desiredPolicyVersion": 3,
+    "lastAppliedPolicyVersion": 3,
+    "restrictionState": {
+      "desired": {
+        "dialer": false,
+        "camera": true,
+        "whatsapp": false,
+        "youtube": true,
+        "playStore": false
+      },
+      "applied": {
+        "dialer": false,
+        "camera": false,
+        "whatsapp": false,
+        "youtube": true,
+        "playStore": false
+      },
+      "desiredVersion": 5,
+      "appliedVersion": 4,
+      "updatedAt": "2026-07-24T10:29:00.000Z",
+      "appliedAt": "2026-07-24T10:28:00.000Z"
+    },
+    "policy": {},
+    "pendingCommands": [],
+    "telemetryWarnings": []
+  }
+}
+```
+
+Possible telemetry warning codes:
+
+| Code | Meaning |
+|---|---|
+| `INVALID_LOCATION` | A location field was missing or outside its accepted range |
+| `FUTURE_LOCATION` | `capturedAt` was more than five minutes ahead of server time |
+| `STALE_LOCATION` | The submitted fix was older than the stored location |
+| `INVALID_SIM_INFO` | `simInfo` was not an object |
+
+The app should log telemetry warnings for diagnostics but continue normal sync and command processing.
+
+## 3. Command delivery and recovery
+
+Restriction commands can arrive through:
+
+- A high-priority FCM data message.
+- `pendingCommands` in `POST /api/app/device/ping`.
+- `pendingCommands` in `POST /api/app/device/sync`.
+
+The command type is:
+
+```text
+RESTRICTIONS_UPDATE
+```
+
+Example FCM data:
+
+```json
+{
+  "type": "RESTRICTIONS_UPDATE",
+  "commandType": "RESTRICTIONS_UPDATE",
+  "commandId": "665f6f0b6f0f6f0b6f0f6f0c",
+  "restrictionVersion": "5",
+  "restrictions": "{\"dialer\":false,\"camera\":true,\"whatsapp\":false,\"youtube\":true,\"playStore\":false}"
+}
+```
+
+Example command returned by ping or sync:
+
+```json
+{
+  "_id": "665f6f0b6f0f6f0b6f0f6f0c",
+  "commandType": "RESTRICTIONS_UPDATE",
+  "status": "pending",
+  "payload": {
+    "restrictionVersion": 5,
+    "restrictions": {
+      "dialer": false,
+      "camera": true,
+      "whatsapp": false,
+      "youtube": true,
+      "playStore": false
+    }
+  }
+}
+```
+
+## 4. Applying restrictions
+
+The app must:
+
+1. Parse `restrictionVersion` as an integer.
+2. Ignore commands older than the locally applied restriction version.
+3. Treat `restrictions` as a complete authoritative snapshot.
+4. Apply every restriction and collect an individual result for each key.
+5. Persist the successfully applied snapshot and version locally.
+6. Acknowledge the command.
+
+Per-device restrictions are independent of EMI state. A restriction set to `true` remains enforced through EMI lock, temporary unlock, and full unlock transitions.
+
+### Android enforcement mapping
+
+| Restriction | Android behavior |
+|---|---|
+| `camera` | Call `DevicePolicyManager.setCameraDisabled(adminComponent, locked)` |
+| `whatsapp` | Suspend or restore `com.whatsapp` as Device Owner |
+| `youtube` | Suspend or restore `com.google.android.youtube` as Device Owner |
+| `playStore` | Suspend or restore `com.android.vending` as Device Owner |
+| `dialer` | Resolve the active/default Dialer through Android role or telecom APIs, then suspend or restore that resolved package |
+
+Do not hardcode a single OEM Dialer package. Preserve emergency-call access wherever Android requires it. If Android refuses to suspend a protected system Dialer, report the restriction as unsupported or failed.
+
+WhatsApp Business and arbitrary application packages are outside this contract.
+
+## 5. Command acknowledgement
+
+```text
+POST /api/app/device/command/ack
+Content-Type: application/json
+```
+
+### Successful enforcement
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f0c",
+  "status": "acknowledged",
+  "appliedRestrictionsVersion": 5,
+  "appliedRestrictions": {
+    "dialer": false,
+    "camera": true,
+    "whatsapp": false,
+    "youtube": true,
+    "playStore": false
+  },
+  "restrictionResults": {
+    "dialer": { "status": "applied" },
+    "camera": { "status": "applied" },
+    "whatsapp": { "status": "applied" },
+    "youtube": { "status": "applied" },
+    "playStore": { "status": "applied" }
+  }
+}
+```
+
+For an acknowledged command, `appliedRestrictionsVersion` must exactly match that command's `restrictionVersion`.
+
+### Failed or partially failed enforcement
+
+If any required restriction cannot be applied, acknowledge the command as failed and include individual results:
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f0c",
+  "status": "failed",
+  "failureReason": "One or more restrictions could not be applied",
+  "restrictionResults": {
+    "dialer": {
+      "status": "unsupported",
+      "message": "The default Dialer is a protected system package"
+    },
+    "camera": {
+      "status": "applied"
+    }
+  }
+}
+```
+
+Do not advance the locally applied restriction version after failed or partial enforcement.
+
+## 6. Required background behavior
+
+- Send a ping periodically while the device is online.
+- Send a ping after FCM token rotation, SIM changes, and a newly captured location.
+- Call device sync on application launch, boot completion, and network reconnection.
+- Process pending commands in ascending creation/version order.
+- Ignore a stale restriction command rather than rolling local restrictions backward.
+- Retry failed API acknowledgements without reapplying an older command over newer state.

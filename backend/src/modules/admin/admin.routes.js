@@ -70,6 +70,7 @@ import {
   updateChannelPartner,
   updateChannelPartnerStatus,
   updateCompanySupportContact,
+  updateAdminDeviceRestrictions,
   updatePayoutConstants,
   updateTenant,
   updateTenantStatus,
@@ -158,6 +159,7 @@ adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
+adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictions);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 

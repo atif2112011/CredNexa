@@ -59,7 +59,7 @@ const loadFirebaseAdmin = async () => {
   return firebaseApp;
 };
 
-const buildPolicyUpdateMessage = ({ device, command }) => {
+export const buildPolicyUpdateMessage = ({ device, command }) => {
   const baseData = {
     commandId: command._id.toString(),
     commandType: command.commandType
@@ -69,7 +69,8 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
     "SHOW_REMEDIATION",
     "INSTALL_UPDATE",
     "WIPE_DEVICE",
-    "REPROVISION_REQUIRED"
+    "REPROVISION_REQUIRED",
+    "RESTRICTIONS_UPDATE"
   ]);
 
   if (command.commandType === "NOTIFICATION") {

@@ -2,6 +2,8 @@ import { DetailGrid } from "@/components/data/detail-grid";
 import { ResourceTable } from "@/components/data/resource-table";
 import { ActivePolicyPanel, RiskFlagMetricsPanel } from "@/components/data/visual-panels";
 import { DeviceOverridePanel } from "@/components/devices/device-override-panel";
+import { DeviceRestrictionsPanel } from "@/components/devices/device-restrictions-panel";
+import { DeviceTelemetryPanel } from "@/components/devices/device-telemetry-panel";
 import { ManualOverrideTokenPanel } from "@/components/devices/manual-override-token-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +23,9 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
     <>
       <PageHeader title={String(device.imei || "Device")} description="Device state, borrower mapping, policy snapshot, command history, and audit trail." />
       <div className="space-y-6">
-        <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "updatedAt", type: "date" }]} />
+        <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
+        <DeviceTelemetryPanel device={device} />
+        <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />
         <DeviceOverridePanel device={device} riskFlags={riskFlags} />
         <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
         <div className="grid gap-6 xl:grid-cols-2">

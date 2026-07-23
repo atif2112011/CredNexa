@@ -10,6 +10,7 @@
     "serve": "firebase emulators:start --only functions",
     "deploy": "firebase deploy --only functions",
     "lint": "eslint . --ext .js",
+    "test": "node --test",
     "worker:fcm": "node src/jobs/fcmDeliveryWorker.js",
     "jobs:scheduled": "node src/jobs/scheduledJobs.js",
     "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js",

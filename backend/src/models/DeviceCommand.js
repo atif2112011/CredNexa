@@ -25,7 +25,8 @@ const deviceCommandSchema = new mongoose.Schema(
         "SHOW_REMEDIATION",
         "INSTALL_UPDATE",
         "WIPE_DEVICE",
-        "REPROVISION_REQUIRED"
+        "REPROVISION_REQUIRED",
+        "RESTRICTIONS_UPDATE"
       ],
       required: true
     },
