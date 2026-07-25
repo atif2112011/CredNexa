@@ -1,5 +1,13 @@
 import mongoose from "mongoose";
 
+import { DEVICE_STATES } from "../constants/deviceStates.js";
+import { Device } from "./Device.js";
+
+export const DEVICE_COMMAND_FAILURE_SOURCES = Object.freeze({
+  DELIVERY: "delivery",
+  DEVICE_ENFORCEMENT: "device_enforcement"
+});
+
 const deviceCommandSchema = new mongoose.Schema(
   {
     deviceId: {
@@ -26,7 +34,8 @@ const deviceCommandSchema = new mongoose.Schema(
         "INSTALL_UPDATE",
         "WIPE_DEVICE",
         "REPROVISION_REQUIRED",
-        "RESTRICTIONS_UPDATE"
+        "RESTRICTIONS_UPDATE",
+        "RELEASE_DEVICE"
       ],
       required: true
     },
@@ -46,7 +55,8 @@ const deviceCommandSchema = new mongoose.Schema(
         "temp_unlock_expiry",
         "system_notification",
         "risk_management",
-        "admin_security"
+        "admin_security",
+        "payment_settlement"
       ],
       required: true
     },
@@ -66,6 +76,10 @@ const deviceCommandSchema = new mongoose.Schema(
       default: {}
     },
     failureReason: String,
+    failureSource: {
+      type: String,
+      enum: Object.values(DEVICE_COMMAND_FAILURE_SOURCES)
+    },
     retryCount: {
       type: Number,
       default: 0
@@ -79,5 +93,21 @@ const deviceCommandSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+deviceCommandSchema.pre("validate", async function preventCommandsAfterRelease() {
+  if (!this.isNew || this.commandType === "RELEASE_DEVICE") return;
+
+  const device = await Device.findById(this.deviceId).select("state").lean();
+  const isReleased = device?.state === DEVICE_STATES.RELEASED;
+  const isReleasePending = device?.state === DEVICE_STATES.RELEASE_PENDING;
+  const notificationAllowedWhilePending =
+    isReleasePending && this.commandType === "NOTIFICATION";
+
+  if (isReleased || (isReleasePending && !notificationAllowedWhilePending)) {
+    const error = new Error("Device release is pending or complete; management commands are no longer allowed");
+    error.statusCode = 409;
+    throw error;
+  }
+});
 
 export const DeviceCommand = mongoose.model("DeviceCommand", deviceCommandSchema);

@@ -9,12 +9,19 @@ import {
   normalizeDeviceRestrictionState,
   normalizeDeviceRestrictions
 } from "../../constants/deviceRestrictions.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  isDeviceReleaseState
+} from "../../constants/deviceStates.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ConsentRecord } from "../../models/ConsentRecord.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
-import { DeviceCommand } from "../../models/DeviceCommand.js";
+import {
+  DEVICE_COMMAND_FAILURE_SOURCES,
+  DeviceCommand
+} from "../../models/DeviceCommand.js";
 import { DeviceEvent } from "../../models/DeviceEvent.js";
 import { DEVICE_INTEGRITY_ACTIONS, DeviceIntegrityChallenge } from "../../models/DeviceIntegrityChallenge.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
@@ -2421,16 +2428,48 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       return sendError(res, 404, "Device command not found");
     }
 
+    if (isDeviceReleaseState(device.state) && command.commandType !== "RELEASE_DEVICE") {
+      return sendError(res, 409, "Command was superseded by permanent device release");
+    }
+
     if (!["acknowledged", "failed"].includes(req.body.status)) {
       return sendError(res, 400, "Status must be acknowledged or failed");
+    }
+
+    if (
+      command.commandType === "RELEASE_DEVICE" &&
+      req.body.status === "acknowledged" &&
+      req.body.releaseCompleted !== true
+    ) {
+      return sendError(res, 400, "releaseCompleted must be true for a successful device release");
     }
 
     command.status = req.body.status;
     command.ackPayload = req.body;
     command.failureReason = req.body.failureReason;
+    command.failureSource =
+      req.body.status === "failed"
+        ? DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+        : undefined;
+    if (req.body.status === "failed") {
+      command.nextRetryAt = undefined;
+    }
     if (req.body.status === "acknowledged") {
       command.acknowledgedAt = new Date();
-      if (command.commandType === "RESTRICTIONS_UPDATE") {
+      if (command.commandType === "RELEASE_DEVICE") {
+        const releasedAt = new Date();
+        const clearedRestrictions = normalizeDeviceRestrictions();
+        device.state = DEVICE_STATES.RELEASED;
+        device.deviceOwnerStatus = "RELEASED";
+        device.releasedAt = releasedAt;
+        device.tempUnlockExpiresAt = undefined;
+        device.restrictionState.desired = clearedRestrictions;
+        device.restrictionState.applied = clearedRestrictions;
+        device.restrictionState.updatedAt = releasedAt;
+        device.restrictionState.appliedAt = releasedAt;
+        device.lastPolicyAppliedAt = releasedAt;
+        device.stateUpdatedAt = releasedAt;
+      } else if (command.commandType === "RESTRICTIONS_UPDATE") {
         const appliedRestrictionsVersion = Number(req.body.appliedRestrictionsVersion);
         const commandVersion = Number(command.payload?.restrictionVersion);
         if (
@@ -2474,15 +2513,42 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       await device.save();
     }
     await command.save();
+    if (command.commandType === "RELEASE_DEVICE" && command.status === "acknowledged") {
+      await DeviceCommand.updateMany(
+        {
+          _id: { $ne: command._id },
+          deviceId: device._id,
+          commandType: "RELEASE_DEVICE",
+          status: { $in: ["pending", "sent"] }
+        },
+        {
+          $set: {
+            status: "expired",
+            failureReason: "Superseded by acknowledged permanent device release"
+          },
+          $unset: { nextRetryAt: "" }
+        }
+      );
+    }
 
     await createAuditLog({
-      eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+      eventType:
+        command.commandType === "RELEASE_DEVICE"
+          ? req.body.status === "acknowledged"
+            ? AUDIT_EVENTS.DEVICE_RELEASED
+            : AUDIT_EVENTS.DEVICE_RELEASE_FAILED
+          : AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
       actorId: req.auth.id,
       actorCollection: "users",
       tenantId: device.tenantId,
       userId: req.auth.id,
       deviceId: device._id,
-      metadata: { commandId: command._id, status: command.status }
+      metadata: {
+        commandId: command._id,
+        commandType: command.commandType,
+        status: command.status,
+        releaseCompleted: req.body.releaseCompleted
+      }
     });
 
     return sendSuccess(res, 200, "Device command acknowledgement saved", {

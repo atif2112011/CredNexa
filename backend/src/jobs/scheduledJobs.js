@@ -336,6 +336,7 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
   const maxReminderDays = Math.max(...reminderDays);
   const queryDueDate = addDays(now, maxReminderDays);
   const schedules = await EmiSchedule.find({
+    status: { $ne: "settled" },
     installments: {
       $elemMatch: {
         status: { $in: ["pending", "overdue", "partial"] },

@@ -2,7 +2,10 @@ import { connectDatabase } from "../config/database.js";
 import { AccountPushToken } from "../models/AccountPushToken.js";
 import { AppNotificationJob } from "../models/AppNotificationJob.js";
 import { Device } from "../models/Device.js";
-import { DeviceCommand } from "../models/DeviceCommand.js";
+import {
+  DEVICE_COMMAND_FAILURE_SOURCES,
+  DeviceCommand
+} from "../models/DeviceCommand.js";
 import { FcmDeliveryLog } from "../models/FcmDeliveryLog.js";
 import { isInvalidFcmTokenError } from "../utils/pushTokens.js";
 
@@ -70,7 +73,8 @@ export const buildPolicyUpdateMessage = ({ device, command }) => {
     "INSTALL_UPDATE",
     "WIPE_DEVICE",
     "REPROVISION_REQUIRED",
-    "RESTRICTIONS_UPDATE"
+    "RESTRICTIONS_UPDATE",
+    "RELEASE_DEVICE"
   ]);
 
   if (command.commandType === "NOTIFICATION") {
@@ -173,14 +177,32 @@ const buildAppNotificationMessage = ({ pushToken, job }) => ({
   }
 });
 
+export const buildDeviceCommandDeliveryFilter = ({ now = new Date() } = {}) => ({
+  retryCount: { $lt: 5 },
+  $and: [
+    {
+      $or: [
+        { status: "pending" },
+        {
+          status: "failed",
+          failureSource: { $ne: DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT }
+        }
+      ]
+    },
+    {
+      $or: [
+        { nextRetryAt: { $exists: false } },
+        { nextRetryAt: null },
+        { nextRetryAt: { $lte: now } }
+      ]
+    }
+  ]
+});
+
 export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   await connectDatabase();
 
-  const commandFilter = {
-    status: { $in: ["pending", "failed"] },
-    retryCount: { $lt: 5 },
-    $or: [{ nextRetryAt: { $exists: false } }, { nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }]
-  };
+  const commandFilter = buildDeviceCommandDeliveryFilter();
 
   if (commandIds?.length) {
     commandFilter._id = { $in: commandIds };
@@ -201,6 +223,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000);
       command.failureReason = "Device FCM token not found";
+      command.failureSource = DEVICE_COMMAND_FAILURE_SOURCES.DELIVERY;
       await command.save();
       await FcmDeliveryLog.create({
         deviceId: command.deviceId,
@@ -225,6 +248,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
       command.sentAt = new Date();
       command.fcmMessageId = providerMessageId;
       command.failureReason = undefined;
+      command.failureSource = undefined;
       await command.save();
 
       await FcmDeliveryLog.create({
@@ -242,6 +266,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + Math.min(command.retryCount + 1, 5) * 5 * 60 * 1000);
       command.failureReason = error.message;
+      command.failureSource = DEVICE_COMMAND_FAILURE_SOURCES.DELIVERY;
       await command.save();
 
       await FcmDeliveryLog.create({

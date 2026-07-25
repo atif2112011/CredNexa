@@ -897,7 +897,7 @@ Authorization: Bearer <tenantAdminAccessToken>
 }
 ```
 
-This marks EMI installments paid, queues an `UNLOCK` command, and the FCM worker delivers a policy update.
+This marks EMI installments paid. If installments remain, it queues the normal `UNLOCK` policy update. If every installment is `paid` or `waived`, it marks the schedule `settled`, stores `settlementTime`, and queues permanent `RELEASE_DEVICE`; the borrower app must show the All EMIs completed/release screen.
 
 ### Borrower creates unlock request
 

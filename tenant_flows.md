@@ -366,10 +366,10 @@ Authorization: Bearer <tenantAdminToken>
 
 ---
 
-## Flow TA-11 — Payment Approval And Unlock
+## Flow TA-11 — Payment Approval, Unlock, And Final Release
 
 > **Actor:** Tenant Admin  
-> **Outcome:** Tenant admin approves borrower-submitted QR payments and queues device unlock.
+> **Outcome:** Tenant admin approves borrower-submitted QR payments and queues either a normal unlock or permanent device release after the final EMI.
 
 ### List Pending Payments
 
@@ -401,9 +401,10 @@ Body:
 1. Confirms payment belongs to tenant.
 2. Marks payment `success` / `approved`.
 3. Applies amount to oldest unpaid EMI installments.
-4. Updates device to `UNLOCK_PENDING` and `EMI_PAID`.
-5. Creates a pending `UNLOCK` device command.
-6. FCM worker sends the policy update.
+4. Checks whether every installment is now `paid` or `waived`.
+5. For a non-final payment, updates the device to `UNLOCK_PENDING` / `EMI_PAID` and creates `UNLOCK`.
+6. For the final payment, sets the schedule to `settled`, stores `settlementTime`, updates the device to `RELEASE_PENDING`, and creates `RELEASE_DEVICE`.
+7. FCM worker delivers the selected command. The borrower app shows either normal unlock progress or the dedicated All EMIs completed screen.
 
 ### Reject Payment
 

@@ -1321,6 +1321,23 @@ deepLink: 'emishield://home'
 
 ---
 
+### Step 6.8 — Final EMI Settlement And Permanent Release
+
+After applying the approved payment, the backend checks the entire schedule. When every installment is `paid` or `waived`:
+
+1. Set `emiSchedules.status` to `settled` and store `settlementTime`.
+2. Expire pending/sent non-release management commands.
+3. Set `devices.state` to `RELEASE_PENDING`.
+4. Queue `RELEASE_DEVICE` with `triggeredBy: payment_settlement`; do not queue `UNLOCK`.
+5. Deliver the command through FCM or authenticated device sync.
+6. Show the borrower the full-screen **All EMIs completed** experience while release is pending.
+7. After management removal succeeds, acknowledge with `releaseCompleted: true`; the backend sets `devices.state` to `RELEASED`.
+8. Show the final **Device released** screen and never return to EMI payment, overdue, or lock UI.
+
+If the command fails or the device is offline, keep the settled screen visible. The device cannot be re-locked; a super admin can retry a failed or expired release from the device detail page.
+
+---
+
 ### QR Management Sub-Flow (Tenant — Partner App)
 
 > **When:** Tenant wants to add, update, or switch their active payment QR code.
@@ -1384,17 +1401,18 @@ Authorization: Bearer <tenantAdminJwt>
   6.5  POST /distributor/payments/:id/approve
          → payments (status: success, approvalStatus: approved)
          → emiSchedules (installments marked paid)
-         → devices (state: UNLOCK_PENDING, policyKey: EMI_PAID)
-         → deviceCommands (UNLOCK command created)
-         → FCM POLICY_UPDATE → borrower device
+         ├─ installments remain → devices: UNLOCK_PENDING
+         │                       deviceCommands: UNLOCK
+         └─ all paid/waived    → emiSchedules: settled + settlementTime
+                                 devices: RELEASE_PENDING
+                                 deviceCommands: RELEASE_DEVICE
          │
          ▼
 [Borrower App — receives FCM]
-  6.6  GET  /app/device/policy           ← fetch EMI_PAID policy
-       [DevicePolicyManager: lockMode = false]
-       POST /app/device/command/ack      → devices.state → ACTIVE
-  6.7  [Receives FCM NOTIFICATION: UNLOCK_SUCCESS]
-       [Full-screen unlock confirmation shown]
+  6.6  UNLOCK         → apply EMI_PAID policy → acknowledge → ACTIVE
+       RELEASE_DEVICE → show All EMIs completed → remove management
+                        acknowledge releaseCompleted: true → RELEASED
+  6.7  Show normal unlock confirmation or final Device released screen
 ```
 
 ---

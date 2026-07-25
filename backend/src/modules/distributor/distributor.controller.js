@@ -26,6 +26,10 @@ import {
   queueDeviceRestrictionUpdate,
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
+import {
+  queueDeviceRelease,
+  settleCompletedSchedule
+} from "../../services/deviceRelease.service.js";
 import { sendApprovalMail } from "../../services/mail.service.js";
 import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
@@ -315,7 +319,14 @@ const queueTenantDeviceCommand = async ({ device, commandType, triggeredBy, acco
 
 const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
   const schedule = await EmiSchedule.findOne({ userId: payment.userId, tenantId: payment.tenantId }).session(session);
-  if (!schedule) return [];
+  if (!schedule) {
+    return {
+      matchedInstallments: [],
+      schedule: null,
+      completed: false,
+      newlySettled: false
+    };
+  }
 
   let remainingAmount = Number(payment.amount);
   const matchedInstallments = [];
@@ -350,6 +361,7 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
     const total = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
     return sum + Math.max(total - Number(installment.paidAmount || 0), 0);
   }, 0);
+  const settlement = settleCompletedSchedule(schedule);
 
   await schedule.save({ session });
   if (paidInstallmentIds.length) {
@@ -366,7 +378,11 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
     emiUpdatedBy: accountId
   };
 
-  return matchedInstallments;
+  return {
+    matchedInstallments,
+    schedule,
+    ...settlement
+  };
 };
 
 const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
@@ -2204,7 +2220,8 @@ export const approvePayment = async (req, res) => {
 
     session.startTransaction();
 
-    const matchedInstallments = await applyPaymentToEmiSchedule({ payment, accountId: req.auth.id, session });
+    const emiResult = await applyPaymentToEmiSchedule({ payment, accountId: req.auth.id, session });
+    const { matchedInstallments } = emiResult;
     payment.status = "success";
     payment.approvalStatus = "approved";
     payment.approvedBy = req.auth.id;
@@ -2213,14 +2230,24 @@ export const approvePayment = async (req, res) => {
     payment.metadata = { ...(payment.metadata || {}), approvalNote: req.body.note };
     await payment.save({ session });
 
-    const { command } = await queueTenantDeviceCommand({
-      device,
-      commandType: "UNLOCK",
-      triggeredBy: "payment_unlock",
-      accountId: req.auth.id,
-      payload: { paymentId: payment._id },
-      session
-    });
+    const releaseQueued = emiResult.newlySettled;
+    const { command } = releaseQueued
+      ? await queueDeviceRelease({
+          device,
+          schedule: emiResult.schedule,
+          accountId: req.auth.id,
+          triggeredBy: "payment_settlement",
+          reason: "All EMI installments paid or waived",
+          session
+        })
+      : await queueTenantDeviceCommand({
+          device,
+          commandType: "UNLOCK",
+          triggeredBy: "payment_unlock",
+          accountId: req.auth.id,
+          payload: { paymentId: payment._id },
+          session
+        });
 
     await createAuditLog(
       {
@@ -2230,23 +2257,52 @@ export const approvePayment = async (req, res) => {
         channelPartnerId: tenant.channelPartnerId,
         userId: payment.userId,
         deviceId: payment.deviceId,
-        metadata: { paymentId: payment._id, commandId: command._id, matchedInstallments }
+        metadata: {
+          paymentId: payment._id,
+          commandId: command._id,
+          matchedInstallments,
+          emiScheduleStatus: emiResult.schedule?.status,
+          releaseQueued
+        }
       },
       { session }
     );
 
     await createAuditLog(
       {
-        eventType: AUDIT_EVENTS.UNLOCK_TRIGGERED,
+        eventType: releaseQueued ? AUDIT_EVENTS.DEVICE_RELEASE_QUEUED : AUDIT_EVENTS.UNLOCK_TRIGGERED,
         actorId: req.auth.id,
         tenantId: tenant._id,
         channelPartnerId: tenant.channelPartnerId,
         userId: payment.userId,
         deviceId: payment.deviceId,
-        metadata: { paymentId: payment._id, commandId: command._id, triggeredBy: "payment_unlock" }
+        metadata: {
+          paymentId: payment._id,
+          commandId: command._id,
+          triggeredBy: releaseQueued ? "payment_settlement" : "payment_unlock"
+        }
       },
       { session }
     );
+
+    if (releaseQueued) {
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.EMI_SCHEDULE_SETTLED,
+          actorId: req.auth.id,
+          tenantId: tenant._id,
+          channelPartnerId: tenant.channelPartnerId,
+          userId: payment.userId,
+          deviceId: payment.deviceId,
+          metadata: {
+            paymentId: payment._id,
+            emiScheduleId: emiResult.schedule._id,
+            settlementTime: emiResult.schedule.settlementTime
+          }
+        },
+        { session }
+      );
+    }
 
     await session.commitTransaction();
 
@@ -2255,8 +2311,10 @@ export const approvePayment = async (req, res) => {
       tenantId: tenant._id,
       deviceId: payment.deviceId,
       userId: payment.userId,
-      title: "Payment approved",
-      text: "Your payment has been approved and your device unlock is being processed.",
+      title: releaseQueued ? "All EMIs completed" : "Payment approved",
+      text: releaseQueued
+        ? "All your EMIs are complete and your device release is being processed."
+        : "Your payment has been approved and your device unlock is being processed.",
       notificationType: "PAYMENT_APPROVED",
       triggeredBy: "manual_tenant",
       triggeredByAccountId: req.auth.id,
@@ -2265,15 +2323,27 @@ export const approvePayment = async (req, res) => {
         deviceId: payment.deviceId,
         userId: payment.userId,
         matchedInstallments,
-        unlockCommandId: command._id
+        commandId: command._id,
+        commandType: command.commandType,
+        releaseQueued
       }
     });
 
-    return sendSuccess(res, 200, "Payment approved and unlock queued successfully", {
-      paymentId: payment._id,
-      unlockCommandId: command._id,
-      matchedInstallments
-    });
+    return sendSuccess(
+      res,
+      200,
+      releaseQueued
+        ? "Payment approved, EMI schedule settled, and device release queued successfully"
+        : "Payment approved and unlock queued successfully",
+      {
+        paymentId: payment._id,
+        commandId: command._id,
+        commandType: command.commandType,
+        emiScheduleStatus: emiResult.schedule?.status || null,
+        settlementTime: emiResult.schedule?.settlementTime || null,
+        matchedInstallments
+      }
+    );
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");

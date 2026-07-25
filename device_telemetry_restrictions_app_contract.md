@@ -308,4 +308,6 @@ For an acknowledged restriction command, `appliedRestrictionsVersion` must exact
 - Apply each switch immediately through the tenant restriction endpoint.
 - Roll the switch back if the HTTP request fails.
 - Show command failure and offer retry when desired and applied versions differ after a failed or expired command.
+- Treat a device-reported failed acknowledgement as terminal for that command. Only Firebase
+  delivery failures are retried automatically; an operator retry queues a new restriction command.
 - Display coordinates, accuracy, capture time, receive time, and the Google Maps link from `lastLocation`.

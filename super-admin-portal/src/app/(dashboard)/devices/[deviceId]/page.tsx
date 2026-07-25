@@ -2,6 +2,7 @@ import { DetailGrid } from "@/components/data/detail-grid";
 import { ResourceTable } from "@/components/data/resource-table";
 import { ActivePolicyPanel, RiskFlagMetricsPanel } from "@/components/data/visual-panels";
 import { DeviceOverridePanel } from "@/components/devices/device-override-panel";
+import { DeviceReleasePanel } from "@/components/devices/device-release-panel";
 import { DeviceRestrictionsPanel } from "@/components/devices/device-restrictions-panel";
 import { DeviceTelemetryPanel } from "@/components/devices/device-telemetry-panel";
 import { ManualOverrideTokenPanel } from "@/components/devices/manual-override-token-panel";
@@ -18,16 +19,24 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
   const manualOverrideTokens = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/manual-override-tokens`);
   const device = detail.device as RecordItem;
   const riskFlags = (detail.riskFlags as RecordItem[]) || [];
+  const emiSchedule = (detail.emiSchedule as RecordItem | null) || null;
+  const release = (detail.release as RecordItem | null) || null;
+  const releaseInProgressOrComplete = ["RELEASE_PENDING", "RELEASED"].includes(String(device.state || ""));
 
   return (
     <>
       <PageHeader title={String(device.imei || "Device")} description="Device state, borrower mapping, policy snapshot, command history, and audit trail." />
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
+        <DeviceReleasePanel deviceId={deviceId} schedule={emiSchedule} release={release} />
         <DeviceTelemetryPanel device={device} />
-        <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />
-        <DeviceOverridePanel device={device} riskFlags={riskFlags} />
-        <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
+        {!releaseInProgressOrComplete ? (
+          <>
+            <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />
+            <DeviceOverridePanel device={device} riskFlags={riskFlags} />
+            <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
+          </>
+        ) : null}
         <div className="grid gap-6 xl:grid-cols-2">
           <ActivePolicyPanel policy={detail.policy} />
           <RiskFlagMetricsPanel flags={riskFlags} />

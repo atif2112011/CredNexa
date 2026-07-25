@@ -71,6 +71,12 @@ const deviceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account"
     },
+    releaseRequestedAt: Date,
+    releasedAt: Date,
+    releaseCommandId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeviceCommand"
+    },
     tempUnlockExpiresAt: Date,
     graceReminderHistory: [
       {
@@ -153,7 +159,7 @@ const deviceSchema = new mongoose.Schema(
     },
     deviceOwnerStatus: {
       type: String,
-      enum: ["CONFIRMED", "UNKNOWN", "LOST"],
+      enum: ["CONFIRMED", "UNKNOWN", "LOST", "RELEASED"],
       default: "UNKNOWN"
     },
     deviceSecurityState: {

@@ -11,7 +11,10 @@ import {
   validateDeviceRestrictionRetry,
   validateDeviceRestrictionUpdate
 } from "../src/services/deviceRestrictions.service.js";
-import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
+import {
+  buildDeviceCommandDeliveryFilter,
+  buildPolicyUpdateMessage
+} from "../src/jobs/fcmDeliveryWorker.js";
 
 test("normalizes missing restriction state to unlocked defaults", () => {
   assert.deepEqual(normalizeDeviceRestrictionState(), {
@@ -183,4 +186,20 @@ test("sends restriction updates as a dedicated high-priority FCM command", () =>
     playStore: true
   }));
   assert.equal(message.android.priority, "high");
+});
+
+test("automatically retries delivery failures but not device enforcement failures", () => {
+  const now = new Date("2026-07-24T10:00:00.000Z");
+  const filter = buildDeviceCommandDeliveryFilter({ now });
+
+  assert.deepEqual(filter.$and[0], {
+    $or: [
+      { status: "pending" },
+      {
+        status: "failed",
+        failureSource: { $ne: "device_enforcement" }
+      }
+    ]
+  });
+  assert.equal(filter.$and[1].$or[2].nextRetryAt.$lte, now);
 });

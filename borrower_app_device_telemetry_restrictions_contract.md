@@ -257,6 +257,12 @@ If any required restriction cannot be applied, acknowledge the command as failed
 
 Do not advance the locally applied restriction version after failed or partial enforcement.
 
+A device-reported failed acknowledgement is terminal for that command. The backend does not
+automatically redeliver it. An administrator or tenant operator can explicitly retry the current
+desired restriction state, which queues a new `RESTRICTIONS_UPDATE` command using the same desired
+restriction version. Firebase delivery failures remain eligible for the backend's automatic retry
+and backoff behavior.
+
 ## 6. Required background behavior
 
 - Send a ping periodically while the device is online.

@@ -51,6 +51,11 @@ import {
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
 import {
+  getDeviceReleaseSummary,
+  queueDeviceRelease,
+  RELEASE_COMMAND_TYPE
+} from "../../services/deviceRelease.service.js";
+import {
   backfillManualOverrideTokens,
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
@@ -3402,22 +3407,109 @@ export const getDeviceById = async (req, res) => {
     }
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
 
-    const [policy, commands, cases, riskFlags] = await Promise.all([
+    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
-      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).sort({ createdAt: -1, _id: -1 }).lean()
+      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).sort({ createdAt: -1, _id: -1 }).lean(),
+      EmiSchedule.findOne({
+        userId: device.userId?._id || device.userId,
+        tenantId: device.tenantId?._id || device.tenantId
+      }).lean(),
+      DeviceCommand.findOne({
+        deviceId: device._id,
+        commandType: RELEASE_COMMAND_TYPE
+      }).sort({ createdAt: -1 }).lean()
     ]);
+    const release = getDeviceReleaseSummary({
+      schedule: emiSchedule,
+      device,
+      latestReleaseCommand
+    });
 
     return sendSuccess(res, 200, "Device fetched successfully", {
       device,
       policy,
       commands,
       cases,
-      riskFlags
+      riskFlags,
+      emiSchedule: emiSchedule
+        ? {
+            _id: emiSchedule._id,
+            loanId: emiSchedule.loanId,
+            status: emiSchedule.status,
+            settlementTime: emiSchedule.settlementTime,
+            completedInstallments: release.completedInstallments,
+            totalInstallments: release.totalInstallments
+          }
+        : null,
+      release
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue or retry permanent release for a fully settled device.
+ * Sample params: POST /admin/devices/665f.../release
+ */
+export const releaseAdminDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const schedule = await EmiSchedule.findOne({
+      userId: device.userId,
+      tenantId: device.tenantId
+    }).session(session);
+
+    if (!schedule) {
+      return sendError(res, 400, "EMI schedule not found for device");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceRelease({
+      device,
+      schedule,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      reason: "Manual release retry for settled EMI schedule",
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_RELEASE_QUEUED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: "Manual release retry for settled EMI schedule",
+        metadata: {
+          commandId: result.command._id,
+          emiScheduleId: schedule._id,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device release queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 

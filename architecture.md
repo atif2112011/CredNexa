@@ -412,12 +412,17 @@ Financed device registrations and real-time state.
       'TEMP_UNLOCK',
       'UNLOCK_PENDING',
       'OFFLINE_PENDING',
-      'CONSENT_INVALID'
+      'CONSENT_INVALID',
+      'RELEASE_PENDING',
+      'RELEASED'
     ],
     default: 'ACTIVE'
   },
   stateUpdatedAt: { type: Date, default: Date.now },
   stateUpdatedBy: { type: ObjectId, ref: 'accounts' },  // account (dashboard actor) who changed state
+  releaseRequestedAt: { type: Date },
+  releasedAt: { type: Date },
+  releaseCommandId: { type: ObjectId, ref: 'deviceCommands' },
 
   // Temporary unlock details
   tempUnlockExpiresAt: { type: Date },
@@ -619,6 +624,12 @@ EMI repayment schedule per user/loan.
   userId: { type: ObjectId, ref: 'users', required: true },
   tenantId: { type: ObjectId, ref: 'tenants', required: true },
   loanId: { type: String, required: true },
+  status: {
+    type: String,
+    enum: ['active', 'settled'],
+    default: 'active'
+  },
+  settlementTime: { type: Date },
 
   installments: [
     {
@@ -715,14 +726,14 @@ Lock/unlock command queue with delivery tracking.
 
   commandType: {
     type: String,
-    enum: ['LOCK', 'UNLOCK', 'TEMP_UNLOCK', 'RECHECK_STATE'],
+    enum: ['LOCK', 'UNLOCK', 'TEMP_UNLOCK', 'RECHECK_STATE', 'RELEASE_DEVICE'],
     required: true
   },
 
   // Source of command
   triggeredBy: {
     type: String,
-    enum: ['manual_tenant', 'auto_policy', 'payment_unlock', 'super_admin', 'temp_unlock_expiry'],
+    enum: ['manual_tenant', 'auto_policy', 'payment_unlock', 'payment_settlement', 'super_admin', 'temp_unlock_expiry'],
     required: true
   },
   triggeredByAccountId: { type: ObjectId, ref: 'accounts' }, // null for automated triggers
@@ -1188,6 +1199,7 @@ The current borrower simulation returns only a borrower access token after conse
 3. Confirms device state based on command type:
    - `LOCK` or `TEMP_UNLOCK` → `devices.state` stays as set by scheduler/server
    - `UNLOCK` or `TEMP_UNLOCK` expiry → `devices.state` transitions to `ACTIVE`
+   - `RELEASE_DEVICE` with `releaseCompleted: true` → `devices.state` transitions from `RELEASE_PENDING` to `RELEASED`
 4. Writes `auditLogs` entry: `{ event: 'POLICY_ACKNOWLEDGED', ... }`
 
 **Response:**
@@ -1491,29 +1503,34 @@ These routes are still planned for tenant-side lending/payment operations and ar
 |---|---|---|
 | GET | `/distributor/payments/pending-approval` | List payments awaiting tenant approval |
 | GET | `/distributor/payments/:paymentId` | Payment detail |
-| POST | `/distributor/payments/:paymentId/approve` | Approve payment, triggers EMI match + unlock |
+| POST | `/distributor/payments/:paymentId/approve` | Approve payment; triggers EMI match and either unlock or final device release |
 | POST | `/distributor/payments/:paymentId/reject` | Reject payment with mandatory reason |
 
 **Backend actions — POST `/distributor/payments/:paymentId/approve`:**
 1. Validates payment belongs to this tenant and is in `approvalStatus: 'pending_approval'`
 2. Updates `payments`: `{ approvalStatus: 'approved', approvedBy: <accountId>, approvedAt: now, status: 'success' }`
 3. Matches payment amount against `emiSchedules` — marks installment(s) as `paid`
-4. Evaluates `tenantPolicies.unlockRules` — determines unlock type (instant / delayed)
-5. Updates `devices.state` → `UNLOCK_PENDING`, `policyKey` → `EMI_PAID`, increments `policyVersion`
-6. Creates `deviceCommands` record (`commandType: UNLOCK`, `triggeredBy: payment_unlock`)
-7. Sends FCM `POLICY_UPDATE` to device
-8. Sends FCM `NOTIFICATION` (`notificationType: UNLOCK_SUCCESS`) to borrower
-9. Writes `auditLogs` entry
+4. Checks whether every installment is now `paid` or `waived`
+5. If installments remain, updates the device to `UNLOCK_PENDING` and creates `UNLOCK` with `triggeredBy: payment_unlock`
+6. If all installments are complete, sets `emiSchedules.status: settled`, records `settlementTime`, expires older management commands, updates the device to `RELEASE_PENDING`, and creates `RELEASE_DEVICE` with `triggeredBy: payment_settlement`
+7. Delivers the selected command through FCM and authenticated device sync
+8. Shows the normal unlock confirmation for regular payments, or the settled/release screen for the final EMI
+9. Writes payment, settlement, command, and acknowledgement audit entries
 
 **Response:**
 ```json
 {
   "success": true,
   "paymentId": "<ObjectId>",
-  "unlockCommandId": "<ObjectId>",
+  "commandId": "<ObjectId>",
+  "commandType": "UNLOCK",
+  "emiScheduleStatus": "active",
+  "settlementTime": null,
   "matchedInstallments": ["<ObjectId>"]
 }
 ```
+
+For a final EMI, `commandType` is `RELEASE_DEVICE`, `emiScheduleStatus` is `settled`, and `settlementTime` is populated.
 
 #### QR Code Management
 
@@ -1774,10 +1791,11 @@ Required validation:
 |---|---|---|
 | GET | `/admin/devices` | Search devices by IMEI, borrower mobile, tenant, channel partner, or state |
 | GET | `/admin/devices/:deviceId` | Device detail with borrower, tenant, consent, policy, risk, and EMI summary |
+| POST | `/admin/devices/:deviceId/release` | Retry permanent release for a settled schedule after a failed or expired release command |
 | GET | `/admin/devices/:deviceId/commands` | Device command history |
 | GET | `/admin/devices/:deviceId/audit-logs` | Device-specific audit trail |
 
-> Super Admin device oversight is read-heavy. Lock/unlock actions must happen through escalation override routes, not casual device detail actions.
+> The device detail page shows settlement/release state. **Release Device** is available only for a settled, unreleased schedule and acts as a retry/recovery control; it is not a second settlement approval.
 
 #### Audit & Compliance
 
@@ -1855,28 +1873,24 @@ Match payment amount → EMI schedule installments
 Mark installment(s) as paid
         │
         ▼
-Policy Engine: evaluate tenantPolicies.unlockRules
+Are all installments paid or waived?
+        │
+        ├── No → devices.state = 'UNLOCK_PENDING'
+        │        Create UNLOCK (triggeredBy: payment_unlock)
+        │        App applies EMI_PAID and acknowledges → ACTIVE
+        │
+        └── Yes → emiSchedules.status = 'settled'
+                  Store settlementTime
+                  devices.state = 'RELEASE_PENDING'
+                  Create RELEASE_DEVICE (triggeredBy: payment_settlement)
+                  App shows All EMIs completed, removes management,
+                  and acknowledges releaseCompleted: true → RELEASED
         │
         ▼
-Update devices.state → 'UNLOCK_PENDING'
-Set devices.policyKey → 'EMI_PAID'
-Increment devices.policyVersion
+Write payment, unlock/settlement, command, and acknowledgement audit logs
         │
         ▼
-Create deviceCommands: { commandType: 'UNLOCK', triggeredBy: 'payment_unlock' }
-        │
-        ▼
-Send FCM POLICY_UPDATE → device
-        │
-        ▼
-App fetches GET /app/device/policy → applies EMI_PAID policy (lockMode: false)
-App calls POST /app/device/command/ack → devices.state → 'ACTIVE'
-        │
-        ▼
-Write auditLogs (UNLOCK_TRIGGERED, POLICY_ACKNOWLEDGED)
-        │
-        ▼
-Send FCM NOTIFICATION: { notificationType: 'UNLOCK_SUCCESS' } → borrower
+Show normal unlock confirmation or the final Device released screen
 ```
 
 ### 7.2 Unlock Request & Two-Tier Escalation Flow

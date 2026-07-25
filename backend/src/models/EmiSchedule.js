@@ -1,5 +1,10 @@
 import mongoose from "mongoose";
 
+export const EMI_SCHEDULE_STATUSES = Object.freeze({
+  ACTIVE: "active",
+  SETTLED: "settled"
+});
+
 const installmentSchema = new mongoose.Schema(
   {
     installmentNumber: {
@@ -61,6 +66,12 @@ const emiScheduleSchema = new mongoose.Schema(
       required: true,
       trim: true
     },
+    status: {
+      type: String,
+      enum: Object.values(EMI_SCHEDULE_STATUSES),
+      default: EMI_SCHEDULE_STATUSES.ACTIVE
+    },
+    settlementTime: Date,
     installments: [installmentSchema],
     overdueAmount: {
       type: Number,

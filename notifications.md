@@ -465,7 +465,7 @@ When:
 
 - Tenant admin approves a pending borrower QR payment.
 - The payment is applied to the EMI schedule.
-- The backend queues the related device unlock command.
+- The backend queues `UNLOCK` when installments remain, or `RELEASE_DEVICE` when the payment settles every installment.
 
 Queue:
 
@@ -482,13 +482,19 @@ paymentId
 deviceId
 userId
 matchedInstallments
-unlockCommandId
+commandId
+commandType
+releaseQueued
 ```
 
 Current title/text:
 
 ```text
+Regular payment:
 Payment approved / Your payment has been approved and your device unlock is being processed.
+
+Final EMI:
+All EMIs completed / All your EMIs are complete and your device release is being processed.
 ```
 
 Delivery:

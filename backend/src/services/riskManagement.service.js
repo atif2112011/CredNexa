@@ -1,5 +1,9 @@
 import { AUDIT_EVENTS } from "../constants/auditEvents.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../constants/deviceStates.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  isDeviceReleaseState
+} from "../constants/deviceStates.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { Device } from "../models/Device.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
@@ -597,6 +601,10 @@ export const enforceRiskAutoLock = async ({ device, riskFlag, eventType, severit
 
   if (!autoLockEnabled || severity !== "critical" || !autoLockTypes.includes(eventType)) {
     return { queued: false, reason: "RISK_RULE_NOT_MATCHED" };
+  }
+
+  if (isDeviceReleaseState(device.state)) {
+    return { queued: false, reason: "DEVICE_RELEASE_PENDING_OR_COMPLETE" };
   }
 
   if (device.state === DEVICE_STATES.LOCKED) {
