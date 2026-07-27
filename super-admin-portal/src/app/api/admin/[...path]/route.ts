@@ -32,6 +32,7 @@ async function proxy(request: Request, { params }: Params) {
     method: request.method,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": contentType || "application/json" }),
+      "X-Upload-Origin": incomingUrl.origin,
       Authorization: `Bearer ${accessToken}`
     },
     body

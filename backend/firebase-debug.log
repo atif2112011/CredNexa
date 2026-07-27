@@ -1,0 +1,58 @@
+[debug] [2026-07-27T16:42:03.845Z] ----------------------------------------------------------------------
+[debug] [2026-07-27T16:42:03.847Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\HP\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js deploy --only functions
+[debug] [2026-07-27T16:42:03.848Z] CLI Version:   15.22.4
+[debug] [2026-07-27T16:42:03.848Z] Platform:      win32
+[debug] [2026-07-27T16:42:03.848Z] Node Version:  v22.16.0
+[debug] [2026-07-27T16:42:03.848Z] Detected Agent: unknown
+[debug] [2026-07-27T16:42:03.848Z] Time:          Mon Jul 27 2026 22:12:03 GMT+0530 (India Standard Time)
+[debug] [2026-07-27T16:42:03.849Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-07-27T16:42:03.852Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[debug] [2026-07-27T16:42:09.811Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-27T16:42:09.811Z] > authorizing via signed-in user (crednexadev@gmail.com)
+[debug] [2026-07-27T16:42:09.811Z] [iam] checking project cred-nexa for permissions ["cloudfunctions.functions.create","cloudfunctions.functions.delete","cloudfunctions.functions.get","cloudfunctions.functions.list","cloudfunctions.functions.update","cloudfunctions.operations.get","firebase.projects.get"]
+[debug] [2026-07-27T16:42:09.813Z] Checked if tokens are valid: false, expires at: 1785071419175
+[debug] [2026-07-27T16:42:09.813Z] Checked if tokens are valid: false, expires at: 1785071419175
+[debug] [2026-07-27T16:42:09.814Z] > refreshing access token with scopes: []
+[debug] [2026-07-27T16:42:09.817Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-27T16:42:09.817Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-27T16:42:09.972Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2026-07-27T16:42:09.972Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-27T16:42:09.982Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa:testIamPermissions [none]
+[debug] [2026-07-27T16:42:09.982Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa:testIamPermissions  x-goog-user-project=cred-nexa
+[debug] [2026-07-27T16:42:09.982Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa:testIamPermissions {"permissions":["cloudfunctions.functions.create","cloudfunctions.functions.delete","cloudfunctions.functions.get","cloudfunctions.functions.list","cloudfunctions.functions.update","cloudfunctions.operations.get","firebase.projects.get"]}
+[debug] [2026-07-27T16:42:10.427Z] <<< [apiv2][status] GET https://firebase-public.firebaseio.com/cli.json 200
+[debug] [2026-07-27T16:42:10.427Z] <<< [apiv2][body] GET https://firebase-public.firebaseio.com/cli.json {"cloudBuildErrorAfter":1594252800000,"cloudBuildWarnAfter":1590019200000,"defaultNode10After":1594252800000,"minVersion":"3.0.5","node8DeploysDisabledAfter":1613390400000,"node8RuntimeDisabledAfter":1615809600000,"node8WarnAfter":1600128000000}
+[debug] [2026-07-27T16:42:11.484Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa:testIamPermissions 200
+[debug] [2026-07-27T16:42:11.485Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa:testIamPermissions {"permissions":["cloudfunctions.functions.create","cloudfunctions.functions.delete","cloudfunctions.functions.get","cloudfunctions.functions.list","cloudfunctions.functions.update","cloudfunctions.operations.get","firebase.projects.get"]}
+[debug] [2026-07-27T16:42:11.485Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:11.486Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:11.486Z] >>> [apiv2][query] POST https://iam.googleapis.com/v1/projects/cred-nexa/serviceAccounts/cred-nexa@appspot.gserviceaccount.com:testIamPermissions [none]
+[debug] [2026-07-27T16:42:11.486Z] >>> [apiv2][body] POST https://iam.googleapis.com/v1/projects/cred-nexa/serviceAccounts/cred-nexa@appspot.gserviceaccount.com:testIamPermissions {"permissions":["iam.serviceAccounts.actAs"]}
+[debug] [2026-07-27T16:42:13.230Z] <<< [apiv2][status] POST https://iam.googleapis.com/v1/projects/cred-nexa/serviceAccounts/cred-nexa@appspot.gserviceaccount.com:testIamPermissions 200
+[debug] [2026-07-27T16:42:13.230Z] <<< [apiv2][body] POST https://iam.googleapis.com/v1/projects/cred-nexa/serviceAccounts/cred-nexa@appspot.gserviceaccount.com:testIamPermissions {"permissions":["iam.serviceAccounts.actAs"]}
+[info] 
+[info] === Deploying to 'cred-nexa'...
+[info] 
+[info] i  deploying functions 
+[info] Running command: npm --prefix "$RESOURCE_DIR" run lint
+[info] +  functions: Finished running predeploy script. 
+[debug] [2026-07-27T16:42:15.539Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:15.539Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:15.540Z] >>> [apiv2][query] GET https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa [none]
+[debug] [2026-07-27T16:42:15.876Z] <<< [apiv2][status] GET https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa 200
+[debug] [2026-07-27T16:42:15.876Z] <<< [apiv2][body] GET https://cloudresourcemanager.googleapis.com/v1/projects/cred-nexa {"projectNumber":"376411048243","projectId":"cred-nexa","lifecycleState":"ACTIVE","name":"cred-nexa","labels":{"firebase":"enabled","firebase-core":"disabled"},"createTime":"2026-05-22T05:24:08.538Z"}
+[info] i  functions: preparing codebase default for deployment 
+[info] i  functions: ensuring required API cloudfunctions.googleapis.com is enabled... 
+[info] i  functions: ensuring required API cloudbuild.googleapis.com is enabled... 
+[info] i  artifactregistry: ensuring required API artifactregistry.googleapis.com is enabled... 
+[debug] [2026-07-27T16:42:15.880Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:15.880Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:15.881Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/cred-nexa/adminSdkConfig [none]
+[debug] [2026-07-27T16:42:16.685Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects/cred-nexa/adminSdkConfig 200
+[debug] [2026-07-27T16:42:16.686Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects/cred-nexa/adminSdkConfig {"projectId":"cred-nexa","storageBucket":"cred-nexa.firebasestorage.app"}
+[debug] [2026-07-27T16:42:16.686Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:16.686Z] Checked if tokens are valid: true, expires at: 1785174128972
+[debug] [2026-07-27T16:42:16.686Z] >>> [apiv2][query] GET https://runtimeconfig.googleapis.com/v1beta1/projects/cred-nexa/configs [none]
+[debug] [2026-07-27T16:42:17.294Z] <<< [apiv2][status] GET https://runtimeconfig.googleapis.com/v1beta1/projects/cred-nexa/configs 200
+[debug] [2026-07-27T16:42:17.294Z] <<< [apiv2][body] GET https://runtimeconfig.googleapis.com/v1beta1/projects/cred-nexa/configs {}

@@ -67,6 +67,11 @@ export const env = {
     process.env.APP_FIREBASE_MESSAGING_SENDER_ID || process.env.FIREBASE_MESSAGING_SENDER_ID,
   firebaseAppId: process.env.APP_FIREBASE_APP_ID || process.env.FIREBASE_APP_ID,
   firebaseMeasurementId: process.env.APP_FIREBASE_MEASUREMENT_ID || process.env.FIREBASE_MEASUREMENT_ID,
+  directUploadAllowedOrigins: process.env.DIRECT_UPLOAD_ALLOWED_ORIGINS
+    ? process.env.DIRECT_UPLOAD_ALLOWED_ORIGINS.split(",").map((value) => value.trim()).filter(Boolean)
+    : process.env.CORS_ORIGIN
+      ? process.env.CORS_ORIGIN.split(",").map((value) => value.trim()).filter(Boolean)
+      : ["http://localhost:3000"],
   firebaseFunctionsRegion: process.env.FUNCTIONS_REGION || process.env.FIREBASE_FUNCTIONS_REGION || "asia-south1",
   firebaseSchedulerTimeZone:
     process.env.SCHEDULER_TIME_ZONE || process.env.FIREBASE_SCHEDULER_TIME_ZONE || "UTC"

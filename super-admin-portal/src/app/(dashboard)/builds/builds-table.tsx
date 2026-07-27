@@ -19,6 +19,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { uploadFileToFirebaseResumable } from "@/lib/firebase-resumable-upload";
 import { formatDate } from "@/lib/utils";
 import type { Pagination, RecordItem } from "@/types/api";
 
@@ -39,7 +40,16 @@ type BuildFormState = {
   releaseNotes: string;
 };
 
-const MAX_APK_BYTES = 150 * 1024 * 1024;
+const MAX_APK_BYTES = 500 * 1024 * 1024;
+
+type UploadSessionData = {
+  uploadSessionId: string;
+  uploadUrl: string;
+  expiresAt: string;
+  chunkSize: number;
+};
+
+type UploadStage = "idle" | "creating" | "uploading" | "finalizing";
 
 const defaultFormState: BuildFormState = {
   channel: "production",
@@ -107,12 +117,15 @@ function buildDetailRows(build: RecordItem): [string, unknown][] {
 export function BuildsTable({ items, pagination, selectedChannel, selectedStatus }: BuildsTableProps) {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [form, setForm] = useState<BuildFormState>(defaultFormState);
   const [apkFile, setApkFile] = useState<File | null>(null);
   const [formError, setFormError] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadStage, setUploadStage] = useState<UploadStage>("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [selectedBuild, setSelectedBuild] = useState<RecordItem | null>(null);
   const [detailError, setDetailError] = useState("");
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
@@ -125,7 +138,7 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
   function validateUpload() {
     if (!apkFile) return "APK file is required";
     if (!apkFile.name.toLowerCase().endsWith(".apk")) return "APK file must use the .apk extension";
-    if (apkFile.size > MAX_APK_BYTES) return "APK file must be 150 MB or smaller";
+    if (apkFile.size > MAX_APK_BYTES) return "APK file must be 500 MB or smaller";
     if (!form.versionName.trim()) return "Version Name is required";
 
     const versionCode = Number(form.versionCode);
@@ -149,25 +162,57 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
     setFormError(validationError);
     if (validationError) return;
 
-    const body = new FormData();
-    body.append("apkFile", apkFile as File);
-    body.append("platform", "android");
-    body.append("packageName", "com.crednexa.app");
-    body.append("channel", form.channel);
-    body.append("versionName", form.versionName.trim());
-    body.append("versionCode", form.versionCode);
-    body.append("minimumSupportedVersionCode", form.minimumSupportedVersionCode);
-    body.append("buildType", form.buildType);
-    body.append("checksumRequired", form.checksumRequired);
-    body.append("releaseNotes", form.releaseNotes.trim());
+    const selectedApk = apkFile as File;
+    const body = {
+      fileName: selectedApk.name,
+      fileSize: selectedApk.size,
+      mimeType: selectedApk.type || "application/vnd.android.package-archive",
+      platform: "android",
+      packageName: "com.crednexa.app",
+      channel: form.channel,
+      versionName: form.versionName.trim(),
+      versionCode: Number(form.versionCode),
+      minimumSupportedVersionCode: Number(form.minimumSupportedVersionCode),
+      buildType: form.buildType,
+      checksumRequired: form.checksumRequired === "true",
+      releaseNotes: form.releaseNotes.trim()
+    };
 
+    const abortController = new AbortController();
+    uploadAbortRef.current = abortController;
     setIsUploading(true);
+    setUploadStage("creating");
+    setUploadProgress(0);
     try {
-      const response = await fetch("/api/admin/app-builds", {
+      const sessionResponse = await fetch("/api/admin/app-builds/upload-sessions", {
         method: "POST",
-        body
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: abortController.signal
       });
-      if (!response.ok) throw new Error(await getApiError(response));
+      if (!sessionResponse.ok) throw new Error(await getApiError(sessionResponse));
+      const sessionResult = (await sessionResponse.json()) as { data: UploadSessionData };
+
+      setUploadStage("uploading");
+      await uploadFileToFirebaseResumable(selectedApk, sessionResult.data.uploadUrl, {
+        chunkSize: sessionResult.data.chunkSize,
+        signal: abortController.signal,
+        onProgress: (uploadedBytes, totalBytes) => {
+          setUploadProgress(Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)));
+        }
+      });
+
+      setUploadStage("finalizing");
+      const completionResponse = await fetch(
+        `/api/admin/app-builds/upload-sessions/${sessionResult.data.uploadSessionId}/complete`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+          signal: abortController.signal
+        }
+      );
+      if (!completionResponse.ok) throw new Error(await getApiError(completionResponse));
 
       toast.success("Build uploaded successfully");
       setIsUploadOpen(false);
@@ -176,11 +221,19 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
       if (fileInputRef.current) fileInputRef.current.value = "";
       router.refresh();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to upload build";
+      const wasCancelled = error instanceof Error && error.name === "AbortError";
+      const message = wasCancelled
+        ? "Upload cancelled"
+        : error instanceof Error
+          ? error.message
+          : "Unable to upload build";
       setFormError(message);
-      toast.error(message);
+      if (wasCancelled) toast.info(message);
+      else toast.error(message);
     } finally {
+      uploadAbortRef.current = null;
       setIsUploading(false);
+      setUploadStage("idle");
     }
   }
 
@@ -378,7 +431,16 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
         </CardContent>
       </Card>
 
-      <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
+      <Dialog
+        open={isUploadOpen}
+        onOpenChange={(open) => {
+          if (!open && isUploading) {
+            if (uploadStage !== "finalizing") uploadAbortRef.current?.abort();
+            return;
+          }
+          setIsUploadOpen(open);
+        }}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Add Build</DialogTitle>
@@ -393,7 +455,9 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
                 type="file"
                 accept=".apk,application/vnd.android.package-archive,application/zip"
                 onChange={(event) => setApkFile(event.target.files?.[0] || null)}
+                disabled={isUploading}
               />
+              <p className="text-xs text-muted-foreground">Maximum size: 500 MB. The APK uploads directly to Firebase Storage.</p>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="grid gap-2">
@@ -470,10 +534,35 @@ export function BuildsTable({ items, pagination, selectedChannel, selectedStatus
                 {formError}
               </div>
             ) : null}
+            {isUploading ? (
+              <div className="grid gap-2" aria-live="polite">
+                <div className="flex items-center justify-between text-sm">
+                  <span>
+                    {uploadStage === "creating"
+                      ? "Preparing secure upload..."
+                      : uploadStage === "finalizing"
+                        ? "Verifying APK and creating draft..."
+                        : "Uploading directly to Firebase..."}
+                  </span>
+                  <span>{uploadStage === "uploading" ? `${uploadProgress}%` : ""}</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-primary transition-[width]"
+                    style={{ width: `${uploadStage === "finalizing" ? 100 : uploadProgress}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <DialogFooter>
+              {isUploading && uploadStage !== "finalizing" ? (
+                <Button type="button" variant="outline" onClick={() => uploadAbortRef.current?.abort()}>
+                  Cancel Upload
+                </Button>
+              ) : null}
               <Button type="submit" disabled={isUploading}>
                 {isUploading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Upload className="h-4 w-4" aria-hidden="true" />}
-                {isUploading ? "Uploading..." : "Upload Build"}
+                {uploadStage === "finalizing" ? "Finalizing..." : isUploading ? "Uploading..." : "Upload Build"}
               </Button>
             </DialogFooter>
           </form>

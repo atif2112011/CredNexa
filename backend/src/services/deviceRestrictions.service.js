@@ -8,6 +8,16 @@ import { DeviceCommand } from "../models/DeviceCommand.js";
 
 export const DEVICE_RESTRICTIONS_COMMAND_TYPE = "RESTRICTIONS_UPDATE";
 
+export const formatLatestRestrictionCommand = (command) => {
+  if (!command) return null;
+
+  return {
+    ...command,
+    commandId: command._id,
+    restrictionResults: command.ackPayload?.restrictionResults ?? null
+  };
+};
+
 export const validateDeviceRestrictionUpdate = (payload = {}) => {
   const restriction = String(payload.restriction || "").trim();
 

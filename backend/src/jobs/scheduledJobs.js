@@ -1,7 +1,11 @@
 
 import { connectDatabase } from "../config/database.js";
 import { AUDIT_EVENTS } from "../constants/auditEvents.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../constants/deviceStates.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  isDeviceReleaseState
+} from "../constants/deviceStates.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { Device } from "../models/Device.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
@@ -14,6 +18,11 @@ import {
   expireManualOverrideTokens,
   renewExpiringManualOverrideTokens
 } from "../services/manualOverrideToken.service.js";
+import {
+  EMI_REMINDER_COMMAND_TYPE,
+  EMI_REMINDER_TYPES,
+  queueEmiReminder
+} from "../services/emiReminder.service.js";
 import {
   refreshAllTenantMetrics,
   safeRefreshTenantMetrics
@@ -378,30 +387,27 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
       const daysUntilDue = getDaysUntilDue(installment.dueDate, now);
       const notificationConfig = EMI_CRON_CONFIG.upcomingPaymentNotifications[daysUntilDue];
 
-      if (notificationConfig && device.fcmToken) {
+      if (notificationConfig && !isDeviceReleaseState(device.state)) {
         const existingReminder = await DeviceCommand.findOne({
           deviceId: device._id,
-          commandType: "NOTIFICATION",
-          "payload.notificationType": "UPCOMING_EMI",
-          "payload.installmentId": installment._id.toString(),
-          "payload.reminderDays": daysUntilDue
+          commandType: EMI_REMINDER_COMMAND_TYPE,
+          "payload.reminderType": EMI_REMINDER_TYPES.UPCOMING,
+          "payload.installmentNumber": installment.installmentNumber,
+          createdAt: { $gte: startOfUtcDay(now) }
         }).lean();
 
         if (!existingReminder) {
-          const command = await DeviceCommand.create({
-            deviceId: device._id,
+          const { command } = await queueEmiReminder({
+            device,
             tenantId: device.tenantId,
-            commandType: "NOTIFICATION",
             triggeredBy: "auto_policy",
             payload: {
-              notificationType: "UPCOMING_EMI",
-              title: notificationConfig.title,
-              text: notificationConfig.text,
-              installmentId: installment._id.toString(),
-              installmentNumber: installment.installmentNumber,
+              reminderType: EMI_REMINDER_TYPES.UPCOMING,
+              message: notificationConfig.text,
+              amount: getInstallmentOutstanding(installment),
               dueDate: installment.dueDate,
-              reminderDays: daysUntilDue,
-              outstandingAmount: getInstallmentOutstanding(installment)
+              installmentNumber: installment.installmentNumber,
+              totalInstallments: schedule.installments.length
             }
           });
 
@@ -532,46 +538,44 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
           !lastGraceReminder ||
           new Date(lastGraceReminder.sentAt).getTime() <= now.getTime() - EMI_CRON_CONFIG.graceReminderIntervalMs;
 
-        if (reminderDue && activeDevice.fcmToken) {
-          const reminderCommand = await DeviceCommand.create({
-            deviceId: activeDevice._id,
+        if (reminderDue && !isDeviceReleaseState(activeDevice.state)) {
+          const { command: reminderCommand, created } = await queueEmiReminder({
+            device: activeDevice,
             tenantId: activeDevice.tenantId,
-            commandType: "NOTIFICATION",
             triggeredBy: "auto_policy",
             payload: {
-              notificationType: "GRACE_PERIOD_REMINDER",
-              title: EMI_CRON_CONFIG.graceReminderNotification.title,
-              text: EMI_CRON_CONFIG.graceReminderNotification.text,
-              installmentId: graceInstallment._id.toString(),
-              installmentNumber: graceInstallment.installmentNumber,
+              reminderType: EMI_REMINDER_TYPES.OVERDUE,
+              message: EMI_CRON_CONFIG.graceReminderNotification.text,
+              amount: getInstallmentOutstanding(graceInstallment),
               dueDate: graceInstallment.dueDate,
-              graceStartedAt,
-              graceExpiresAt,
-              outstandingAmount: getInstallmentOutstanding(graceInstallment)
+              installmentNumber: graceInstallment.installmentNumber,
+              totalInstallments: schedule.installments.length
             }
           });
 
-          await Device.updateOne(
-            { _id: activeDevice._id },
-            {
-              $push: {
-                graceReminderHistory: {
-                  installmentId: graceInstallment._id,
-                  sentAt: now,
-                  graceStartedAt,
-                  graceExpiresAt,
-                  commandId: reminderCommand._id
+          if (created) {
+            await Device.updateOne(
+              { _id: activeDevice._id },
+              {
+                $push: {
+                  graceReminderHistory: {
+                    installmentId: graceInstallment._id,
+                    sentAt: now,
+                    graceStartedAt,
+                    graceExpiresAt,
+                    commandId: reminderCommand._id
+                  }
                 }
               }
-            }
-          );
+            );
 
-          result.graceRemindersQueued.push({
-            deviceId: activeDevice._id,
-            commandId: reminderCommand._id,
-            installmentId: graceInstallment._id,
-            graceExpiresAt
-          });
+            result.graceRemindersQueued.push({
+              deviceId: activeDevice._id,
+              commandId: reminderCommand._id,
+              installmentId: graceInstallment._id,
+              graceExpiresAt
+            });
+          }
         }
       }
     }

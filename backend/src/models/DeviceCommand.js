@@ -35,7 +35,8 @@ const deviceCommandSchema = new mongoose.Schema(
         "WIPE_DEVICE",
         "REPROVISION_REQUIRED",
         "RESTRICTIONS_UPDATE",
-        "RELEASE_DEVICE"
+        "RELEASE_DEVICE",
+        "EMI_REMINDER"
       ],
       required: true
     },

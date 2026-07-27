@@ -23,6 +23,7 @@ import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import {
+  formatLatestRestrictionCommand,
   queueDeviceRestrictionUpdate,
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
@@ -30,6 +31,11 @@ import {
   queueDeviceRelease,
   settleCompletedSchedule
 } from "../../services/deviceRelease.service.js";
+import {
+  EMI_REMINDER_COMMAND_TYPE,
+  EMI_REMINDER_TYPES,
+  queueEmiReminder
+} from "../../services/emiReminder.service.js";
 import { sendApprovalMail } from "../../services/mail.service.js";
 import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
@@ -1175,57 +1181,59 @@ const queueOverdueEmiReminderForUser = async ({ tenant, userId, accountId, note 
   }
 
   const device = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
-  if (!device?.fcmToken) {
+  if (!device) {
     return {
       status: "skippedNoDevice",
       userId: user._id,
-      deviceId: device?._id
+      deviceId: null
     };
   }
 
+  const primaryInstallment = [...overdueInstallments]
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
   const totalOutstandingAmount = overdueInstallments.reduce((sum, installment) => sum + getInstallmentOutstanding(installment), 0);
-  const reminderText = String(note || "").trim() || "Please clear your overdue EMI to avoid device restrictions.";
-  const commands = await queueNotification({
-    audience: NOTIFICATION_AUDIENCES.BORROWER,
+  const reminderText = String(note || "").trim() || "Your EMI payment is overdue.";
+  const { command, created } = await queueEmiReminder({
+    device,
     tenantId: tenant._id,
-    deviceId: device._id,
-    title: "EMI overdue",
-    text: reminderText,
-    notificationType: "OVERDUE_EMI_REMINDER",
     triggeredBy: "manual_tenant",
     triggeredByAccountId: accountId,
-    data: {
+    payload: {
+      reminderType: EMI_REMINDER_TYPES.OVERDUE,
+      message: reminderText,
+      amount: totalOutstandingAmount,
+      dueDate: primaryInstallment.dueDate,
+      installmentNumber: primaryInstallment.installmentNumber,
+      totalInstallments: schedule.installments.length
+    }
+  });
+
+  if (created) {
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: accountId,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
       userId: user._id,
       deviceId: device._id,
-      overdueInstallmentCount: overdueInstallments.length,
-      totalOutstandingAmount,
-      installmentIds: overdueInstallments.map((installment) => installment._id),
-      note: reminderText
-    }
-  });
-  const command = commands[0];
-
-  await createAuditLog({
-    eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
-    actorId: accountId,
-    tenantId: tenant._id,
-    channelPartnerId: tenant.channelPartnerId,
-    userId: user._id,
-    deviceId: device._id,
-    reason: reminderText,
-    metadata: {
-      commandId: command?._id,
-      commandType: "NOTIFICATION",
-      notificationType: "OVERDUE_EMI_REMINDER",
-      overdueInstallmentCount: overdueInstallments.length,
-      totalOutstandingAmount
-    }
-  });
+      reason: reminderText,
+      metadata: {
+        commandId: command?._id,
+        commandType: EMI_REMINDER_COMMAND_TYPE,
+        reminderType: EMI_REMINDER_TYPES.OVERDUE,
+        overdueInstallmentCount: overdueInstallments.length,
+        totalOutstandingAmount
+      }
+    });
+  }
 
   return {
     status: "queued",
     queued: true,
+    created,
     commandId: command?._id,
+    commandType: EMI_REMINDER_COMMAND_TYPE,
+    commandStatus: command?.status,
     userId: user._id,
     deviceId: device._id,
     overdueInstallmentCount: overdueInstallments.length,
@@ -1374,13 +1382,15 @@ export const sendOverdueEmiReminder = async (req, res) => {
     return sendSuccess(res, 201, "Overdue EMI reminder queued successfully", {
       queued: true,
       commandId: result.commandId,
+      commandType: result.commandType,
+      status: result.commandStatus,
       userId: result.userId,
       deviceId: result.deviceId,
       overdueInstallmentCount: result.overdueInstallmentCount,
       totalOutstandingAmount: result.totalOutstandingAmount
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -1666,7 +1676,7 @@ export const getDistributorDeviceById = async (req, res) => {
       device,
       borrower,
       emiSchedule,
-      latestRestrictionCommand,
+      latestRestrictionCommand: formatLatestRestrictionCommand(latestRestrictionCommand),
       currentPolicy: policy
         ? {
             id: policy._id,
@@ -1784,50 +1794,54 @@ export const sendUpcomingPaymentCommand = async (req, res) => {
       });
     }
 
-    const commands = await DeviceCommand.create([
-      {
-        deviceId: device._id,
-        tenantId: tenant._id,
-        commandType: "UPCOMING_PAYMENT",
-        triggeredBy: "manual_tenant",
-        triggeredByAccountId: req.auth.id,
-        payload: {
-          note: req.body.note,
-          windowDays,
-          emiScheduleId: schedule._id,
-          installmentId: upcomingInstallment._id,
-          installmentNumber: upcomingInstallment.installmentNumber,
-          dueDate: upcomingInstallment.dueDate,
-          emiAmount: upcomingInstallment.emiAmount,
-          penaltyAmount: upcomingInstallment.penaltyAmount || 0,
-          outstandingAmount: Math.max(
-            Number(upcomingInstallment.emiAmount || 0) +
-              Number(upcomingInstallment.penaltyAmount || 0) -
-              Number(upcomingInstallment.paidAmount || 0),
-            0
-          )
-        }
-      }
-    ]);
-
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
-      actorId: req.auth.id,
+    const outstandingAmount = Math.max(
+      Number(upcomingInstallment.emiAmount || 0) +
+        Number(upcomingInstallment.penaltyAmount || 0) -
+        Number(upcomingInstallment.paidAmount || 0),
+      0
+    );
+    const { command, created } = await queueEmiReminder({
+      device,
       tenantId: tenant._id,
-      channelPartnerId: tenant.channelPartnerId,
-      userId: device.userId,
-      deviceId: device._id,
-      reason: req.body.note,
-      metadata: { commandId: commands[0]._id, commandType: "UPCOMING_PAYMENT", installmentId: upcomingInstallment._id }
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      payload: {
+        reminderType: EMI_REMINDER_TYPES.UPCOMING,
+        message: req.body.note,
+        amount: outstandingAmount,
+        dueDate: upcomingInstallment.dueDate,
+        installmentNumber: upcomingInstallment.installmentNumber,
+        totalInstallments: schedule.installments.length
+      }
     });
+
+    if (created) {
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.note,
+        metadata: {
+          commandId: command._id,
+          commandType: EMI_REMINDER_COMMAND_TYPE,
+          installmentId: upcomingInstallment._id
+        }
+      });
+    }
 
     return sendSuccess(res, 201, "Upcoming payment reminder command queued successfully", {
       queued: true,
-      command: commands[0],
+      commandId: command._id,
+      commandType: EMI_REMINDER_COMMAND_TYPE,
+      status: command.status,
+      command,
       upcomingInstallment
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 

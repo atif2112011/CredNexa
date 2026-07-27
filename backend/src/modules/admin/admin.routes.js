@@ -13,7 +13,9 @@ import {
   archiveAppBuild,
   backfillManualOverrideTokensForDevices,
   clearRiskFlag,
+  completeAppBuildUploadSession,
   createAppBuild,
+  createAppBuildUploadSession,
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
@@ -96,6 +98,8 @@ adminRoutes.get("/support-contact", getCompanySupportContact);
 adminRoutes.patch("/support-contact", updateCompanySupportContact);
 
 adminRoutes.get("/app-builds", listAppBuilds);
+adminRoutes.post("/app-builds/upload-sessions", createAppBuildUploadSession);
+adminRoutes.post("/app-builds/upload-sessions/:sessionId/complete", completeAppBuildUploadSession);
 adminRoutes.post("/app-builds", parseApkUpload, createAppBuild);
 adminRoutes.get("/app-builds/:buildId", getAppBuildById);
 adminRoutes.patch("/app-builds/:buildId", parseApkUpload, updateAppBuild);

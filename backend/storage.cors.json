@@ -1,0 +1,19 @@
+[
+  {
+    "origin": [
+      "http://localhost:3000",
+      "https://cred-nexa-t1o7.vercel.app"
+    ],
+    "method": [
+      "GET",
+      "HEAD",
+      "PUT"
+    ],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Range",
+      "Range"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

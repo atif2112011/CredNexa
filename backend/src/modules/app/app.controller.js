@@ -486,7 +486,10 @@ const getDeviceSyncState = async (device) => {
     desiredPolicyVersion: device.desiredPolicyVersion,
     restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
     policy,
-    pendingCommands
+    pendingCommands: pendingCommands.map((command) => ({
+      ...command,
+      commandId: command._id
+    }))
   };
 };
 
@@ -2444,6 +2447,25 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       return sendError(res, 400, "releaseCompleted must be true for a successful device release");
     }
 
+    const terminalStatusAlreadyRecorded =
+      command.status === "acknowledged" ||
+      (
+        command.status === "failed" &&
+        command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+      );
+    if (terminalStatusAlreadyRecorded) {
+      if (command.status !== req.body.status) {
+        return sendError(res, 409, "Device command already has a different terminal status");
+      }
+
+      return sendSuccess(res, 200, "Device command acknowledgement saved", {
+        commandId: command._id,
+        status: command.status,
+        deviceState: device.state,
+        restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
+      });
+    }
+
     command.status = req.body.status;
     command.ackPayload = req.body;
     command.failureReason = req.body.failureReason;
@@ -2497,6 +2519,9 @@ export const acknowledgeDeviceCommand = async (req, res) => {
           device.restrictionState.appliedVersion = appliedRestrictionsVersion;
           device.restrictionState.appliedAt = new Date();
         }
+      } else if (command.commandType === "EMI_REMINDER") {
+        // Reminder acknowledgement is terminal for the command only. It does
+        // not represent a policy transition or change device enforcement state.
       } else {
         device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
         if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;

@@ -7,6 +7,7 @@ import {
 } from "../src/constants/deviceRestrictions.js";
 import {
   buildDeviceRestrictionUpdate,
+  formatLatestRestrictionCommand,
   shouldAdvanceAppliedRestrictionState,
   validateDeviceRestrictionRetry,
   validateDeviceRestrictionUpdate
@@ -15,6 +16,34 @@ import {
   buildDeviceCommandDeliveryFilter,
   buildPolicyUpdateMessage
 } from "../src/jobs/fcmDeliveryWorker.js";
+
+test("exposes persisted per-key results without fabricating missing results", () => {
+  const results = {
+    dialer: { status: "applied" },
+    playStore: { status: "failed" }
+  };
+  assert.deepEqual(
+    formatLatestRestrictionCommand({
+      _id: "command-id",
+      status: "failed",
+      ackPayload: { restrictionResults: results }
+    }),
+    {
+      _id: "command-id",
+      commandId: "command-id",
+      status: "failed",
+      ackPayload: { restrictionResults: results },
+      restrictionResults: results
+    }
+  );
+  assert.equal(
+    formatLatestRestrictionCommand({
+      _id: "historical-command",
+      ackPayload: {}
+    }).restrictionResults,
+    null
+  );
+});
 
 test("normalizes missing restriction state to unlocked defaults", () => {
   assert.deepEqual(normalizeDeviceRestrictionState(), {

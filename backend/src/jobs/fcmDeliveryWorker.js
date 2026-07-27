@@ -77,6 +77,19 @@ export const buildPolicyUpdateMessage = ({ device, command }) => {
     "RELEASE_DEVICE"
   ]);
 
+  if (command.commandType === "EMI_REMINDER") {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        type: "EMI_REMINDER"
+      },
+      android: {
+        priority: "high"
+      }
+    };
+  }
+
   if (command.commandType === "NOTIFICATION") {
     return {
       token: device.fcmToken,
@@ -219,7 +232,7 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
     const device = await Device.findById(command.deviceId).lean();
 
     if (!device?.fcmToken) {
-      command.status = "failed";
+      command.status = command.commandType === "EMI_REMINDER" ? "pending" : "failed";
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000);
       command.failureReason = "Device FCM token not found";
@@ -229,7 +242,12 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         status: "skipped",
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         error: command.failureReason
       });
       results.push({ commandId: command._id, status: "skipped" });
@@ -255,14 +273,19 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         status: "sent",
         providerMessageId,
         metadata: { mockMode: !firebase }
       });
       results.push({ commandId: command._id, status: "sent", providerMessageId });
     } catch (error) {
-      command.status = "failed";
+      command.status = command.commandType === "EMI_REMINDER" ? "pending" : "failed";
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + Math.min(command.retryCount + 1, 5) * 5 * 60 * 1000);
       command.failureReason = error.message;
@@ -273,7 +296,12 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         status: "failed",
         error: error.message
       });

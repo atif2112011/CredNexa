@@ -43,6 +43,11 @@ import {
   validateBuildPayload
 } from "../../services/appUpdate.service.js";
 import {
+  AppBuildUploadError,
+  completeDirectBuildUploadSession,
+  createDirectBuildUploadSession
+} from "../../services/appBuildDirectUpload.service.js";
+import {
   getOrCreateCompanySupportContact,
   validateCompanySupportContactPayload
 } from "../../services/companySupportContact.service.js";
@@ -5066,6 +5071,13 @@ const handleAppBuildWriteError = (res, error) => {
   return sendError(res, 500, error.message || "Internal server error");
 };
 
+const handleDirectBuildUploadError = (res, error) => {
+  if (error instanceof AppBuildUploadError) {
+    return sendError(res, error.statusCode, error.message);
+  }
+  return handleAppBuildWriteError(res, error);
+};
+
 /**
  * List Android app builds for Super Admin release management. Filters are safe
  * operational metadata only; borrower/device identifiers are not involved.
@@ -5096,6 +5108,35 @@ export const listAppBuilds = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const createAppBuildUploadSession = async (req, res) => {
+  try {
+    const uploadSession = await createDirectBuildUploadSession({
+      body: req.body,
+      actorId: req.auth.id,
+      requestedOrigin: req.get("x-upload-origin") || req.get("origin")
+    });
+    return sendSuccess(res, 201, "Build upload session created successfully", uploadSession);
+  } catch (error) {
+    return handleDirectBuildUploadError(res, error);
+  }
+};
+
+export const completeAppBuildUploadSession = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.sessionId)) {
+      return sendError(res, 400, "Invalid build upload session ID");
+    }
+
+    const appBuild = await completeDirectBuildUploadSession({
+      sessionId: req.params.sessionId,
+      actorId: req.auth.id
+    });
+    return sendSuccess(res, 201, "App build created successfully", appBuild);
+  } catch (error) {
+    return handleDirectBuildUploadError(res, error);
   }
 };
 
