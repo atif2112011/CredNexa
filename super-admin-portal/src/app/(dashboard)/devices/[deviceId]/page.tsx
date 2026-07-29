@@ -4,6 +4,7 @@ import { ActivePolicyPanel, RiskFlagMetricsPanel } from "@/components/data/visua
 import { DeviceOverridePanel } from "@/components/devices/device-override-panel";
 import { DeviceReleasePanel } from "@/components/devices/device-release-panel";
 import { DeviceRestrictionsPanel } from "@/components/devices/device-restrictions-panel";
+import { DeviceSecurityControlsPanel } from "@/components/devices/device-security-controls-panel";
 import { DeviceTelemetryPanel } from "@/components/devices/device-telemetry-panel";
 import { ManualOverrideTokenPanel } from "@/components/devices/manual-override-token-panel";
 import { PageHeader } from "@/components/shell/page-header";
@@ -33,6 +34,10 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
         {!releaseInProgressOrComplete ? (
           <>
             <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />
+            <DeviceSecurityControlsPanel
+              device={device}
+              latestCommands={(detail.latestSecurityControlCommands as RecordItem) || {}}
+            />
             <DeviceOverridePanel device={device} riskFlags={riskFlags} />
             <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
           </>

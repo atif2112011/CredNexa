@@ -275,3 +275,47 @@ Suggested status interpretation:
 | `404` | Device does not belong to the tenant or does not exist | Return to the device list |
 | `409` | Retry state changed or is already applied | Refresh device details |
 | `500` | Unexpected backend failure | Revert the switch and offer a normal retry |
+
+## 9. Independent device security controls
+
+Tenant device detail includes:
+
+- `device.securityControlState`, containing independent `factoryReset`, `usbDebugging`, and
+  `unknownAppInstalls` desired/applied state and versions.
+- `latestSecurityControlCommands`, keyed by those same three names.
+
+Use these explicit endpoints:
+
+```text
+PATCH /api/distributor/devices/:deviceId/controls/factory-reset
+PATCH /api/distributor/devices/:deviceId/controls/usb-debugging
+PATCH /api/distributor/devices/:deviceId/controls/unknown-app-installs
+```
+
+Request:
+
+```json
+{
+  "blocked": true,
+  "retry": false
+}
+```
+
+The endpoints queue, respectively:
+
+- `SET_FACTORY_RESET_BLOCKED`
+- `SET_USB_DEBUGGING_BLOCKED`
+- `SET_UNKNOWN_APP_INSTALL_BLOCKED`
+
+Each control has an independent desired/applied version. A normal toggle increments only the selected
+control. A newer toggle expires only an older pending command for that same control; it does not
+expire either of the other security-control commands.
+
+Render each switch as `Blocked` or `Allowed` from `desiredBlocked`. Show `Awaiting device` while
+`desiredVersion > appliedVersion`, and show the separate `appliedBlocked` value. Offer Retry only
+when the selected control is awaiting application and its latest command is `failed` or `expired`.
+Retry by sending the same desired `blocked` value with `retry: true`; a valid retry reuses the desired
+version.
+
+Apply the same optimistic-update, rollback, HTTP error, and refresh behavior as restriction switches.
+Disable all security-control switches for `RELEASE_PENDING` and `RELEASED` devices.

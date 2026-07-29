@@ -35,6 +35,9 @@ const deviceCommandSchema = new mongoose.Schema(
         "WIPE_DEVICE",
         "REPROVISION_REQUIRED",
         "RESTRICTIONS_UPDATE",
+        "SET_FACTORY_RESET_BLOCKED",
+        "SET_USB_DEBUGGING_BLOCKED",
+        "SET_UNKNOWN_APP_INSTALL_BLOCKED",
         "RELEASE_DEVICE",
         "EMI_REMINDER"
       ],

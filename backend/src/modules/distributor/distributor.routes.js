@@ -41,6 +41,9 @@ import {
   tempUnlockTenantUnlockRequest,
   updateTenantAdhaarVerification,
   updateTenantDeviceRestrictions,
+  updateTenantFactoryResetControl,
+  updateTenantUsbDebuggingControl,
+  updateTenantUnknownAppInstallsControl,
   unlockTenantDevice
 } from "./distributor.controller.js";
 
@@ -72,6 +75,9 @@ distributorRoutes.post("/devices/:id/lock", lockTenantDevice);
 distributorRoutes.post("/devices/:id/unlock", unlockTenantDevice);
 distributorRoutes.post("/devices/:id/temp-unlock", tempUnlockTenantDevice);
 distributorRoutes.patch("/devices/:id/restrictions", updateTenantDeviceRestrictions);
+distributorRoutes.patch("/devices/:id/controls/factory-reset", updateTenantFactoryResetControl);
+distributorRoutes.patch("/devices/:id/controls/usb-debugging", updateTenantUsbDebuggingControl);
+distributorRoutes.patch("/devices/:id/controls/unknown-app-installs", updateTenantUnknownAppInstallsControl);
 distributorRoutes.get("/qr-codes", listQrCodes);
 distributorRoutes.post("/qr-codes", parseTenantQrImageUpload, addQrCode);
 distributorRoutes.patch("/qr-codes/:qrId/activate", activateQrCode);

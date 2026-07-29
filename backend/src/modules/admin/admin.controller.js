@@ -5,6 +5,11 @@ import mongoose from "mongoose";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEFAULT_DEVICE_POLICIES, DEFAULT_TENANT_POLICY } from "../../constants/defaultPolicies.js";
 import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
+import {
+  DEVICE_SECURITY_CONTROLS,
+  DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../../constants/tenant.js";
@@ -55,6 +60,11 @@ import {
   queueDeviceRestrictionUpdate,
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
+import {
+  formatLatestSecurityControlCommand,
+  queueDeviceSecurityControlUpdate,
+  validateDeviceSecurityControlUpdate
+} from "../../services/deviceSecurityControls.service.js";
 import {
   getDeviceReleaseSummary,
   queueDeviceRelease,
@@ -3411,8 +3421,9 @@ export const getDeviceById = async (req, res) => {
       return sendError(res, 400, "Device not found");
     }
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+    device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
 
-    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand] = await Promise.all([
+    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
@@ -3424,7 +3435,15 @@ export const getDeviceById = async (req, res) => {
       DeviceCommand.findOne({
         deviceId: device._id,
         commandType: RELEASE_COMMAND_TYPE
-      }).sort({ createdAt: -1 }).lean()
+      }).sort({ createdAt: -1 }).lean(),
+      Promise.all(
+        DEVICE_SECURITY_CONTROL_COMMAND_TYPES.map((commandType) =>
+          DeviceCommand.findOne({
+            deviceId: device._id,
+            commandType
+          }).sort({ createdAt: -1 }).lean()
+        )
+      )
     ]);
     const release = getDeviceReleaseSummary({
       schedule: emiSchedule,
@@ -3436,6 +3455,17 @@ export const getDeviceById = async (req, res) => {
       device,
       policy,
       commands,
+      latestSecurityControlCommands: Object.values(DEVICE_SECURITY_CONTROLS).reduce(
+        (result, control) => {
+          result[control.key] = formatLatestSecurityControlCommand(
+            latestSecurityControlCommands.find(
+              (command) => command.commandType === control.commandType
+            )
+          );
+          return result;
+        },
+        {}
+      ),
       cases,
       riskFlags,
       emiSchedule: emiSchedule
@@ -3599,6 +3629,72 @@ export const updateAdminDeviceRestrictions = async (req, res) => {
     session.endSession();
   }
 };
+
+const updateAdminDeviceSecurityControl = async (req, res, controlKey) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+    const validation = validateDeviceSecurityControlUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceSecurityControlUpdate({
+      device,
+      controlKey,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          control: controlKey,
+          blocked: validation.value.blocked,
+          controlVersion: result.controlState.desiredVersion,
+          retry: validation.value.retry,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device security control update queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+export const updateAdminFactoryResetControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "factoryReset");
+
+export const updateAdminUsbDebuggingControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "usbDebugging");
+
+export const updateAdminUnknownAppInstallsControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "unknownAppInstalls");
 
 /**
  * Super admin manual device lock.

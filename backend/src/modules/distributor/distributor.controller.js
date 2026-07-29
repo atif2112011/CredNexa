@@ -4,6 +4,11 @@ import QRCode from "qrcode";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
+import {
+  DEVICE_SECURITY_CONTROLS,
+  DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES } from "../../constants/tenant.js";
 import { AuditLog } from "../../models/AuditLog.js";
@@ -21,12 +26,22 @@ import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/Ten
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  getDevicePolicyLabel,
+  getDeviceStateLabel
+} from "../../constants/deviceStates.js";
 import {
   formatLatestRestrictionCommand,
   queueDeviceRestrictionUpdate,
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
+import {
+  formatLatestSecurityControlCommand,
+  queueDeviceSecurityControlUpdate,
+  validateDeviceSecurityControlUpdate
+} from "../../services/deviceSecurityControls.service.js";
 import {
   queueDeviceRelease,
   settleCompletedSchedule
@@ -81,6 +96,13 @@ const buildPagination = (page, limit, total) => ({
 });
 
 const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+
+const formatTenantDevice = (device = {}) => ({
+  ...device,
+  stateLabel: getDeviceStateLabel(device.state),
+  currentPolicyLabel: getDevicePolicyLabel(device.currentPolicyKey),
+  releasedAt: device.releasedAt || null
+});
 
 const DEFAULT_PENDING_EMI_ALERT_DAYS = 10;
 
@@ -784,6 +806,11 @@ export const getDashboard = async (req, res) => {
       })
     );
 
+    const deviceStateCounts = devicesByState.reduce((result, item) => {
+      result[item._id] = item.count;
+      return result;
+    }, {});
+
     return sendSuccess(res, 200, "Dashboard fetched successfully", {
       totalBorrowers,
       borrowersRegisteredToday,
@@ -799,10 +826,7 @@ export const getDashboard = async (req, res) => {
       devices: {
         activated: devicesActivated,
         pendingActivation: Math.max(totalBorrowers - devicesActivated, 0),
-        byState: devicesByState.reduce((result, item) => {
-          result[item._id] = item.count;
-          return result;
-        }, {})
+        byState: deviceStateCounts
       },
       alerts,
       recentEnrollments: recentEnrollmentRows
@@ -1581,7 +1605,12 @@ export const getDistributorDevices = async (req, res) => {
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
 
-    if (req.query.state) filter.state = req.query.state;
+    if (req.query.state) {
+      if (!Object.values(DEVICE_STATES).includes(req.query.state)) {
+        return sendError(res, 400, "Invalid device state");
+      }
+      filter.state = req.query.state;
+    }
     if (req.query.policyKey) filter.currentPolicyKey = req.query.policyKey;
     if (req.query.imei) filter.imei = buildSearchRegex(req.query.imei);
 
@@ -1614,7 +1643,7 @@ export const getDistributorDevices = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Devices fetched successfully", {
-      items,
+      items: items.map(formatTenantDevice),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -1646,8 +1675,10 @@ export const getDistributorDeviceById = async (req, res) => {
       return sendError(res, 404, "Device not found");
     }
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+    device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
+    Object.assign(device, formatTenantDevice(device));
 
-    const [policy, emiSchedule, latestRestrictionCommand] = await Promise.all([
+    const [policy, emiSchedule, latestRestrictionCommand, latestSecurityControlCommands] = await Promise.all([
       device.currentPolicyId
         ? DevicePolicy.findOne({
             _id: device.currentPolicyId,
@@ -1665,7 +1696,15 @@ export const getDistributorDeviceById = async (req, res) => {
         commandType: "RESTRICTIONS_UPDATE"
       })
         .sort({ createdAt: -1 })
-        .lean()
+        .lean(),
+      Promise.all(
+        DEVICE_SECURITY_CONTROL_COMMAND_TYPES.map((commandType) =>
+          DeviceCommand.findOne({
+            deviceId: device._id,
+            commandType
+          }).sort({ createdAt: -1 }).lean()
+        )
+      )
     ]);
 
     const borrower = device.userId
@@ -1677,6 +1716,17 @@ export const getDistributorDeviceById = async (req, res) => {
       borrower,
       emiSchedule,
       latestRestrictionCommand: formatLatestRestrictionCommand(latestRestrictionCommand),
+      latestSecurityControlCommands: Object.values(DEVICE_SECURITY_CONTROLS).reduce(
+        (result, control) => {
+          result[control.key] = formatLatestSecurityControlCommand(
+            latestSecurityControlCommands.find(
+              (command) => command.commandType === control.commandType
+            )
+          );
+          return result;
+        },
+        {}
+      ),
       currentPolicy: policy
         ? {
             id: policy._id,
@@ -1758,6 +1808,78 @@ export const updateTenantDeviceRestrictions = async (req, res) => {
     session.endSession();
   }
 };
+
+const updateTenantDeviceSecurityControl = async (req, res, controlKey) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+    const validation = validateDeviceSecurityControlUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findOne({
+      _id: req.params.id,
+      tenantId: tenant._id
+    }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceSecurityControlUpdate({
+      device,
+      controlKey,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          control: controlKey,
+          blocked: validation.value.blocked,
+          controlVersion: result.controlState.desiredVersion,
+          retry: validation.value.retry,
+          source: "tenant_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device security control update queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+export const updateTenantFactoryResetControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "factoryReset");
+
+export const updateTenantUsbDebuggingControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "usbDebugging");
+
+export const updateTenantUnknownAppInstallsControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "unknownAppInstalls");
 
 /**
  * Queue an upcoming payment reminder command for a device when a due EMI is coming up.

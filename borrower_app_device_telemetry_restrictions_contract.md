@@ -271,3 +271,73 @@ and backoff behavior.
 - Process pending commands in ascending creation/version order.
 - Ignore a stale restriction command rather than rolling local restrictions backward.
 - Retry failed API acknowledgements without reapplying an older command over newer state.
+
+## 7. Independent device security controls
+
+Device ping and sync responses include `securityControlState`:
+
+```json
+{
+  "factoryReset": {
+    "desiredBlocked": true,
+    "appliedBlocked": false,
+    "desiredVersion": 2,
+    "appliedVersion": 1
+  },
+  "usbDebugging": {
+    "desiredBlocked": true,
+    "appliedBlocked": true,
+    "desiredVersion": 3,
+    "appliedVersion": 3
+  },
+  "unknownAppInstalls": {
+    "desiredBlocked": false,
+    "appliedBlocked": false,
+    "desiredVersion": 1,
+    "appliedVersion": 1
+  }
+}
+```
+
+The app can receive these independent command types through FCM or `pendingCommands`:
+
+| Command type | Android Device Owner enforcement |
+|---|---|
+| `SET_FACTORY_RESET_BLOCKED` | Add or clear `UserManager.DISALLOW_FACTORY_RESET` |
+| `SET_USB_DEBUGGING_BLOCKED` | Add or clear `UserManager.DISALLOW_DEBUGGING_FEATURES` |
+| `SET_UNKNOWN_APP_INSTALL_BLOCKED` | Add or clear the appropriate unknown-source restriction, using the device-wide variant where supported |
+
+Each command payload contains:
+
+```json
+{
+  "blocked": true,
+  "controlVersion": 3
+}
+```
+
+Treat each control as a separate version stream. Ignore a command older than that control's locally
+applied version, apply only the named control, persist the applied value/version, and then acknowledge:
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f0d",
+  "status": "acknowledged",
+  "appliedControlVersion": 3,
+  "appliedBlocked": true,
+  "controlResult": {
+    "status": "applied"
+  }
+}
+```
+
+`appliedControlVersion` and `appliedBlocked` must exactly match the command payload. If Device Owner
+is unavailable or Android/OEM enforcement is refused, send `status: "failed"`, a `failureReason`,
+and `controlResult.status` of `failed` or `unsupported`. Local persistence alone is not success.
+
+Factory-reset blocking prevents reset through Android Settings but cannot guarantee blocking every
+recovery or OEM reset path. Unknown-source blocking affects future installations and does not remove
+previously installed APKs.
+
+These controls persist through lock, temporary unlock, and full unlock. For `RELEASE_DEVICE`, clear
+all three controls before removing Device Owner management and reporting release completion.

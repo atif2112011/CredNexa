@@ -10,6 +10,10 @@ import {
   normalizeDeviceRestrictions
 } from "../../constants/deviceRestrictions.js";
 import {
+  getDeviceSecurityControlByCommandType,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
+import {
   DEVICE_POLICY_KEYS,
   DEVICE_STATES,
   isDeviceReleaseState
@@ -50,6 +54,10 @@ import {
   sanitizePingEventPayload
 } from "../../services/deviceTelemetry.service.js";
 import { shouldAdvanceAppliedRestrictionState } from "../../services/deviceRestrictions.service.js";
+import {
+  buildReleasedDeviceSecurityControlState,
+  shouldAdvanceAppliedSecurityControlState
+} from "../../services/deviceSecurityControls.service.js";
 import {
   enforceRiskAutoLock,
   recordIntegrityAssessment
@@ -485,6 +493,7 @@ const getDeviceSyncState = async (device) => {
     currentPolicyKey: device.currentPolicyKey,
     desiredPolicyVersion: device.desiredPolicyVersion,
     restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+    securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
     policy,
     pendingCommands: pendingCommands.map((command) => ({
       ...command,
@@ -2462,7 +2471,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
         commandId: command._id,
         status: command.status,
         deviceState: device.state,
-        restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
+        restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+        securityControlState: normalizeDeviceSecurityControlState(device.securityControlState)
       });
     }
 
@@ -2481,6 +2491,11 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       if (command.commandType === "RELEASE_DEVICE") {
         const releasedAt = new Date();
         const clearedRestrictions = normalizeDeviceRestrictions();
+        const clearedSecurityControls = buildReleasedDeviceSecurityControlState(
+          device.securityControlState,
+          releasedAt,
+          command.triggeredByAccountId || null
+        );
         device.state = DEVICE_STATES.RELEASED;
         device.deviceOwnerStatus = "RELEASED";
         device.releasedAt = releasedAt;
@@ -2489,6 +2504,7 @@ export const acknowledgeDeviceCommand = async (req, res) => {
         device.restrictionState.applied = clearedRestrictions;
         device.restrictionState.updatedAt = releasedAt;
         device.restrictionState.appliedAt = releasedAt;
+        device.securityControlState = clearedSecurityControls;
         device.lastPolicyAppliedAt = releasedAt;
         device.stateUpdatedAt = releasedAt;
       } else if (command.commandType === "RESTRICTIONS_UPDATE") {
@@ -2518,6 +2534,52 @@ export const acknowledgeDeviceCommand = async (req, res) => {
           );
           device.restrictionState.appliedVersion = appliedRestrictionsVersion;
           device.restrictionState.appliedAt = new Date();
+        }
+      } else if (getDeviceSecurityControlByCommandType(command.commandType)) {
+        const control = getDeviceSecurityControlByCommandType(command.commandType);
+        const appliedControlVersion = Number(req.body.appliedControlVersion);
+        const commandVersion = Number(command.payload?.controlVersion);
+        if (
+          !Number.isInteger(appliedControlVersion) ||
+          appliedControlVersion < 0 ||
+          appliedControlVersion !== commandVersion
+        ) {
+          return sendError(
+            res,
+            400,
+            "appliedControlVersion must match the security control command version"
+          );
+        }
+        if (
+          typeof req.body.appliedBlocked !== "boolean" ||
+          req.body.appliedBlocked !== Boolean(command.payload?.blocked)
+        ) {
+          return sendError(
+            res,
+            400,
+            "appliedBlocked must match the security control command value"
+          );
+        }
+
+        const currentSecurityState = normalizeDeviceSecurityControlState(
+          device.securityControlState
+        );
+        const currentEntry = currentSecurityState[control.key];
+        if (
+          shouldAdvanceAppliedSecurityControlState({
+            currentAppliedVersion: currentEntry.appliedVersion,
+            acknowledgedVersion: appliedControlVersion
+          })
+        ) {
+          device.set(
+            `securityControlState.${control.key}.appliedBlocked`,
+            req.body.appliedBlocked
+          );
+          device.set(
+            `securityControlState.${control.key}.appliedVersion`,
+            appliedControlVersion
+          );
+          device.set(`securityControlState.${control.key}.appliedAt`, new Date());
         }
       } else if (command.commandType === "EMI_REMINDER") {
         // Reminder acknowledgement is terminal for the command only. It does
@@ -2580,7 +2642,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       commandId: command._id,
       status: command.status,
       deviceState: device.state,
-      restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
+      restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+      securityControlState: normalizeDeviceSecurityControlState(device.securityControlState)
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

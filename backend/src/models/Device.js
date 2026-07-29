@@ -14,6 +14,22 @@ const deviceRestrictionValuesSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const deviceSecurityControlEntrySchema = new mongoose.Schema(
+  {
+    desiredBlocked: { type: Boolean, default: false },
+    appliedBlocked: { type: Boolean, default: false },
+    desiredVersion: { type: Number, default: 0 },
+    appliedVersion: { type: Number, default: 0 },
+    updatedAt: Date,
+    appliedAt: Date,
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Account"
+    }
+  },
+  { _id: false }
+);
+
 const locationSchema = new mongoose.Schema(
   {
     latitude: { type: Number, required: true },
@@ -143,6 +159,20 @@ const deviceSchema = new mongoose.Schema(
       updatedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Account"
+      }
+    },
+    securityControlState: {
+      factoryReset: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
+      },
+      usbDebugging: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
+      },
+      unknownAppInstalls: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
       }
     },
     isOnline: {

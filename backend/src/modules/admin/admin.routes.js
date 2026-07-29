@@ -74,6 +74,9 @@ import {
   updateChannelPartnerStatus,
   updateCompanySupportContact,
   updateAdminDeviceRestrictions,
+  updateAdminFactoryResetControl,
+  updateAdminUsbDebuggingControl,
+  updateAdminUnknownAppInstallsControl,
   updatePayoutConstants,
   updateTenant,
   updateTenantStatus,
@@ -166,6 +169,9 @@ adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
 adminRoutes.post("/devices/:deviceId/release", releaseAdminDevice);
 adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictions);
+adminRoutes.patch("/devices/:deviceId/controls/factory-reset", updateAdminFactoryResetControl);
+adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", updateAdminUsbDebuggingControl);
+adminRoutes.patch("/devices/:deviceId/controls/unknown-app-installs", updateAdminUnknownAppInstallsControl);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 
