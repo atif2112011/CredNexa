@@ -77,15 +77,13 @@ export const parseLocationTelemetry = ({ location, currentLocation, now = new Da
 
 export const applyDevicePingTelemetry = ({ device, body = {}, now = new Date() }) => {
   const telemetryWarnings = [];
-  const locationResult = parseLocationTelemetry({
-    location: body.location,
-    currentLocation: device.lastLocation,
-    now
-  });
-
-  telemetryWarnings.push(...locationResult.warnings);
-  if (locationResult.value) {
-    device.lastLocation = locationResult.value;
+  if (body.location !== undefined) {
+    telemetryWarnings.push(
+      buildWarning(
+        "LOCATION_COMMAND_REQUIRED",
+        "Routine ping location was ignored; location is accepted only for GET_LOCATION acknowledgement"
+      )
+    );
   }
 
   if (body.simInfo !== undefined) {

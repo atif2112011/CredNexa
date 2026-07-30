@@ -33,6 +33,7 @@ import {
   registerBorrower,
   rejectPayment,
   rejectTenantUnlockRequest,
+  requestTenantDeviceLocation,
   sendBulkOverdueEmiReminders,
   sendOverdueEmiReminder,
   sendUpcomingPaymentCommand,
@@ -78,6 +79,7 @@ distributorRoutes.patch("/devices/:id/restrictions", updateTenantDeviceRestricti
 distributorRoutes.patch("/devices/:id/controls/factory-reset", updateTenantFactoryResetControl);
 distributorRoutes.patch("/devices/:id/controls/usb-debugging", updateTenantUsbDebuggingControl);
 distributorRoutes.patch("/devices/:id/controls/unknown-app-installs", updateTenantUnknownAppInstallsControl);
+distributorRoutes.post("/devices/:id/location-request", requestTenantDeviceLocation);
 distributorRoutes.get("/qr-codes", listQrCodes);
 distributorRoutes.post("/qr-codes", parseTenantQrImageUpload, addQrCode);
 distributorRoutes.patch("/qr-codes/:qrId/activate", activateQrCode);

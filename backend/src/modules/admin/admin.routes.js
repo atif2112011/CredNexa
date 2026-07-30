@@ -84,6 +84,7 @@ import {
   getProvisioningDetails,
   listAppBuilds,
   publishAppBuild,
+  requestAdminDeviceLocation,
   queueRiskFlagAppUpdate,
   queueRiskFlagWipe,
   requestRiskFlagRecheck,
@@ -172,6 +173,7 @@ adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictio
 adminRoutes.patch("/devices/:deviceId/controls/factory-reset", updateAdminFactoryResetControl);
 adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", updateAdminUsbDebuggingControl);
 adminRoutes.patch("/devices/:deviceId/controls/unknown-app-installs", updateAdminUnknownAppInstallsControl);
+adminRoutes.post("/devices/:deviceId/location-request", requestAdminDeviceLocation);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 

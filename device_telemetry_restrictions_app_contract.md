@@ -35,7 +35,7 @@ Authorization: Bearer <user-access-token>
 Content-Type: application/json
 ```
 
-The managed app may omit `location` when permission or a valid fix is unavailable. It may omit `simInfo`, or send only the SIM fields that are available or changed.
+The managed app must not include location in routine ping or sync. It may omit `simInfo`, or send only the SIM fields that are available or changed.
 
 ```json
 {
@@ -43,12 +43,6 @@ The managed app may omit `location` when permission or a valid fix is unavailabl
   "networkType": "WIFI",
   "appVersion": "1.4.0",
   "fcmToken": "<current-fcm-token>",
-  "location": {
-    "latitude": 12.9716,
-    "longitude": 77.5946,
-    "accuracyMeters": 18.4,
-    "capturedAt": "2026-07-24T10:30:00.000Z"
-  },
   "simInfo": {
     "simOperator": "Airtel",
     "simSerial": "8991000000000000000",
@@ -59,13 +53,10 @@ The managed app may omit `location` when permission or a valid fix is unavailabl
 
 Location rules:
 
-- Latitude must be between `-90` and `90`.
-- Longitude must be between `-180` and `180`.
-- Accuracy must be non-negative.
-- `capturedAt` must be a valid timestamp and no more than five minutes ahead of server time.
-- Older fixes do not overwrite a newer stored fix.
-- Invalid, future, or stale location data does not fail the heartbeat. It is ignored and described in `telemetryWarnings`.
-- Only the latest accepted location is retained.
+- Routine ping/sync location is ignored with `LOCATION_COMMAND_REQUIRED`.
+- The device captures one fresh fix only after receiving `GET_LOCATION`.
+- The captured fix is submitted in that command's acknowledgement.
+- Older, invalid, or future fixes are rejected.
 
 SIM rules:
 
@@ -114,7 +105,7 @@ Example response:
 }
 ```
 
-Possible location warning codes are `INVALID_LOCATION`, `FUTURE_LOCATION`, and `STALE_LOCATION`.
+Routine ping location produces `LOCATION_COMMAND_REQUIRED`.
 
 ## Tenant device details
 

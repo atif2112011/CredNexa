@@ -319,3 +319,40 @@ version.
 
 Apply the same optimistic-update, rollback, HTTP error, and refresh behavior as restriction switches.
 Disable all security-control switches for `RELEASE_PENDING` and `RELEASED` devices.
+
+## 10. Request a fresh device location
+
+```text
+POST /api/distributor/devices/:deviceId/location-request
+Authorization: Bearer <tenant-admin-access-token>
+```
+
+No request body is required.
+
+Successful response:
+
+```json
+{
+  "success": true,
+  "message": "Location request queued successfully",
+  "data": {
+    "command": {
+      "_id": "665f6f0b6f0f6f0b6f0f6f10",
+      "commandType": "GET_LOCATION",
+      "status": "pending",
+      "triggeredBy": "manual_tenant",
+      "payload": {
+        "requestedAt": "2026-07-31T10:00:00.000Z"
+      }
+    }
+  }
+}
+```
+
+Only one pending or sent `GET_LOCATION` command is allowed per device. A duplicate request returns
+HTTP `409`. Requests for `RELEASE_PENDING` or `RELEASED` devices also return HTTP `409`.
+
+Device detail includes `latestLocationCommand`. Disable the Update location button while its status
+is `pending` or `sent`. Once acknowledged, refresh device detail and display `device.lastLocation`.
+Routine device ping/sync no longer updates location; only a successful `GET_LOCATION`
+acknowledgement does.

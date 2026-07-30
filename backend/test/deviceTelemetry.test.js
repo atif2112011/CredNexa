@@ -6,6 +6,7 @@ import {
   parseLocationTelemetry,
   sanitizePingEventPayload
 } from "../src/services/deviceTelemetry.service.js";
+import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
 
 test("accepts a valid newer location", () => {
   const now = new Date("2026-07-24T12:00:00.000Z");
@@ -97,6 +98,48 @@ test("updates only provided SIM fields and timestamps actual changes", () => {
     phoneNumber: "9111111111"
   });
   assert.equal(device.simChangedAt, now);
+});
+
+test("ignores location supplied by routine ping", () => {
+  const device = {
+    lastLocation: {
+      latitude: 11,
+      longitude: 76,
+      accuracyMeters: 20,
+      capturedAt: new Date("2026-07-24T10:00:00.000Z")
+    }
+  };
+  const previousLocation = device.lastLocation;
+  const result = applyDevicePingTelemetry({
+    device,
+    body: {
+      location: {
+        latitude: 12,
+        longitude: 77,
+        accuracyMeters: 10,
+        capturedAt: "2026-07-24T12:00:00.000Z"
+      }
+    }
+  });
+
+  assert.equal(device.lastLocation, previousLocation);
+  assert.equal(result.telemetryWarnings[0].code, "LOCATION_COMMAND_REQUIRED");
+});
+
+test("builds GET_LOCATION as a high-priority data-only command", () => {
+  const message = buildPolicyUpdateMessage({
+    device: { fcmToken: "fcm-token" },
+    command: {
+      _id: "command-id",
+      commandType: "GET_LOCATION",
+      payload: { requestedAt: "2026-07-31T10:00:00.000Z" }
+    }
+  });
+
+  assert.equal(message.data.type, "GET_LOCATION");
+  assert.equal(message.data.requestedAt, "2026-07-31T10:00:00.000Z");
+  assert.equal(message.android.priority, "high");
+  assert.equal(message.notification, undefined);
 });
 
 test("sanitizes precise telemetry from device ping events", () => {

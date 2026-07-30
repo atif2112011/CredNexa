@@ -71,6 +71,10 @@ import {
   RELEASE_COMMAND_TYPE
 } from "../../services/deviceRelease.service.js";
 import {
+  GET_LOCATION_COMMAND_TYPE,
+  queueGetLocationCommand
+} from "../../services/deviceLocation.service.js";
+import {
   backfillManualOverrideTokens,
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
@@ -3695,6 +3699,51 @@ export const updateAdminUsbDebuggingControl = (req, res) =>
 
 export const updateAdminUnknownAppInstallsControl = (req, res) =>
   updateAdminDeviceSecurityControl(req, res, "unknownAppInstalls");
+
+export const requestAdminDeviceLocation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueGetLocationCommand({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      session
+    });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: GET_LOCATION_COMMAND_TYPE,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Location request queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
 
 /**
  * Super admin manual device lock.

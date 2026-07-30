@@ -47,6 +47,10 @@ import {
   settleCompletedSchedule
 } from "../../services/deviceRelease.service.js";
 import {
+  GET_LOCATION_COMMAND_TYPE,
+  queueGetLocationCommand
+} from "../../services/deviceLocation.service.js";
+import {
   EMI_REMINDER_COMMAND_TYPE,
   EMI_REMINDER_TYPES,
   queueEmiReminder
@@ -1678,7 +1682,7 @@ export const getDistributorDeviceById = async (req, res) => {
     device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
     Object.assign(device, formatTenantDevice(device));
 
-    const [policy, emiSchedule, latestRestrictionCommand, latestSecurityControlCommands] = await Promise.all([
+    const [policy, emiSchedule, latestRestrictionCommand, latestSecurityControlCommands, latestLocationCommand] = await Promise.all([
       device.currentPolicyId
         ? DevicePolicy.findOne({
             _id: device.currentPolicyId,
@@ -1704,7 +1708,11 @@ export const getDistributorDeviceById = async (req, res) => {
             commandType
           }).sort({ createdAt: -1 }).lean()
         )
-      )
+      ),
+      DeviceCommand.findOne({
+        deviceId: device._id,
+        commandType: GET_LOCATION_COMMAND_TYPE
+      }).sort({ createdAt: -1 }).lean()
     ]);
 
     const borrower = device.userId
@@ -1727,6 +1735,7 @@ export const getDistributorDeviceById = async (req, res) => {
         },
         {}
       ),
+      latestLocationCommand,
       currentPolicy: policy
         ? {
             id: policy._id,
@@ -1880,6 +1889,57 @@ export const updateTenantUsbDebuggingControl = (req, res) =>
 
 export const updateTenantUnknownAppInstallsControl = (req, res) =>
   updateTenantDeviceSecurityControl(req, res, "unknownAppInstalls");
+
+export const requestTenantDeviceLocation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+    const device = await Device.findOne({
+      _id: req.params.id,
+      tenantId: tenant._id
+    }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueGetLocationCommand({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      session
+    });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: GET_LOCATION_COMMAND_TYPE,
+          source: "tenant_device_detail"
+        }
+      },
+      { session }
+    );
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Location request queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
 
 /**
  * Queue an upcoming payment reminder command for a device when a due EMI is coming up.

@@ -51,6 +51,7 @@ import {
 } from "../../services/manualOverrideToken.service.js";
 import {
   applyDevicePingTelemetry,
+  parseLocationTelemetry,
   sanitizePingEventPayload
 } from "../../services/deviceTelemetry.service.js";
 import { shouldAdvanceAppliedRestrictionState } from "../../services/deviceRestrictions.service.js";
@@ -2396,7 +2397,7 @@ export const syncDevice = async (req, res) => {
       userId: req.auth.id,
       tenantId: device.tenantId,
       eventType: "sync",
-      payload: req.body
+      payload: sanitizePingEventPayload(req.body)
     });
 
     if (req.body.manualOverride?.active || req.body.manualOverride?.tokenId) {
@@ -2413,6 +2414,17 @@ export const syncDevice = async (req, res) => {
     return sendSuccess(res, 200, "Device sync completed", {
       serverTime: new Date(),
       scheduledLockAt,
+      telemetryWarnings:
+        req.body.location !== undefined
+          ? [
+              {
+                field: "location",
+                code: "LOCATION_COMMAND_REQUIRED",
+                message:
+                  "Routine sync location was ignored; location is accepted only for GET_LOCATION acknowledgement"
+              }
+            ]
+          : [],
       ...syncState
     });
   } catch (error) {
@@ -2472,7 +2484,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
         status: command.status,
         deviceState: device.state,
         restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
-        securityControlState: normalizeDeviceSecurityControlState(device.securityControlState)
+        securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
+        lastLocation: device.lastLocation || null
       });
     }
 
@@ -2581,6 +2594,21 @@ export const acknowledgeDeviceCommand = async (req, res) => {
           );
           device.set(`securityControlState.${control.key}.appliedAt`, new Date());
         }
+      } else if (command.commandType === "GET_LOCATION") {
+        const locationResult = parseLocationTelemetry({
+          location: req.body.location,
+          currentLocation: device.lastLocation,
+          now: new Date()
+        });
+        if (!locationResult.value) {
+          return sendError(
+            res,
+            400,
+            locationResult.warnings[0]?.message ||
+              "A valid location is required to acknowledge GET_LOCATION"
+          );
+        }
+        device.lastLocation = locationResult.value;
       } else if (command.commandType === "EMI_REMINDER") {
         // Reminder acknowledgement is terminal for the command only. It does
         // not represent a policy transition or change device enforcement state.
@@ -2643,7 +2671,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       status: command.status,
       deviceState: device.state,
       restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
-      securityControlState: normalizeDeviceSecurityControlState(device.securityControlState)
+      securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
+      lastLocation: device.lastLocation || null
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

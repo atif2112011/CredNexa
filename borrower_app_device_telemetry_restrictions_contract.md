@@ -44,12 +44,6 @@ Example request:
   "networkType": "WIFI",
   "appVersion": "1.4.0",
   "fcmToken": "<current-fcm-token>",
-  "location": {
-    "latitude": 12.9716,
-    "longitude": 77.5946,
-    "accuracyMeters": 18.4,
-    "capturedAt": "2026-07-24T10:30:00.000Z"
-  },
   "simInfo": {
     "simOperator": "Airtel",
     "simSerial": "8991000000000000000",
@@ -60,14 +54,10 @@ Example request:
 
 ### Location behavior
 
-- `location` is optional. Omit it when permission is unavailable or no valid location fix exists.
-- Latitude must be between `-90` and `90`.
-- Longitude must be between `-180` and `180`.
-- `accuracyMeters` must be non-negative.
-- `capturedAt` must be a valid timestamp and no more than five minutes ahead of server time.
-- The backend ignores a location older than the currently stored location.
-- Invalid, future, or stale locations do not fail the heartbeat.
-- Only the latest accepted location is retained in the device record.
+- Do not collect or include location in routine ping or sync.
+- If a legacy client includes `location`, the backend ignores it and returns
+  `LOCATION_COMMAND_REQUIRED`.
+- Location is collected only after receiving a `GET_LOCATION` command.
 
 ### SIM behavior
 
@@ -121,9 +111,7 @@ Possible telemetry warning codes:
 
 | Code | Meaning |
 |---|---|
-| `INVALID_LOCATION` | A location field was missing or outside its accepted range |
-| `FUTURE_LOCATION` | `capturedAt` was more than five minutes ahead of server time |
-| `STALE_LOCATION` | The submitted fix was older than the stored location |
+| `LOCATION_COMMAND_REQUIRED` | Routine ping location was ignored; wait for `GET_LOCATION` |
 | `INVALID_SIM_INFO` | `simInfo` was not an object |
 
 The app should log telemetry warnings for diagnostics but continue normal sync and command processing.
@@ -266,7 +254,7 @@ and backoff behavior.
 ## 6. Required background behavior
 
 - Send a ping periodically while the device is online.
-- Send a ping after FCM token rotation, SIM changes, and a newly captured location.
+- Send a ping after FCM token rotation and SIM changes.
 - Call device sync on application launch, boot completion, and network reconnection.
 - Process pending commands in ascending creation/version order.
 - Ignore a stale restriction command rather than rolling local restrictions backward.
@@ -341,3 +329,53 @@ previously installed APKs.
 
 These controls persist through lock, temporary unlock, and full unlock. For `RELEASE_DEVICE`, clear
 all three controls before removing Device Owner management and reporting release completion.
+
+## 8. On-demand location command
+
+`GET_LOCATION` arrives through high-priority FCM or `pendingCommands` in ping/sync:
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f10",
+  "commandType": "GET_LOCATION",
+  "payload": {
+    "requestedAt": "2026-07-31T10:00:00.000Z"
+  }
+}
+```
+
+When received:
+
+1. Request the required runtime location permission if it is not already granted.
+2. Capture one fresh location fix. Do not start continuous tracking.
+3. Acknowledge the command with the captured location:
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f10",
+  "status": "acknowledged",
+  "location": {
+    "latitude": 12.9716,
+    "longitude": 77.5946,
+    "accuracyMeters": 18.4,
+    "capturedAt": "2026-07-31T10:00:12.000Z"
+  }
+}
+```
+
+Latitude must be between `-90` and `90`, longitude between `-180` and `180`,
+`accuracyMeters` must be non-negative, and `capturedAt` cannot be more than five minutes ahead of
+server time or older than the stored location.
+
+If permission is denied, the provider times out, or no valid fix is available, acknowledge with:
+
+```json
+{
+  "commandId": "665f6f0b6f0f6f0b6f0f6f10",
+  "status": "failed",
+  "failureReason": "Location permission denied"
+}
+```
+
+Do not send the captured location through a separate routine ping. Retry acknowledgement delivery
+without capturing another fix unless a newer `GET_LOCATION` command exists.
