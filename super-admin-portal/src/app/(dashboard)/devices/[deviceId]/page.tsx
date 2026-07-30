@@ -30,7 +30,7 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
         <DeviceReleasePanel deviceId={deviceId} schedule={emiSchedule} release={release} />
-        <DeviceTelemetryPanel device={device} />
+        <DeviceTelemetryPanel device={device} commands={(commands as RecordItem[]) || []} />
         {!releaseInProgressOrComplete ? (
           <>
             <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />

@@ -1,5 +1,12 @@
-import { ExternalLink, MapPin, Radio } from "lucide-react";
+"use client";
 
+import { ExternalLink, MapPin, Radio } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { toast } from "sonner";
+
+import { StatusBadge } from "@/components/data/status-badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDate } from "@/lib/utils";
 import type { RecordItem } from "@/types/api";
@@ -15,7 +22,21 @@ function formatCoordinate(value: unknown) {
   return Number.isFinite(coordinate) ? coordinate.toFixed(6) : "-";
 }
 
-export function DeviceTelemetryPanel({ device }: { device: RecordItem }) {
+export function DeviceTelemetryPanel({
+  device,
+  commands = []
+}: {
+  device: RecordItem;
+  commands?: RecordItem[];
+}) {
+  const router = useRouter();
+  const deviceId = String(device._id || device.id || "");
+  const latestLocationCommand =
+    commands.find((command) => command.commandType === "GET_LOCATION") || null;
+  const [locationCommand, setLocationCommand] = useState<RecordItem | null>(
+    latestLocationCommand
+  );
+  const [requestingLocation, setRequestingLocation] = useState(false);
   const simInfo = asRecord(device.simInfo);
   const location = asRecord(device.lastLocation);
   const latitude = Number(location.latitude);
@@ -24,6 +45,27 @@ export function DeviceTelemetryPanel({ device }: { device: RecordItem }) {
   const mapsUrl = hasLocation
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`
     : "";
+  const locationStatus = String(locationCommand?.status || "");
+  const requestActive = ["pending", "sent"].includes(locationStatus.toLowerCase());
+  const released = ["RELEASE_PENDING", "RELEASED"].includes(String(device.state || ""));
+
+  async function requestLocation() {
+    setRequestingLocation(true);
+    const response = await fetch(`/api/admin/devices/${deviceId}/location-request`, {
+      method: "POST"
+    });
+    const result = await response.json().catch(() => null);
+    setRequestingLocation(false);
+
+    if (!response.ok || !result?.success || !result.data?.command) {
+      toast.error(result?.error || "Unable to request device location");
+      return;
+    }
+
+    setLocationCommand(result.data.command);
+    toast.success("Location request queued");
+    router.refresh();
+  }
 
   return (
     <Card>
@@ -58,9 +100,22 @@ export function DeviceTelemetryPanel({ device }: { device: RecordItem }) {
         </section>
 
         <section className="rounded-xl border bg-muted/20 p-4">
-          <div className="flex items-center gap-2">
-            <MapPin className="size-4 text-primary" aria-hidden="true" />
-            <h3 className="font-semibold">Last location</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <MapPin className="size-4 text-primary" aria-hidden="true" />
+              <h3 className="font-semibold">Last location</h3>
+              {locationStatus ? <StatusBadge value={locationStatus} /> : null}
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={released || requestActive || requestingLocation}
+              onClick={requestLocation}
+            >
+              <MapPin aria-hidden="true" />
+              {requestingLocation ? "Requesting..." : requestActive ? "Request queued" : "Update location"}
+            </Button>
           </div>
           {hasLocation ? (
             <>
@@ -100,7 +155,7 @@ export function DeviceTelemetryPanel({ device }: { device: RecordItem }) {
             <div className="mt-4 rounded-lg border border-dashed bg-background px-4 py-8 text-center">
               <MapPin className="mx-auto size-7 text-muted-foreground" aria-hidden="true" />
               <p className="mt-2 font-medium">No location reported</p>
-              <p className="mt-1 text-xs text-muted-foreground">The previous location remains empty until a valid ping arrives.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Use Update location to request a fresh location from the device.</p>
             </div>
           )}
         </section>

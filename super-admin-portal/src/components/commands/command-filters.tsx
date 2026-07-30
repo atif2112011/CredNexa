@@ -25,7 +25,8 @@ const filterSets = [
       ["Temp unlock", "TEMP_UNLOCK"],
       ["Factory reset control", "SET_FACTORY_RESET_BLOCKED"],
       ["USB debugging control", "SET_USB_DEBUGGING_BLOCKED"],
-      ["Unknown app install control", "SET_UNKNOWN_APP_INSTALL_BLOCKED"]
+      ["Unknown app install control", "SET_UNKNOWN_APP_INSTALL_BLOCKED"],
+      ["Get location", "GET_LOCATION"]
     ]
   },
   {
