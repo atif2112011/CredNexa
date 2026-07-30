@@ -12,6 +12,7 @@ import {
   buildPendingSecurityControlSupersessionFilter,
   buildReleasedDeviceSecurityControlState,
   formatLatestSecurityControlCommand,
+  formatLatestSecurityControlCommands,
   shouldAdvanceAppliedSecurityControlState,
   validateDeviceSecurityControlRetry,
   validateDeviceSecurityControlUpdate
@@ -165,6 +166,23 @@ test("formats latest command control result without fabricating one", () => {
       .controlResult,
     null
   );
+});
+
+test("formats missing latest commands without reading commandType from null", () => {
+  const commands = formatLatestSecurityControlCommands([
+    null,
+    {
+      _id: "usb-command",
+      commandType: "SET_USB_DEBUGGING_BLOCKED",
+      status: "pending"
+    },
+    null
+  ]);
+
+  assert.equal(commands.factoryReset, null);
+  assert.equal(commands.unknownAppInstalls, null);
+  assert.equal(commands.usbDebugging.commandId, "usb-command");
+  assert.equal(commands.usbDebugging.status, "pending");
 });
 
 test("sends each security control as high-priority data-only FCM", () => {

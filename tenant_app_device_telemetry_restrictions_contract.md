@@ -311,7 +311,8 @@ Each control has an independent desired/applied version. A normal toggle increme
 control. A newer toggle expires only an older pending command for that same control; it does not
 expire either of the other security-control commands.
 
-Render each switch as `Blocked` or `Allowed` from `desiredBlocked`. Show `Awaiting device` while
+Render switch ON as `Blocked` (`desiredBlocked: true`) and switch OFF as `Allowed`
+(`desiredBlocked: false`). Show the current state text beside the switch. Show `Awaiting device` while
 `desiredVersion > appliedVersion`, and show the separate `appliedBlocked` value. Offer Retry only
 when the selected control is awaiting application and its latest command is `failed` or `expired`.
 Retry by sending the same desired `blocked` value with `retry: true`; a valid retry reuses the desired

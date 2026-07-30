@@ -319,7 +319,10 @@ state returns HTTP `400` with `Invalid device state`.
 
 ### Security-control switches
 
-- Render Blocked/Allowed from each control's `desiredBlocked`.
+- Switch ON means Blocked (`desiredBlocked === true`).
+- Switch OFF means Allowed (`desiredBlocked === false`).
+- Display the current `Blocked` or `Allowed` text beside the switch; do not label it using the
+  action that will happen on the next click.
 - Show the separate applied value from `appliedBlocked`.
 - Show `Awaiting device` while `desiredVersion > appliedVersion`.
 - Retry only a failed or expired latest command that is still awaiting application.

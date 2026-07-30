@@ -1,4 +1,5 @@
 import {
+  DEVICE_SECURITY_CONTROLS,
   getDeviceSecurityControl,
   normalizeDeviceSecurityControlEntry,
   normalizeDeviceSecurityControlState
@@ -71,6 +72,14 @@ export const formatLatestSecurityControlCommand = (command) => {
     controlResult: command.ackPayload?.controlResult ?? null
   };
 };
+
+export const formatLatestSecurityControlCommands = (commands = []) =>
+  Object.values(DEVICE_SECURITY_CONTROLS).reduce((result, control) => {
+    result[control.key] = formatLatestSecurityControlCommand(
+      commands.find((command) => command?.commandType === control.commandType)
+    );
+    return result;
+  }, {});
 
 export const buildPendingSecurityControlSupersessionFilter = ({
   deviceId,

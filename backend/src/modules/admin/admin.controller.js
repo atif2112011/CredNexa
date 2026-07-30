@@ -6,7 +6,6 @@ import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEFAULT_DEVICE_POLICIES, DEFAULT_TENANT_POLICY } from "../../constants/defaultPolicies.js";
 import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
 import {
-  DEVICE_SECURITY_CONTROLS,
   DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
   normalizeDeviceSecurityControlState
 } from "../../constants/deviceSecurityControls.js";
@@ -61,7 +60,7 @@ import {
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
 import {
-  formatLatestSecurityControlCommand,
+  formatLatestSecurityControlCommands,
   queueDeviceSecurityControlUpdate,
   validateDeviceSecurityControlUpdate
 } from "../../services/deviceSecurityControls.service.js";
@@ -3459,16 +3458,8 @@ export const getDeviceById = async (req, res) => {
       device,
       policy,
       commands,
-      latestSecurityControlCommands: Object.values(DEVICE_SECURITY_CONTROLS).reduce(
-        (result, control) => {
-          result[control.key] = formatLatestSecurityControlCommand(
-            latestSecurityControlCommands.find(
-              (command) => command.commandType === control.commandType
-            )
-          );
-          return result;
-        },
-        {}
+      latestSecurityControlCommands: formatLatestSecurityControlCommands(
+        latestSecurityControlCommands
       ),
       cases,
       riskFlags,

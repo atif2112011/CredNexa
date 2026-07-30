@@ -178,25 +178,33 @@ export function DeviceSecurityControlsPanel({
                       <p className="mt-1 text-xs text-muted-foreground">{description}</p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={entry.desiredBlocked}
-                    aria-label={`${entry.desiredBlocked ? "Allow" : "Block"} ${label}`}
-                    disabled={released || Boolean(updatingKey)}
-                    onClick={() => updateControl(key, !entry.desiredBlocked)}
-                    className={cn(
-                      "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
-                      entry.desiredBlocked ? "bg-destructive" : "bg-input"
-                    )}
-                  >
+                  <div className="flex shrink-0 flex-col items-end gap-1">
                     <span className={cn(
-                      "flex size-5 items-center justify-center rounded-full bg-background shadow-sm transition-transform",
-                      entry.desiredBlocked ? "translate-x-[22px]" : "translate-x-0.5"
+                      "text-xs font-semibold",
+                      entry.desiredBlocked ? "text-destructive" : "text-muted-foreground"
                     )}>
-                      {isUpdating ? <Loader2 className="size-3 animate-spin" aria-hidden="true" /> : null}
+                      {entry.desiredBlocked ? "Blocked" : "Allowed"}
                     </span>
-                  </button>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={entry.desiredBlocked}
+                      aria-label={`${label}: currently ${entry.desiredBlocked ? "Blocked" : "Allowed"}. Toggle to ${entry.desiredBlocked ? "Allowed" : "Blocked"}`}
+                      disabled={released || Boolean(updatingKey)}
+                      onClick={() => updateControl(key, !entry.desiredBlocked)}
+                      className={cn(
+                        "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
+                        entry.desiredBlocked ? "bg-destructive" : "bg-input"
+                      )}
+                    >
+                      <span className={cn(
+                        "flex size-5 items-center justify-center rounded-full bg-background shadow-sm transition-transform",
+                        entry.desiredBlocked ? "translate-x-[22px]" : "translate-x-0.5"
+                      )}>
+                        {isUpdating ? <Loader2 className="size-3 animate-spin" aria-hidden="true" /> : null}
+                      </span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
@@ -236,4 +244,3 @@ export function DeviceSecurityControlsPanel({
     </Card>
   );
 }
-
