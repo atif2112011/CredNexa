@@ -316,6 +316,35 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   return results;
 };
 
+export const deliverDeviceCommandImmediately = async ({
+  commandId,
+  deliveryRunner = runFcmDeliveryBatch,
+  logger = console
+}) => {
+  try {
+    const results = await deliveryRunner({
+      limit: 1,
+      commandIds: [commandId]
+    });
+
+    return results[0] || {
+      commandId,
+      status: "deferred",
+      reason: "Command was not eligible for immediate delivery"
+    };
+  } catch (error) {
+    logger.error("Immediate device command delivery failed; scheduled delivery remains available", {
+      commandId: commandId?.toString?.() || commandId,
+      message: error.message
+    });
+    return {
+      commandId,
+      status: "deferred",
+      error: error.message
+    };
+  }
+};
+
 export const runAppNotificationDeliveryBatch = async ({ limit = 50, jobIds } = {}) => {
   await connectDatabase();
 

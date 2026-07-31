@@ -1,12 +1,63 @@
 import {
   DEVICE_SECURITY_CONTROLS,
   getDeviceSecurityControl,
+  getDeviceSecurityControlByCommandType,
   normalizeDeviceSecurityControlEntry,
   normalizeDeviceSecurityControlState
 } from "../constants/deviceSecurityControls.js";
 import { DEVICE_STATES } from "../constants/deviceStates.js";
 import { Device } from "../models/Device.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
+
+const SECURITY_CONTROL_RESULTS = Object.freeze({
+  SET_FACTORY_RESET_BLOCKED: Object.freeze({
+    true: "factory_reset_disallowed",
+    false: "factory_reset_allowed"
+  }),
+  SET_USB_DEBUGGING_BLOCKED: Object.freeze({
+    true: "usb_debugging_disallowed",
+    false: "usb_debugging_allowed"
+  }),
+  SET_UNKNOWN_APP_INSTALL_BLOCKED: Object.freeze({
+    true: "unknown_app_installs_disallowed",
+    false: "unknown_app_installs_allowed"
+  })
+});
+
+export const parseSecurityControlBlockedValue = (value) => {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+};
+
+export const getExpectedSecurityControlResult = (commandType, blocked) => {
+  const normalizedBlocked = parseSecurityControlBlockedValue(blocked);
+  if (normalizedBlocked === null) return null;
+  return SECURITY_CONTROL_RESULTS[commandType]?.[String(normalizedBlocked)] || null;
+};
+
+export const selectLatestActiveSecurityControlCommands = (commands = []) => {
+  const latestByType = new Map();
+
+  for (const command of commands) {
+    if (!getDeviceSecurityControlByCommandType(command?.commandType)) continue;
+    const existing = latestByType.get(command.commandType);
+    const version = Number(command.payload?.controlVersion || 0);
+    const existingVersion = Number(existing?.payload?.controlVersion || 0);
+    const isNewerVersion = !existing || version > existingVersion;
+    const isNewerRecord =
+      version === existingVersion &&
+      new Date(command.createdAt || 0).getTime() >
+        new Date(existing?.createdAt || 0).getTime();
+
+    if (isNewerVersion || isNewerRecord) {
+      latestByType.set(command.commandType, command);
+    }
+  }
+
+  return [...latestByType.values()];
+};
 
 export const validateDeviceSecurityControlUpdate = (payload = {}) => {
   if (typeof payload.blocked !== "boolean") {
@@ -81,13 +132,56 @@ export const formatLatestSecurityControlCommands = (commands = []) =>
     return result;
   }, {});
 
+export const buildSecurityControlConfirmations = ({ state, commands = [] }) => {
+  const normalizedState = normalizeDeviceSecurityControlState(state);
+
+  return Object.values(DEVICE_SECURITY_CONTROLS).reduce((result, control) => {
+    const command = commands.find(
+      (entry) => entry?.commandType === control.commandType
+    );
+    const entry = normalizedState[control.key];
+    const desiredBlocked = command
+      ? parseSecurityControlBlockedValue(command.payload?.blocked)
+      : entry.desiredBlocked;
+    const desiredControlVersion = command
+      ? Number(command.payload?.controlVersion)
+      : entry.desiredVersion;
+    let confirmationStatus = "queued";
+
+    if (command?.status === "sent") confirmationStatus = "awaiting_device";
+    if (command?.status === "failed") confirmationStatus = "failed";
+    if (
+      command?.status === "acknowledged" &&
+      Number(command.ackPayload?.appliedControlVersion) === desiredControlVersion &&
+      command.ackPayload?.appliedBlocked === desiredBlocked
+    ) {
+      confirmationStatus = "applied";
+    }
+    if (!command && entry.appliedVersion === entry.desiredVersion) {
+      confirmationStatus = "applied";
+    }
+
+    result[control.key] = {
+      commandType: control.commandType,
+      desiredBlocked,
+      desiredControlVersion,
+      appliedBlocked: entry.appliedBlocked,
+      appliedControlVersion: entry.appliedVersion,
+      confirmationStatus,
+      latestCommandId: command?._id || null,
+      lastErrorCode: command?.ackPayload?.errorCode || null
+    };
+    return result;
+  }, {});
+};
+
 export const buildPendingSecurityControlSupersessionFilter = ({
   deviceId,
   commandType
 }) => ({
   deviceId,
   commandType,
-  status: "pending"
+  status: { $in: ["pending", "sent"] }
 });
 
 export const queueDeviceSecurityControlUpdate = async ({

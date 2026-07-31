@@ -219,7 +219,12 @@ Each normal toggle:
 - Applies immediately to the backend.
 - Increments `desiredVersion`.
 - Queues the complete desired restriction snapshot for the managed device.
+- Attempts high-priority FCM delivery immediately after the database transaction commits.
 - Persists across EMI lock, temporary unlock, and full unlock transitions.
+
+Successful toggle responses include `data.immediateDelivery`. Treat `status: "sent"` as the FCM
+provider accepting the message. For `failed`, `skipped`, or `deferred`, continue showing Awaiting
+device; device sync and the scheduled delivery worker remain fallbacks.
 
 ## 6. Retry a failed restriction command
 
@@ -310,6 +315,10 @@ The endpoints queue, respectively:
 Each control has an independent desired/applied version. A normal toggle increments only the selected
 control. A newer toggle expires only an older pending command for that same control; it does not
 expire either of the other security-control commands.
+
+The backend attempts immediate high-priority FCM delivery after commit and returns the outcome as
+`data.immediateDelivery`. A delivery result other than `sent` must not roll back the switch because
+the desired state and command are already committed and remain available through sync/retry.
 
 Render switch ON as `Blocked` (`desiredBlocked: true`) and switch OFF as `Allowed`
 (`desiredBlocked: false`). Show the current state text beside the switch. Show `Awaiting device` while

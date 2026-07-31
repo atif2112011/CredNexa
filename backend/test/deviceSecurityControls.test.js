@@ -9,10 +9,14 @@ import {
 } from "../src/constants/deviceSecurityControls.js";
 import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
 import {
+  buildSecurityControlConfirmations,
   buildPendingSecurityControlSupersessionFilter,
   buildReleasedDeviceSecurityControlState,
   formatLatestSecurityControlCommand,
   formatLatestSecurityControlCommands,
+  getExpectedSecurityControlResult,
+  parseSecurityControlBlockedValue,
+  selectLatestActiveSecurityControlCommands,
   shouldAdvanceAppliedSecurityControlState,
   validateDeviceSecurityControlRetry,
   validateDeviceSecurityControlUpdate
@@ -113,9 +117,75 @@ test("supersedes pending commands for only the selected control type", () => {
     {
       deviceId: "device-id",
       commandType: "SET_USB_DEBUGGING_BLOCKED",
-      status: "pending"
+      status: { $in: ["pending", "sent"] }
     }
   );
+});
+
+test("normalizes stored blocked values and maps enforcement results", () => {
+  assert.equal(parseSecurityControlBlockedValue(false), false);
+  assert.equal(parseSecurityControlBlockedValue("false"), false);
+  assert.equal(parseSecurityControlBlockedValue("invalid"), null);
+  assert.equal(
+    getExpectedSecurityControlResult("SET_USB_DEBUGGING_BLOCKED", true),
+    "usb_debugging_disallowed"
+  );
+  assert.equal(
+    getExpectedSecurityControlResult("SET_UNKNOWN_APP_INSTALL_BLOCKED", false),
+    "unknown_app_installs_allowed"
+  );
+});
+
+test("selects only the highest control version for each security command type", () => {
+  const commands = [
+    {
+      _id: "factory-1",
+      commandType: "SET_FACTORY_RESET_BLOCKED",
+      payload: { controlVersion: 1 }
+    },
+    {
+      _id: "factory-3",
+      commandType: "SET_FACTORY_RESET_BLOCKED",
+      payload: { controlVersion: 3 }
+    },
+    {
+      _id: "usb-1",
+      commandType: "SET_USB_DEBUGGING_BLOCKED",
+      payload: { controlVersion: 1 }
+    },
+    { _id: "lock", commandType: "LOCK", payload: {} }
+  ];
+
+  assert.deepEqual(
+    selectLatestActiveSecurityControlCommands(commands).map((command) => command._id),
+    ["factory-3", "usb-1"]
+  );
+});
+
+test("builds tenant confirmation from only the latest command", () => {
+  const confirmations = buildSecurityControlConfirmations({
+    state: {
+      usbDebugging: {
+        desiredBlocked: true,
+        desiredVersion: 3,
+        appliedBlocked: true,
+        appliedVersion: 3
+      }
+    },
+    commands: [
+      {
+        _id: "usb-3",
+        commandType: "SET_USB_DEBUGGING_BLOCKED",
+        status: "acknowledged",
+        payload: { blocked: true, controlVersion: 3 },
+        ackPayload: { appliedBlocked: true, appliedControlVersion: 3 }
+      }
+    ]
+  });
+
+  assert.equal(confirmations.usbDebugging.confirmationStatus, "applied");
+  assert.equal(confirmations.usbDebugging.latestCommandId, "usb-3");
+  assert.equal(confirmations.factoryReset.confirmationStatus, "applied");
 });
 
 test("clears and advances every security control during permanent release", () => {

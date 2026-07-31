@@ -113,6 +113,11 @@ Successful response:
       },
       "createdAt": "2026-07-30T10:00:00.000Z"
     },
+    "immediateDelivery": {
+      "commandId": "665f6f0b6f0f6f0b6f0f6f02",
+      "status": "sent",
+      "providerMessageId": "projects/example/messages/123"
+    },
     "device": {
       "_id": "665f6f0b6f0f6f0b6f0f6f03",
       "state": "ACTIVE",
@@ -131,6 +136,11 @@ The command type changes with the endpoint:
 The response `device` is the updated persisted device object. Frontends should replace local
 security-control state with `data.securityControlState`; they do not need to parse the duplicated
 state inside `data.device`.
+
+The backend attempts high-priority FCM delivery immediately after committing the update.
+`immediateDelivery.status` can be `sent`, `failed`, `skipped`, or `deferred`. A non-`sent` result
+does not mean the desired update was lost: the command remains available through device sync and
+the scheduled delivery/retry worker.
 
 Common errors:
 

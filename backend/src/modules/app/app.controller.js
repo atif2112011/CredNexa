@@ -57,7 +57,9 @@ import {
 import { shouldAdvanceAppliedRestrictionState } from "../../services/deviceRestrictions.service.js";
 import {
   buildReleasedDeviceSecurityControlState,
-  shouldAdvanceAppliedSecurityControlState
+  getExpectedSecurityControlResult,
+  parseSecurityControlBlockedValue,
+  selectLatestActiveSecurityControlCommands
 } from "../../services/deviceSecurityControls.service.js";
 import {
   enforceRiskAutoLock,
@@ -489,6 +491,26 @@ const getDeviceSyncState = async (device) => {
     DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
   ]);
 
+  const latestSecurityCommands = selectLatestActiveSecurityControlCommands(
+    pendingCommands
+  );
+  const latestSecurityCommandIds = new Set(
+    latestSecurityCommands.map((command) => String(command._id))
+  );
+  const syncCommands = pendingCommands.filter((command) => {
+    if (!getDeviceSecurityControlByCommandType(command.commandType)) return true;
+    return latestSecurityCommandIds.has(String(command._id));
+  });
+  const newlyDeliveredCommandIds = latestSecurityCommands
+    .filter((command) => command.status === "pending")
+    .map((command) => command._id);
+  if (newlyDeliveredCommandIds.length > 0) {
+    await DeviceCommand.updateMany(
+      { _id: { $in: newlyDeliveredCommandIds }, status: "pending" },
+      { $set: { status: "sent", sentAt: new Date() } }
+    );
+  }
+
   return {
     deviceState: device.state,
     currentPolicyKey: device.currentPolicyKey,
@@ -496,10 +518,22 @@ const getDeviceSyncState = async (device) => {
     restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
     securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
     policy,
-    pendingCommands: pendingCommands.map((command) => ({
-      ...command,
-      commandId: command._id
-    }))
+    pendingCommands: syncCommands.map((command) => {
+      if (getDeviceSecurityControlByCommandType(command.commandType)) {
+        return {
+          commandId: command._id,
+          commandType: command.commandType,
+          controlVersion: Number(command.payload?.controlVersion),
+          blocked: parseSecurityControlBlockedValue(command.payload?.blocked),
+          createdAt: command.createdAt
+        };
+      }
+
+      return {
+        ...command,
+        commandId: command._id
+      };
+    })
   };
 };
 
@@ -2432,6 +2466,211 @@ export const syncDevice = async (req, res) => {
   }
 };
 
+const securityAckError = (statusCode, code, message, details = {}) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  error.details = details;
+  return error;
+};
+
+const acknowledgeSecurityControlCommand = async ({ req, res, deviceId, commandId }) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const device = await Device.findById(deviceId).session(session);
+    const command = await DeviceCommand.findOne({
+      _id: commandId,
+      deviceId
+    }).session(session);
+    if (!device || !command) {
+      throw securityAckError(
+        404,
+        "COMMAND_NOT_FOUND",
+        "Security control command was not found"
+      );
+    }
+
+    const control = getDeviceSecurityControlByCommandType(command.commandType);
+    if (!control) {
+      throw securityAckError(409, "COMMAND_TYPE_MISMATCH", "Command is not a security control command");
+    }
+    if (req.body.commandType && req.body.commandType !== command.commandType) {
+      throw securityAckError(409, "COMMAND_TYPE_MISMATCH", "Command type does not match the referenced command", {
+        expected: { commandType: command.commandType },
+        received: { commandType: req.body.commandType }
+      });
+    }
+
+    const appliedControlVersion = Number(req.body.appliedControlVersion);
+    const commandVersion = Number(command.payload?.controlVersion);
+    if (
+      !Number.isInteger(appliedControlVersion) ||
+      appliedControlVersion < 0 ||
+      appliedControlVersion !== commandVersion
+    ) {
+      throw securityAckError(409, "COMMAND_VERSION_MISMATCH", "Applied control version does not match the referenced command", {
+        expected: { controlVersion: commandVersion },
+        received: { appliedControlVersion: req.body.appliedControlVersion }
+      });
+    }
+
+    const expectedBlocked = parseSecurityControlBlockedValue(command.payload?.blocked);
+    if (expectedBlocked === null) {
+      throw securityAckError(500, "INVALID_COMMAND_SNAPSHOT", "Security control command has an invalid stored value");
+    }
+
+    const expectedControlResult = getExpectedSecurityControlResult(
+      command.commandType,
+      expectedBlocked
+    );
+    if (req.body.status === "acknowledged") {
+      if (
+        typeof req.body.appliedBlocked !== "boolean" ||
+        req.body.appliedBlocked !== expectedBlocked
+      ) {
+        throw securityAckError(409, "COMMAND_VALUE_MISMATCH", "Applied blocked value does not match the referenced command", {
+          expected: { blocked: expectedBlocked },
+          received: { appliedBlocked: req.body.appliedBlocked }
+        });
+      }
+      if (req.body.controlResult !== expectedControlResult) {
+        throw securityAckError(409, "COMMAND_RESULT_MISMATCH", "Control result does not match the referenced command", {
+          expected: { controlResult: expectedControlResult },
+          received: { controlResult: req.body.controlResult }
+        });
+      }
+    } else if (!req.body.errorCode || !req.body.failureReason) {
+      throw securityAckError(
+        400,
+        "INVALID_FAILED_ACK",
+        "errorCode and failureReason are required for a failed security control acknowledgement"
+      );
+    }
+
+    const currentState = normalizeDeviceSecurityControlState(device.securityControlState);
+    const currentVersion = currentState[control.key].desiredVersion;
+    const stale = appliedControlVersion < currentVersion;
+    const terminalStatusAlreadyRecorded =
+      command.status === "acknowledged" ||
+      (command.status === "failed" &&
+        command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT);
+
+    if (terminalStatusAlreadyRecorded) {
+      const previousAck = command.ackPayload || {};
+      const comparableAckFields = [
+        "appliedBlocked",
+        "controlResult",
+        "errorCode",
+        "failureReason"
+      ];
+      const sameAcknowledgement =
+        command.status === req.body.status &&
+        Number(previousAck.appliedControlVersion) === appliedControlVersion &&
+        comparableAckFields.every(
+          (field) => (previousAck[field] ?? null) === (req.body[field] ?? null)
+        );
+
+      if (!sameAcknowledgement) {
+        throw securityAckError(409, "COMMAND_ACK_CONFLICT", "Security control command already has a conflicting acknowledgement");
+      }
+
+      await session.commitTransaction();
+      return sendSuccess(res, 200, "Device command acknowledgement already saved", {
+        accepted: true,
+        idempotent: true,
+        stale,
+        currentControlVersion: currentVersion,
+        commandId: command._id,
+        commandType: command.commandType,
+        status: command.status,
+        appliedControlVersion,
+        ...(command.status === "acknowledged"
+          ? {
+              appliedBlocked: req.body.appliedBlocked,
+              controlResult: req.body.controlResult
+            }
+          : {})
+      });
+    }
+
+    command.status = req.body.status;
+    command.ackPayload = req.body;
+    command.failureReason = req.body.failureReason;
+    command.failureSource =
+      req.body.status === "failed"
+        ? DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+        : undefined;
+    command.nextRetryAt = undefined;
+
+    if (req.body.status === "acknowledged") {
+      command.acknowledgedAt = new Date();
+      if (!stale && appliedControlVersion === currentVersion) {
+        device.set(
+          `securityControlState.${control.key}.appliedBlocked`,
+          req.body.appliedBlocked
+        );
+        device.set(
+          `securityControlState.${control.key}.appliedVersion`,
+          appliedControlVersion
+        );
+        device.set(`securityControlState.${control.key}.appliedAt`, new Date());
+        await device.save({ session });
+      }
+    }
+
+    await command.save({ session });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+        actorId: req.auth.id,
+        actorCollection: "users",
+        tenantId: device.tenantId,
+        userId: req.auth.id,
+        deviceId: device._id,
+        metadata: {
+          commandId: command._id,
+          commandType: command.commandType,
+          status: command.status,
+          stale,
+          appliedControlVersion
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device command acknowledgement saved", {
+      accepted: true,
+      idempotent: false,
+      stale,
+      currentControlVersion: currentVersion,
+      commandId: command._id,
+      commandType: command.commandType,
+      status: command.status,
+      appliedControlVersion,
+      ...(command.status === "acknowledged"
+        ? {
+            appliedBlocked: req.body.appliedBlocked,
+            controlResult: req.body.controlResult
+          }
+        : {})
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.code ? { code: error.code, ...error.details } : null
+    );
+  } finally {
+    session.endSession();
+  }
+};
+
 /**
  * Acknowledge a device command after local policy application.
  * Sample body: { "commandId": "665f6f0b6f0f6f0b6f0f6f0b", "status": "acknowledged", "appliedPolicyVersion": 4 }
@@ -2449,15 +2688,26 @@ export const acknowledgeDeviceCommand = async (req, res) => {
 
     const command = await DeviceCommand.findOne({ _id: req.body.commandId, deviceId: device._id });
     if (!command) {
-      return sendError(res, 404, "Device command not found");
-    }
-
-    if (isDeviceReleaseState(device.state) && command.commandType !== "RELEASE_DEVICE") {
-      return sendError(res, 409, "Command was superseded by permanent device release");
+      return sendError(res, 404, "Device command not found", {
+        code: "COMMAND_NOT_FOUND"
+      });
     }
 
     if (!["acknowledged", "failed"].includes(req.body.status)) {
       return sendError(res, 400, "Status must be acknowledged or failed");
+    }
+
+    if (getDeviceSecurityControlByCommandType(command.commandType)) {
+      return acknowledgeSecurityControlCommand({
+        req,
+        res,
+        deviceId: device._id,
+        commandId: command._id
+      });
+    }
+
+    if (isDeviceReleaseState(device.state) && command.commandType !== "RELEASE_DEVICE") {
+      return sendError(res, 409, "Command was superseded by permanent device release");
     }
 
     if (
@@ -2547,52 +2797,6 @@ export const acknowledgeDeviceCommand = async (req, res) => {
           );
           device.restrictionState.appliedVersion = appliedRestrictionsVersion;
           device.restrictionState.appliedAt = new Date();
-        }
-      } else if (getDeviceSecurityControlByCommandType(command.commandType)) {
-        const control = getDeviceSecurityControlByCommandType(command.commandType);
-        const appliedControlVersion = Number(req.body.appliedControlVersion);
-        const commandVersion = Number(command.payload?.controlVersion);
-        if (
-          !Number.isInteger(appliedControlVersion) ||
-          appliedControlVersion < 0 ||
-          appliedControlVersion !== commandVersion
-        ) {
-          return sendError(
-            res,
-            400,
-            "appliedControlVersion must match the security control command version"
-          );
-        }
-        if (
-          typeof req.body.appliedBlocked !== "boolean" ||
-          req.body.appliedBlocked !== Boolean(command.payload?.blocked)
-        ) {
-          return sendError(
-            res,
-            400,
-            "appliedBlocked must match the security control command value"
-          );
-        }
-
-        const currentSecurityState = normalizeDeviceSecurityControlState(
-          device.securityControlState
-        );
-        const currentEntry = currentSecurityState[control.key];
-        if (
-          shouldAdvanceAppliedSecurityControlState({
-            currentAppliedVersion: currentEntry.appliedVersion,
-            acknowledgedVersion: appliedControlVersion
-          })
-        ) {
-          device.set(
-            `securityControlState.${control.key}.appliedBlocked`,
-            req.body.appliedBlocked
-          );
-          device.set(
-            `securityControlState.${control.key}.appliedVersion`,
-            appliedControlVersion
-          );
-          device.set(`securityControlState.${control.key}.appliedAt`, new Date());
         }
       } else if (command.commandType === "GET_LOCATION") {
         const locationResult = parseLocationTelemetry({

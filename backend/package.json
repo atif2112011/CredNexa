@@ -15,6 +15,7 @@
     "jobs:scheduled": "node src/jobs/scheduledJobs.js",
     "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js",
     "migrate:risk-auto-lock-types": "node src/scripts/migrateRiskAutoLockTypes.js",
+    "cleanup:security-control-commands": "node src/scripts/cleanupSecurityControlCommands.js",
     "backfill:tenant-poc": "node src/scripts/backfillTenantPoc.js"
   },
   "dependencies": {

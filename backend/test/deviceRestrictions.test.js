@@ -14,7 +14,8 @@ import {
 } from "../src/services/deviceRestrictions.service.js";
 import {
   buildDeviceCommandDeliveryFilter,
-  buildPolicyUpdateMessage
+  buildPolicyUpdateMessage,
+  deliverDeviceCommandImmediately
 } from "../src/jobs/fcmDeliveryWorker.js";
 
 test("exposes persisted per-key results without fabricating missing results", () => {
@@ -231,4 +232,35 @@ test("automatically retries delivery failures but not device enforcement failure
     ]
   });
   assert.equal(filter.$and[1].$or[2].nextRetryAt.$lte, now);
+});
+
+test("immediately targets only the newly committed command", async () => {
+  const calls = [];
+  const result = await deliverDeviceCommandImmediately({
+    commandId: "command-id",
+    deliveryRunner: async (options) => {
+      calls.push(options);
+      return [{ commandId: "command-id", status: "sent" }];
+    }
+  });
+
+  assert.deepEqual(calls, [{ limit: 1, commandIds: ["command-id"] }]);
+  assert.deepEqual(result, { commandId: "command-id", status: "sent" });
+});
+
+test("defers immediate delivery errors without failing the committed update", async () => {
+  const logged = [];
+  const result = await deliverDeviceCommandImmediately({
+    commandId: "command-id",
+    deliveryRunner: async () => {
+      throw new Error("FCM unavailable");
+    },
+    logger: {
+      error: (...args) => logged.push(args)
+    }
+  });
+
+  assert.equal(result.status, "deferred");
+  assert.equal(result.error, "FCM unavailable");
+  assert.equal(logged.length, 1);
 });

@@ -60,6 +60,7 @@ import {
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
 import {
+  buildSecurityControlConfirmations,
   formatLatestSecurityControlCommands,
   queueDeviceSecurityControlUpdate,
   validateDeviceSecurityControlUpdate
@@ -85,7 +86,10 @@ import {
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
-import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
+import {
+  deliverDeviceCommandImmediately,
+  runFcmDeliveryBatch
+} from "../../jobs/fcmDeliveryWorker.js";
 import {
   NOTIFICATION_AUDIENCES,
   queuePartnerAppNotification,
@@ -3461,6 +3465,10 @@ export const getDeviceById = async (req, res) => {
       latestSecurityControlCommands: formatLatestSecurityControlCommands(
         latestSecurityControlCommands
       ),
+      securityControlConfirmations: buildSecurityControlConfirmations({
+        state: device.securityControlState,
+        commands: latestSecurityControlCommands
+      }),
       cases,
       riskFlags,
       emiSchedule: emiSchedule
@@ -3616,7 +3624,13 @@ export const updateAdminDeviceRestrictions = async (req, res) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device restriction update queued successfully", result);
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device restriction update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
@@ -3673,7 +3687,13 @@ const updateAdminDeviceSecurityControl = async (req, res, controlKey) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device security control update queued successfully", result);
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device security control update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
