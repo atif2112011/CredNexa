@@ -359,10 +359,13 @@ Successful response:
 }
 ```
 
-Only one pending or sent `GET_LOCATION` command is allowed per device. A duplicate request returns
-HTTP `409`. Requests for `RELEASE_PENDING` or `RELEASED` devices also return HTTP `409`.
+The Update location action remains available while an earlier request is `pending` or `sent`.
+Submitting another request expires the earlier active `GET_LOCATION` command and queues a fresh
+one. Requests for `RELEASE_PENDING` or `RELEASED` devices return HTTP `409`.
 
-Device detail includes `latestLocationCommand`. Disable the Update location button while its status
-is `pending` or `sent`. Once acknowledged, refresh device detail and display `device.lastLocation`.
+Device detail includes `latestLocationCommand`. Use it to display request status, but do not disable
+the Update location button because of that status. Disable it only while the current HTTP request is
+being submitted, or when the device is release-pending/released. Once acknowledged, refresh device
+detail and display `device.lastLocation`.
 Routine device ping/sync no longer updates location; only a successful `GET_LOCATION`
 acknowledgement does.

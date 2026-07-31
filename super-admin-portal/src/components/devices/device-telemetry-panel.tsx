@@ -46,7 +46,6 @@ export function DeviceTelemetryPanel({
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`
     : "";
   const locationStatus = String(locationCommand?.status || "");
-  const requestActive = ["pending", "sent"].includes(locationStatus.toLowerCase());
   const released = ["RELEASE_PENDING", "RELEASED"].includes(String(device.state || ""));
 
   async function requestLocation() {
@@ -110,11 +109,11 @@ export function DeviceTelemetryPanel({
               type="button"
               size="sm"
               variant="outline"
-              disabled={released || requestActive || requestingLocation}
+              disabled={released || requestingLocation}
               onClick={requestLocation}
             >
               <MapPin aria-hidden="true" />
-              {requestingLocation ? "Requesting..." : requestActive ? "Request queued" : "Update location"}
+              {requestingLocation ? "Requesting..." : "Update location"}
             </Button>
           </div>
           {hasLocation ? (

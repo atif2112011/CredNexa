@@ -376,8 +376,10 @@ No body is required.
 }
 ```
 
-- Disable the button while `latestLocationCommand.status` is `pending` or `sent`.
-- A duplicate active request returns HTTP `409`.
-- Disable the button for `RELEASE_PENDING` and `RELEASED`.
+- Keep the button enabled when `latestLocationCommand.status` is `pending` or `sent`; the status is
+  informational.
+- A new request expires any earlier pending or sent `GET_LOCATION` command and queues a fresh one.
+- Disable the button only during the current HTTP request and for `RELEASE_PENDING` or `RELEASED`
+  devices.
 - Refresh device detail after acknowledgement to read the new `device.lastLocation`.
 - Show the captured and received timestamps; do not imply continuous tracking.

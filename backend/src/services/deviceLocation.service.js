@@ -16,17 +16,17 @@ export const queueGetLocationCommand = async ({
     throw error;
   }
 
-  const existingCommand = await DeviceCommand.findOne({
+  await DeviceCommand.updateMany({
     deviceId: device._id,
     commandType: GET_LOCATION_COMMAND_TYPE,
     status: { $in: ACTIVE_COMMAND_STATUSES }
+  }, {
+    $set: {
+      status: "expired",
+      failureReason: "Superseded by a newer location request"
+    },
+    $unset: { nextRetryAt: 1 }
   }).session(session || null);
-
-  if (existingCommand) {
-    const error = new Error("A location request is already active for this device");
-    error.statusCode = 409;
-    throw error;
-  }
 
   const commands = await DeviceCommand.create(
     [
@@ -46,4 +46,3 @@ export const queueGetLocationCommand = async ({
 
   return { command: commands[0] };
 };
-
