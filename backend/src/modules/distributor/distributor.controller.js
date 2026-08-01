@@ -33,6 +33,7 @@ import {
 } from "../../constants/deviceStates.js";
 import {
   formatLatestRestrictionCommand,
+  queueDeviceRestrictionClear,
   queueDeviceRestrictionUpdate,
   validateDeviceRestrictionUpdate
 } from "../../services/deviceRestrictions.service.js";
@@ -51,8 +52,10 @@ import {
   queueGetLocationCommand
 } from "../../services/deviceLocation.service.js";
 import {
+  findUpcomingEmiInstallment,
   EMI_REMINDER_COMMAND_TYPE,
   EMI_REMINDER_TYPES,
+  normalizeUpcomingReminderWindowDays,
   queueEmiReminder
 } from "../../services/emiReminder.service.js";
 import { sendApprovalMail } from "../../services/mail.service.js";
@@ -1270,6 +1273,101 @@ const queueOverdueEmiReminderForUser = async ({ tenant, userId, accountId, note 
   };
 };
 
+const queueUpcomingEmiReminderForUser = async ({
+  tenant,
+  userId,
+  accountId,
+  note,
+  windowDays
+}) => {
+  if (!mongoose.isValidObjectId(userId)) {
+    return { status: "failed", reason: "INVALID_USER_ID", userId };
+  }
+
+  const user = await User.findOne({ _id: userId, tenantId: tenant._id }).lean();
+  if (!user) {
+    return { status: "failed", reason: "BORROWER_NOT_FOUND", userId };
+  }
+
+  const normalizedWindowDays = normalizeUpcomingReminderWindowDays(windowDays);
+  const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  const upcomingInstallment = findUpcomingEmiInstallment({
+    schedule,
+    windowDays: normalizedWindowDays
+  });
+
+  if (!upcomingInstallment) {
+    return {
+      status: "skippedNoUpcoming",
+      userId: user._id,
+      windowDays: normalizedWindowDays
+    };
+  }
+
+  const device = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  if (!device) {
+    return {
+      status: "skippedNoDevice",
+      userId: user._id,
+      deviceId: null,
+      windowDays: normalizedWindowDays
+    };
+  }
+
+  const outstandingAmount = getInstallmentOutstanding(upcomingInstallment);
+  const reminderText = String(note || "").trim() || "Your EMI payment is due soon.";
+  const { command, created } = await queueEmiReminder({
+    device,
+    tenantId: tenant._id,
+    triggeredBy: "manual_tenant",
+    triggeredByAccountId: accountId,
+    payload: {
+      reminderType: EMI_REMINDER_TYPES.UPCOMING,
+      message: reminderText,
+      amount: outstandingAmount,
+      dueDate: upcomingInstallment.dueDate,
+      installmentNumber: upcomingInstallment.installmentNumber,
+      totalInstallments: schedule.installments.length
+    }
+  });
+
+  if (created) {
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: accountId,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      userId: user._id,
+      deviceId: device._id,
+      reason: reminderText,
+      metadata: {
+        commandId: command?._id,
+        commandType: EMI_REMINDER_COMMAND_TYPE,
+        reminderType: EMI_REMINDER_TYPES.UPCOMING,
+        installmentId: upcomingInstallment._id,
+        outstandingAmount,
+        windowDays: normalizedWindowDays
+      }
+    });
+  }
+
+  return {
+    status: "queued",
+    queued: true,
+    created,
+    commandId: command?._id,
+    commandType: EMI_REMINDER_COMMAND_TYPE,
+    commandStatus: command?.status,
+    userId: user._id,
+    deviceId: device._id,
+    installmentId: upcomingInstallment._id,
+    installmentNumber: upcomingInstallment.installmentNumber,
+    dueDate: upcomingInstallment.dueDate,
+    outstandingAmount,
+    windowDays: normalizedWindowDays
+  };
+};
+
 /**
  * List borrowers with upcoming unpaid EMI installments due in the next x days.
  * Sample query: /distributor/users/pending-emis?days=10&page=1&limit=20&search=ramesh
@@ -1744,6 +1842,64 @@ export const getDistributorDeviceById = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue an upcoming EMI reminder notification for one borrower.
+ * Sample body: { "windowDays": 10, "note": "Your EMI is due soon." }
+ */
+export const sendUpcomingEmiReminder = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const result = await queueUpcomingEmiReminderForUser({
+      tenant,
+      userId: req.params.userId,
+      accountId: req.auth.id,
+      note: req.body.note,
+      windowDays: req.body.windowDays || req.query.windowDays
+    });
+
+    if (result.status === "failed") {
+      return sendError(res, result.reason === "INVALID_USER_ID" ? 400 : 404, result.reason);
+    }
+
+    if (result.status === "skippedNoUpcoming") {
+      return sendSuccess(res, 200, "No upcoming EMI found for borrower", {
+        queued: false,
+        reason: "NO_UPCOMING_EMI",
+        userId: result.userId,
+        windowDays: result.windowDays
+      });
+    }
+
+    if (result.status === "skippedNoDevice") {
+      return sendSuccess(res, 200, "Device is not reachable for reminder", {
+        queued: false,
+        reason: "DEVICE_NOT_REACHABLE",
+        userId: result.userId,
+        deviceId: result.deviceId,
+        windowDays: result.windowDays
+      });
+    }
+
+    return sendSuccess(res, 201, "Upcoming EMI reminder queued successfully", {
+      queued: true,
+      commandId: result.commandId,
+      commandType: result.commandType,
+      status: result.commandStatus,
+      userId: result.userId,
+      deviceId: result.deviceId,
+      installmentId: result.installmentId,
+      installmentNumber: result.installmentNumber,
+      dueDate: result.dueDate,
+      outstandingAmount: result.outstandingAmount,
+      windowDays: result.windowDays
+    });
+  } catch (error) {
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -2461,6 +2617,20 @@ export const approvePayment = async (req, res) => {
           session
         });
 
+    const restrictionClearResult = releaseQueued
+      ? {
+          cleared: false,
+          command: null,
+          restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
+        }
+      : await queueDeviceRestrictionClear({
+          device,
+          accountId: req.auth.id,
+          triggeredBy: "payment_unlock",
+          paymentId: payment._id,
+          session
+        });
+
     await createAuditLog(
       {
         eventType: AUDIT_EVENTS.PAYMENT_APPROVED,
@@ -2472,6 +2642,8 @@ export const approvePayment = async (req, res) => {
         metadata: {
           paymentId: payment._id,
           commandId: command._id,
+          restrictionCommandId: restrictionClearResult.command?._id || null,
+          restrictionsClearQueued: restrictionClearResult.cleared,
           matchedInstallments,
           emiScheduleStatus: emiResult.schedule?.status,
           releaseQueued
@@ -2496,6 +2668,29 @@ export const approvePayment = async (req, res) => {
       },
       { session }
     );
+
+    if (restrictionClearResult.command) {
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+          actorId: req.auth.id,
+          tenantId: tenant._id,
+          channelPartnerId: tenant.channelPartnerId,
+          userId: payment.userId,
+          deviceId: payment.deviceId,
+          reason: "Payment approved",
+          metadata: {
+            paymentId: payment._id,
+            commandId: restrictionClearResult.command._id,
+            commandType: restrictionClearResult.command.commandType,
+            restrictionVersion: restrictionClearResult.restrictionState.desiredVersion,
+            restrictions: restrictionClearResult.restrictionState.desired,
+            source: "payment_approval"
+          }
+        },
+        { session }
+      );
+    }
 
     if (releaseQueued) {
       await createAuditLog(
@@ -2537,6 +2732,8 @@ export const approvePayment = async (req, res) => {
         matchedInstallments,
         commandId: command._id,
         commandType: command.commandType,
+        restrictionCommandId: restrictionClearResult.command?._id || null,
+        restrictionsClearQueued: restrictionClearResult.cleared,
         releaseQueued
       }
     });
@@ -2551,6 +2748,12 @@ export const approvePayment = async (req, res) => {
         paymentId: payment._id,
         commandId: command._id,
         commandType: command.commandType,
+        restrictionCommandId: restrictionClearResult.command?._id || null,
+        restrictionCommandType: restrictionClearResult.command?.commandType || null,
+        restrictionsClearQueued: restrictionClearResult.cleared,
+        restrictionVersion: restrictionClearResult.cleared
+          ? restrictionClearResult.restrictionState.desiredVersion
+          : null,
         emiScheduleStatus: emiResult.schedule?.status || null,
         settlementTime: emiResult.schedule?.settlementTime || null,
         matchedInstallments

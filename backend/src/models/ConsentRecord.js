@@ -1,5 +1,16 @@
 import mongoose from "mongoose";
 
+const renderedConsentSchema = new mongoose.Schema(
+  {
+    title: String,
+    borrowerAgreementText: String,
+    deviceControlConsentText: String,
+    privacyPolicyText: String,
+    tripartiteAckText: String
+  },
+  { _id: false }
+);
+
 const consentRecordSchema = new mongoose.Schema(
   {
     userId: {
@@ -53,6 +64,8 @@ const consentRecordSchema = new mongoose.Schema(
       email: String,
       verificationMethod: String
     },
+    renderedConsent: renderedConsentSchema,
+    renderedConsentHash: String,
     payloadHash: {
       type: String,
       required: true

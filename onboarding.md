@@ -399,7 +399,12 @@ Important:
 The Shield App fetches the current consent version after OTP verification returns `nextStep: "SHOW_CONSENT"`.
 
 ```http
-GET /api/app/consent/terms
+POST /api/app/consent/terms
+Content-Type: application/json
+
+{
+  "enrollmentToken": "<enrollmentToken>"
+}
 ```
 
 Expected result:
@@ -409,6 +414,10 @@ Expected result:
 - Device control consent text.
 - Privacy policy text.
 - Tripartite acknowledgement text.
+- `[USER NAME]`, seller, support, and de-enrolment placeholders populated from the enrollment context.
+- `renderedConsentHash` to echo when accepting consent.
+
+`GET /api/app/consent/terms` remains available for the raw active consent.
 
 The borrower must accept the consent checkbox before device registration.
 
@@ -425,7 +434,8 @@ Content-Type: application/json
 
 {
   "consentCheckboxAccepted": true,
-  "consentVersion": "1.0"
+  "consentVersion": "1.0",
+  "renderedConsentHash": "<hash-from-consent-terms>"
 }
 ```
 

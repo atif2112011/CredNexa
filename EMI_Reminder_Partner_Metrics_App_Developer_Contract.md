@@ -26,7 +26,7 @@ Partner routes are available under:
 /api/partner
 ```
 
-## Existing Upcoming Payment Notifications
+## Tenant App: Upcoming EMI Reminder
 
 The backend already sends upcoming payment notifications.
 
@@ -38,13 +38,61 @@ notificationType: UPCOMING_EMI
 
 These are queued by the EMI policy scheduled job 10 days and 5 days before due date.
 
-Existing manual upcoming-payment command:
+For each upcoming borrower row, wire the Send Reminder button to:
+
+```text
+POST /api/tenant/users/:userId/upcoming-emi-reminder
+```
+
+Headers:
+
+```text
+Authorization: Bearer <tenant_admin_access_token>
+Content-Type: application/json
+```
+
+Optional body:
+
+```json
+{
+  "windowDays": 7,
+  "note": "Your EMI payment is due soon."
+}
+```
+
+`windowDays` defaults to `7` and is limited to `1` through `30`. The backend selects the earliest pending or partially paid installment due within that window.
+
+Queued response:
+
+```json
+{
+  "success": true,
+  "message": "Upcoming EMI reminder queued successfully",
+  "data": {
+    "queued": true,
+    "commandId": "665f...",
+    "commandType": "EMI_REMINDER",
+    "status": "pending",
+    "userId": "665f...",
+    "deviceId": "665f...",
+    "installmentId": "665f...",
+    "installmentNumber": 4,
+    "dueDate": "2026-08-10T00:00:00.000Z",
+    "outstandingAmount": 3500,
+    "windowDays": 7
+  }
+}
+```
+
+No qualifying upcoming EMI returns `200` with `queued: false` and `reason: NO_UPCOMING_EMI`. A borrower without a registered device returns `200` with `queued: false` and `reason: DEVICE_NOT_REACHABLE`.
+
+The command is stored as `commandType: EMI_REMINDER` with `payload.reminderType: UPCOMING`.
+
+The older device-scoped endpoint remains available for backward compatibility:
 
 ```text
 POST /api/tenant/devices/:deviceId/upcoming-payment-reminder
 ```
-
-This queues `commandType: UPCOMING_PAYMENT` for one device.
 
 ## Tenant App: Overdue EMI Reminder
 

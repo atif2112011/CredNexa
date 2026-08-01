@@ -1,4 +1,5 @@
 import {
+  DEVICE_RESTRICTION_KEYS,
   isDeviceRestrictionKey,
   normalizeDeviceRestrictionState,
   normalizeDeviceRestrictions
@@ -68,6 +69,28 @@ export const shouldAdvanceAppliedRestrictionState = ({
   acknowledgedVersion
 }) => {
   return Number(acknowledgedVersion) >= Number(currentAppliedVersion || 0);
+};
+
+export const findNewlyAppliedAppLocks = ({
+  previousRestrictions,
+  appliedRestrictions,
+  restrictionResults
+}) => {
+  const previous = normalizeDeviceRestrictions(previousRestrictions);
+  const applied = normalizeDeviceRestrictions(appliedRestrictions);
+
+  return DEVICE_RESTRICTION_KEYS.filter((restriction) => {
+    if (previous[restriction] || !applied[restriction]) return false;
+    const resultStatus = restrictionResults?.[restriction]?.status;
+    return resultStatus === undefined || resultStatus === "applied";
+  });
+};
+
+export const hasDeviceAppRestrictions = (restrictionState) => {
+  const normalizedState = normalizeDeviceRestrictionState(restrictionState);
+  return [normalizedState.desired, normalizedState.applied].some((restrictions) =>
+    DEVICE_RESTRICTION_KEYS.some((restriction) => restrictions[restriction])
+  );
 };
 
 export const validateDeviceRestrictionRetry = ({
@@ -180,5 +203,88 @@ export const queueDeviceRestrictionUpdate = async ({
     device: updatedDevice,
     restrictionState: normalizeDeviceRestrictionState(updatedDevice.restrictionState),
     command: commands[0]
+  };
+};
+
+export const queueDeviceRestrictionClear = async ({
+  device,
+  accountId,
+  triggeredBy,
+  paymentId,
+  session
+}) => {
+  const currentState = normalizeDeviceRestrictionState(device.restrictionState);
+  if (!hasDeviceAppRestrictions(currentState)) {
+    return {
+      device,
+      restrictionState: currentState,
+      command: null,
+      cleared: false
+    };
+  }
+
+  const now = new Date();
+  const clearedRestrictions = normalizeDeviceRestrictions();
+  const updatedDevice = await Device.findByIdAndUpdate(
+    device._id,
+    {
+      $set: {
+        "restrictionState.desired": clearedRestrictions,
+        "restrictionState.updatedAt": now,
+        "restrictionState.updatedBy": accountId
+      },
+      $inc: { "restrictionState.desiredVersion": 1 }
+    },
+    { new: true, session }
+  );
+
+  if (!updatedDevice) {
+    const error = new Error("Device not found while clearing app restrictions");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const updatedState = normalizeDeviceRestrictionState(updatedDevice.restrictionState);
+
+  await DeviceCommand.updateMany(
+    {
+      deviceId: device._id,
+      commandType: DEVICE_RESTRICTIONS_COMMAND_TYPE,
+      status: { $in: ["pending", "sent"] }
+    },
+    {
+      $set: {
+        status: "expired",
+        failureReason: "Superseded by approved payment restriction removal"
+      },
+      $unset: { nextRetryAt: "" }
+    },
+    { session }
+  );
+
+  const commands = await DeviceCommand.create(
+    [
+      {
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        commandType: DEVICE_RESTRICTIONS_COMMAND_TYPE,
+        triggeredBy,
+        triggeredByAccountId: accountId,
+        payload: {
+          restrictionVersion: updatedState.desiredVersion,
+          restrictions: clearedRestrictions,
+          reason: "Payment approved",
+          ...(paymentId ? { paymentId: paymentId.toString() } : {})
+        }
+      }
+    ],
+    { session, ordered: true }
+  );
+
+  return {
+    device: updatedDevice,
+    restrictionState: updatedState,
+    command: commands[0],
+    cleared: true
   };
 };

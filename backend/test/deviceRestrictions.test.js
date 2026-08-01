@@ -7,7 +7,9 @@ import {
 } from "../src/constants/deviceRestrictions.js";
 import {
   buildDeviceRestrictionUpdate,
+  findNewlyAppliedAppLocks,
   formatLatestRestrictionCommand,
+  hasDeviceAppRestrictions,
   shouldAdvanceAppliedRestrictionState,
   validateDeviceRestrictionRetry,
   validateDeviceRestrictionUpdate
@@ -17,6 +19,7 @@ import {
   buildPolicyUpdateMessage,
   deliverDeviceCommandImmediately
 } from "../src/jobs/fcmDeliveryWorker.js";
+import { APP_LOCK_NOTIFICATION } from "../src/utils/appNotifications.js";
 
 test("exposes persisted per-key results without fabricating missing results", () => {
   const results = {
@@ -155,6 +158,47 @@ test("does not regress applied state for out-of-order acknowledgements", () => {
   );
 });
 
+test("identifies only newly and successfully applied app locks", () => {
+  assert.deepEqual(
+    findNewlyAppliedAppLocks({
+      previousRestrictions: {
+        camera: false,
+        youtube: true,
+        whatsapp: false
+      },
+      appliedRestrictions: {
+        camera: true,
+        youtube: true,
+        whatsapp: true
+      },
+      restrictionResults: {
+        camera: { status: "applied" },
+        youtube: { status: "applied" },
+        whatsapp: { status: "failed" }
+      }
+    }),
+    ["camera"]
+  );
+});
+
+test("detects desired or applied restrictions that payment approval must clear", () => {
+  assert.equal(hasDeviceAppRestrictions(), false);
+  assert.equal(
+    hasDeviceAppRestrictions({
+      desired: { camera: true },
+      applied: { camera: false }
+    }),
+    true
+  );
+  assert.equal(
+    hasDeviceAppRestrictions({
+      desired: { camera: false },
+      applied: { camera: true }
+    }),
+    true
+  );
+});
+
 test("allows retries only for the current unapplied desired value", () => {
   const restrictionState = {
     desired: { camera: true },
@@ -215,6 +259,27 @@ test("sends restriction updates as a dedicated high-priority FCM command", () =>
     youtube: false,
     playStore: true
   }));
+  assert.equal(message.android.priority, "high");
+});
+
+test("uses the approved title and message for app lock notifications", () => {
+  const message = buildPolicyUpdateMessage({
+    device: { fcmToken: "fcm-token" },
+    command: {
+      _id: "notification-command-id",
+      commandType: "NOTIFICATION",
+      payload: {
+        ...APP_LOCK_NOTIFICATION,
+        data: {}
+      }
+    }
+  });
+
+  assert.deepEqual(message.notification, {
+    title: "App access restricted",
+    body: "Access to this app has been temporarily blocked because your EMI payment is overdue. Please pay your pending EMI to avoid further app restrictions."
+  });
+  assert.equal(message.data.notificationType, "APP_LOCKED_OVERDUE_EMI");
   assert.equal(message.android.priority, "high");
 });
 

@@ -15,6 +15,27 @@ export const DEFAULT_EMI_REMINDER_MESSAGES = Object.freeze({
   UPCOMING: "Your EMI payment is due soon."
 });
 
+export const normalizeUpcomingReminderWindowDays = (value, fallback = 7) => {
+  const parsedValue = Number(value);
+  const parsedFallback = Number(fallback);
+  const defaultValue = Number.isFinite(parsedFallback) ? parsedFallback : 7;
+  return Math.min(Math.max(Number.isFinite(parsedValue) ? parsedValue : defaultValue, 1), 30);
+};
+
+export const findUpcomingEmiInstallment = ({ schedule, now = new Date(), windowDays = 7 }) => {
+  const normalizedNow = new Date(now);
+  const normalizedWindowDays = normalizeUpcomingReminderWindowDays(windowDays);
+  const windowEnd = new Date(normalizedNow.getTime() + normalizedWindowDays * 24 * 60 * 60 * 1000);
+
+  return (schedule?.installments || [])
+    .filter((installment) => ["pending", "partial"].includes(installment.status))
+    .filter((installment) => {
+      const dueDate = new Date(installment.dueDate);
+      return Number.isFinite(dueDate.getTime()) && dueDate >= normalizedNow && dueDate <= windowEnd;
+    })
+    .sort((left, right) => new Date(left.dueDate) - new Date(right.dueDate))[0] || null;
+};
+
 export const buildEmiReminderPayload = ({
   reminderType,
   message,

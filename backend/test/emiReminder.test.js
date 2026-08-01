@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   buildEmiReminderPayload,
-  EMI_REMINDER_TYPES
+  EMI_REMINDER_TYPES,
+  findUpcomingEmiInstallment,
+  normalizeUpcomingReminderWindowDays
 } from "../src/services/emiReminder.service.js";
 import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
 
@@ -61,4 +63,45 @@ test("builds EMI reminder FCM as a data-only wake-up", () => {
   });
   assert.equal(message.notification, undefined);
   assert.equal(message.android.priority, "high");
+});
+
+test("selects the earliest unpaid upcoming EMI inside the reminder window", () => {
+  const result = findUpcomingEmiInstallment({
+    now: "2026-08-01T00:00:00.000Z",
+    windowDays: 10,
+    schedule: {
+      installments: [
+        { installmentNumber: 1, status: "overdue", dueDate: "2026-07-20T00:00:00.000Z" },
+        { installmentNumber: 4, status: "pending", dueDate: "2026-08-09T00:00:00.000Z" },
+        { installmentNumber: 3, status: "partial", dueDate: "2026-08-05T00:00:00.000Z" },
+        { installmentNumber: 5, status: "pending", dueDate: "2026-08-20T00:00:00.000Z" },
+        { installmentNumber: 2, status: "paid", dueDate: "2026-08-03T00:00:00.000Z" }
+      ]
+    }
+  });
+
+  assert.equal(result.installmentNumber, 3);
+});
+
+test("returns no upcoming EMI when none qualifies", () => {
+  assert.equal(
+    findUpcomingEmiInstallment({
+      now: "2026-08-01T00:00:00.000Z",
+      windowDays: 7,
+      schedule: {
+        installments: [
+          { installmentNumber: 1, status: "paid", dueDate: "2026-08-03T00:00:00.000Z" },
+          { installmentNumber: 2, status: "pending", dueDate: "2026-08-20T00:00:00.000Z" }
+        ]
+      }
+    }),
+    null
+  );
+});
+
+test("normalizes the upcoming EMI reminder window to 1 through 30 days", () => {
+  assert.equal(normalizeUpcomingReminderWindowDays(undefined), 7);
+  assert.equal(normalizeUpcomingReminderWindowDays(0), 1);
+  assert.equal(normalizeUpcomingReminderWindowDays(12), 12);
+  assert.equal(normalizeUpcomingReminderWindowDays(90), 30);
 });

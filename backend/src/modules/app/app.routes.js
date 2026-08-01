@@ -45,6 +45,7 @@ appRoutes.get("/update/check", checkAppUpdate);
 appRoutes.post("/update/check", checkAppUpdate);
 appRoutes.get("/support-contact", getCompanySupportContact);
 appRoutes.get("/consent/terms", getConsentTerms);
+appRoutes.post("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", otpRateLimiter, initiateConsentOtp);
 appRoutes.post("/consent/resend-otp", otpRateLimiter, resendConsentOtp);
 appRoutes.post("/consent/verify-otp", otpRateLimiter, verifyConsentOtp);

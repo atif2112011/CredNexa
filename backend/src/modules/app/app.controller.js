@@ -45,6 +45,7 @@ import {
   validateAppBuildIdentity
 } from "../../services/appUpdate.service.js";
 import { getOrCreateCompanySupportContact } from "../../services/companySupportContact.service.js";
+import { renderConsentTerms } from "../../services/consentTerms.service.js";
 import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
@@ -54,7 +55,10 @@ import {
   parseLocationTelemetry,
   sanitizePingEventPayload
 } from "../../services/deviceTelemetry.service.js";
-import { shouldAdvanceAppliedRestrictionState } from "../../services/deviceRestrictions.service.js";
+import {
+  findNewlyAppliedAppLocks,
+  shouldAdvanceAppliedRestrictionState
+} from "../../services/deviceRestrictions.service.js";
 import {
   buildReleasedDeviceSecurityControlState,
   getExpectedSecurityControlResult,
@@ -69,7 +73,11 @@ import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.j
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
-import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../../utils/appNotifications.js";
+import {
+  NOTIFICATION_AUDIENCES,
+  safeQueueAppLockNotification,
+  safeQueueNotification
+} from "../../utils/appNotifications.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -612,8 +620,8 @@ export const refreshUserAccessToken = async (req, res) => {
 };
 
 /**
- * Fetch current consent terms.
- * Sample request: GET /app/consent/terms
+ * Fetch current consent terms. POST may provide an enrollment token to populate placeholders.
+ * Sample requests: GET /app/consent/terms or POST /app/consent/terms { "enrollmentToken": "..." }
  */
 export const getConsentTerms = async (req, res) => {
   try {
@@ -623,9 +631,42 @@ export const getConsentTerms = async (req, res) => {
       return sendError(res, 400, "Active consent version not found");
     }
 
-    return sendSuccess(res, 200, "Consent terms fetched successfully", consentVersion);
+    const enrollmentTokenValue = req.method === "POST" ? String(req.body?.enrollmentToken || "").trim() : "";
+    if (!enrollmentTokenValue) {
+      return sendSuccess(res, 200, "Consent terms fetched successfully", consentVersion);
+    }
+
+    const enrollmentToken = await EnrollmentToken.findOne({
+      token: enrollmentTokenValue,
+      consumedAt: null,
+      cancelledAt: null,
+      expiresAt: { $gt: new Date() }
+    }).lean();
+    if (!enrollmentToken) {
+      return sendError(res, 400, "Valid enrollment token not found");
+    }
+
+    const [user, tenant] = await Promise.all([
+      User.findOne({
+        _id: enrollmentToken.userId,
+        tenantId: enrollmentToken.tenantId,
+        isActive: true
+      }).lean(),
+      Tenant.findOne({ _id: enrollmentToken.tenantId, isActive: true }).lean()
+    ]);
+    if (!user || !tenant) {
+      return sendError(res, 400, "Active borrower and tenant not found for enrollment token");
+    }
+
+    const rendered = renderConsentTerms({ consent: consentVersion, user, tenant });
+    res.set("Cache-Control", "no-store");
+
+    return sendSuccess(res, 200, "Consent terms fetched successfully", {
+      ...rendered.consent,
+      renderedConsentHash: rendered.renderedConsentHash
+    });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -1566,7 +1607,7 @@ export const acceptConsent = async (req, res) => {
       });
     }
 
-    const [consentVersion, otpRecord, enrollmentToken] = await Promise.all([
+    const [consentVersion, otpRecord, enrollmentToken, tenant] = await Promise.all([
       ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
       OtpRecord.findOne({
         userId: user._id,
@@ -1576,10 +1617,12 @@ export const acceptConsent = async (req, res) => {
       }).sort({ updatedAt: -1 }),
       EnrollmentToken.findOne({
         userId: user._id,
+        tenantId: user.tenantId,
         consumedAt: null,
         cancelledAt: null,
         expiresAt: { $gt: new Date() }
-      }).sort({ createdAt: -1 })
+      }).sort({ createdAt: -1 }),
+      Tenant.findOne({ _id: user.tenantId, isActive: true }).lean()
     ]);
 
     if (!consentVersion) {
@@ -1592,6 +1635,20 @@ export const acceptConsent = async (req, res) => {
 
     if (!enrollmentToken || !otpRecord.enrollmentTokenId?.equals(enrollmentToken._id)) {
       return sendError(res, 400, "Valid enrollment token not found");
+    }
+
+    if (!tenant) {
+      return sendError(res, 400, "Active tenant not found");
+    }
+
+    const rendered = renderConsentTerms({
+      consent: consentVersion.toObject(),
+      user,
+      tenant
+    });
+    const requestedRenderedConsentHash = String(req.body.renderedConsentHash || "").trim();
+    if (requestedRenderedConsentHash && requestedRenderedConsentHash !== rendered.renderedConsentHash) {
+      return sendError(res, 409, "Consent terms changed. Fetch the consent terms again before accepting.");
     }
 
     const isAdhaarConsent = otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT;
@@ -1610,7 +1667,9 @@ export const acceptConsent = async (req, res) => {
       aadhaarVerificationRef,
       verificationSessionId: otpRecord.verificationSessionId,
       consentCheckboxAccepted: true,
-      verifiedProfile
+      verifiedProfile,
+      renderedConsent: rendered.snapshot,
+      renderedConsentHash: rendered.renderedConsentHash
     };
 
     session.startTransaction();
@@ -1656,6 +1715,7 @@ export const acceptConsent = async (req, res) => {
     return sendSuccess(res, 201, "Consent accepted successfully", {
       consentRecordId: consentRecord._id,
       consentAccepted: true,
+      renderedConsentHash: rendered.renderedConsentHash,
       accessToken: signUserAccessToken(user),
       tokenType: "user",
       nextStep: NEXT_STEPS.REGISTER_DEVICE,
@@ -1670,7 +1730,7 @@ export const acceptConsent = async (req, res) => {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   } finally {
     session.endSession();
   }
@@ -2739,6 +2799,8 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       });
     }
 
+    let newlyLockedRestrictions = [];
+
     command.status = req.body.status;
     command.ackPayload = req.body;
     command.failureReason = req.body.failureReason;
@@ -2792,9 +2854,15 @@ export const acknowledgeDeviceCommand = async (req, res) => {
             acknowledgedVersion: appliedRestrictionsVersion
           })
         ) {
-          device.restrictionState.applied = normalizeDeviceRestrictions(
+          const nextAppliedRestrictions = normalizeDeviceRestrictions(
             req.body.appliedRestrictions || command.payload?.restrictions
           );
+          newlyLockedRestrictions = findNewlyAppliedAppLocks({
+            previousRestrictions: currentRestrictionState.applied,
+            appliedRestrictions: nextAppliedRestrictions,
+            restrictionResults: req.body.restrictionResults
+          });
+          device.restrictionState.applied = nextAppliedRestrictions;
           device.restrictionState.appliedVersion = appliedRestrictionsVersion;
           device.restrictionState.appliedAt = new Date();
         }
@@ -2869,6 +2937,21 @@ export const acknowledgeDeviceCommand = async (req, res) => {
         releaseCompleted: req.body.releaseCompleted
       }
     });
+
+    if (
+      command.commandType === "RESTRICTIONS_UPDATE" &&
+      command.triggeredBy === "manual_tenant" &&
+      command.status === "acknowledged" &&
+      newlyLockedRestrictions.length > 0
+    ) {
+      await safeQueueAppLockNotification({
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        sourceCommandId: command._id,
+        triggeredBy: command.triggeredBy,
+        triggeredByAccountId: command.triggeredByAccountId
+      });
+    }
 
     return sendSuccess(res, 200, "Device command acknowledgement saved", {
       commandId: command._id,
