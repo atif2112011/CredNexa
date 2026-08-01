@@ -34,7 +34,14 @@ const createScheduledFunction = ({ schedule, jobName, run }) =>
 
 const firebaseApiApp = createApp({ apiBasePath: "/" });
 
-export const api = onRequest({ region: env.firebaseFunctionsRegion }, firebaseApiApp);
+export const api = onRequest(
+  {
+    region: env.firebaseFunctionsRegion,
+    memory: "512MiB",
+    concurrency: 4
+  },
+  firebaseApiApp
+);
 
 export const fcmDeliveryJob = createScheduledFunction({
   schedule: "* * * * *",

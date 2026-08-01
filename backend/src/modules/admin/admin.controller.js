@@ -2990,6 +2990,70 @@ export const createConsentVersion = async (req, res) => {
 };
 
 /**
+ * Update an unpublished consent draft.
+ * Published consent versions are immutable because borrowers may already have accepted them.
+ */
+export const updateConsentVersion = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Invalid consent version ID");
+    }
+
+    const requiredFields = [
+      "version",
+      "title",
+      "borrowerAgreementText",
+      "deviceControlConsentText",
+      "privacyPolicyText"
+    ];
+
+    if (!hasRequiredFields(req.body, requiredFields)) {
+      return sendError(res, 400, "Version, title, borrowerAgreementText, deviceControlConsentText, and privacyPolicyText are required");
+    }
+
+    const consentVersion = await ConsentVersion.findById(req.params.id);
+    if (!consentVersion) {
+      return sendError(res, 404, "Consent version not found");
+    }
+
+    if (consentVersion.isCurrent || consentVersion.publishedAt) {
+      return sendError(res, 409, "Published consent versions cannot be edited. Duplicate this consent to create a new version.");
+    }
+
+    const duplicateVersion = await ConsentVersion.findOne({
+      _id: { $ne: consentVersion._id },
+      version: req.body.version
+    }).lean();
+    if (duplicateVersion) {
+      return sendError(res, 400, "Consent version already exists");
+    }
+
+    const editableFields = [
+      "version",
+      "title",
+      "borrowerAgreementText",
+      "deviceControlConsentText",
+      "privacyPolicyText",
+      "tripartiteAckText"
+    ];
+    for (const field of editableFields) {
+      consentVersion[field] = req.body[field] ?? "";
+    }
+    await consentVersion.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.CONSENT_VERSION_UPDATED,
+      actorId: req.auth.id,
+      metadata: { consentVersionId: consentVersion._id, version: consentVersion.version }
+    });
+
+    return sendSuccess(res, 200, "Consent version updated successfully", consentVersion);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Get consent version detail.
  * Sample params: /admin/consent-versions/665f...
  */

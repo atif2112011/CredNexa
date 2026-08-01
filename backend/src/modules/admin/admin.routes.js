@@ -73,6 +73,7 @@ import {
   updateChannelPartner,
   updateChannelPartnerStatus,
   updateCompanySupportContact,
+  updateConsentVersion,
   updateAdminDeviceRestrictions,
   updateAdminFactoryResetControl,
   updateAdminUsbDebuggingControl,
@@ -145,6 +146,7 @@ adminRoutes.patch("/accounts/:accountId/status", updateAdminAccountStatus);
 adminRoutes.get("/consent-versions", listConsentVersions);
 adminRoutes.post("/consent-versions", createConsentVersion);
 adminRoutes.get("/consent-versions/:id", getConsentVersionById);
+adminRoutes.patch("/consent-versions/:id", updateConsentVersion);
 adminRoutes.patch("/consent-versions/:id/publish", publishConsentVersion);
 
 adminRoutes.get("/escalations", listAdminEscalations);
