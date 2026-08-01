@@ -4,6 +4,12 @@ import { DeviceCommand } from "../models/DeviceCommand.js";
 export const GET_LOCATION_COMMAND_TYPE = "GET_LOCATION";
 const ACTIVE_COMMAND_STATUSES = ["pending", "sent"];
 
+export const buildActiveLocationCommandFilter = (deviceId) => ({
+  deviceId,
+  commandType: GET_LOCATION_COMMAND_TYPE,
+  status: { $in: ACTIVE_COMMAND_STATUSES }
+});
+
 export const queueGetLocationCommand = async ({
   device,
   accountId,
@@ -16,11 +22,7 @@ export const queueGetLocationCommand = async ({
     throw error;
   }
 
-  await DeviceCommand.updateMany({
-    deviceId: device._id,
-    commandType: GET_LOCATION_COMMAND_TYPE,
-    status: { $in: ACTIVE_COMMAND_STATUSES }
-  }, {
+  await DeviceCommand.updateMany(buildActiveLocationCommandFilter(device._id), {
     $set: {
       status: "expired",
       failureReason: "Superseded by a newer location request"

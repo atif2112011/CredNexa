@@ -20,9 +20,15 @@ type DataTableProps<TData> = {
   data: TData[];
   columns: ColumnDef<TData>[];
   searchPlaceholder?: string;
+  onRowClick?: (row: TData) => void;
 };
 
-export function DataTable<TData>({ data, columns, searchPlaceholder = "Search records..." }: DataTableProps<TData>) {
+export function DataTable<TData>({
+  data,
+  columns,
+  searchPlaceholder = "Search records...",
+  onRowClick
+}: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
 
@@ -83,7 +89,19 @@ export function DataTable<TData>({ data, columns, searchPlaceholder = "Search re
           <tbody>
             {rows.length ? (
               rows.map((row) => (
-                <tr key={row.id} className="border-b transition-colors last:border-b-0 hover:bg-muted/30">
+                <tr
+                  key={row.id}
+                  className={`border-b transition-colors last:border-b-0 hover:bg-muted/30 ${onRowClick ? "cursor-pointer focus-visible:bg-muted/50 focus-visible:outline-none" : ""}`}
+                  onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                  onKeyDown={onRowClick ? (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onRowClick(row.original);
+                    }
+                  } : undefined}
+                  tabIndex={onRowClick ? 0 : undefined}
+                  aria-label={onRowClick ? "View record details" : undefined}
+                >
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id} className="px-4 py-3.5 align-top">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
