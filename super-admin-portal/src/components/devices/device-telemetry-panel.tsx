@@ -61,8 +61,17 @@ export function DeviceTelemetryPanel({
       return;
     }
 
-    setLocationCommand(result.data.command);
-    toast.success("Location request queued");
+    const immediateDelivery = asRecord(result.data.immediateDelivery);
+    const deliveryStatus = String(immediateDelivery.status || "");
+    setLocationCommand({
+      ...result.data.command,
+      ...(deliveryStatus === "sent" ? { status: "sent" } : {})
+    });
+    toast.success(
+      deliveryStatus === "sent"
+        ? "Location request sent"
+        : "Location request queued for retry"
+    );
     router.refresh();
   }
 

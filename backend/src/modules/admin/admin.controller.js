@@ -3747,7 +3747,14 @@ export const requestAdminDeviceLocation = async (req, res) => {
     );
     await session.commitTransaction();
 
-    return sendSuccess(res, 201, "Location request queued successfully", result);
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+
+    return sendSuccess(res, 201, "Location request sent successfully", {
+      ...result,
+      immediateDelivery
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
