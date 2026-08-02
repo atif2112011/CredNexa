@@ -1,3 +1,5 @@
+import crypto from "crypto";
+import net from "net";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 
 import { env } from "../config/env.js";
@@ -5,6 +7,34 @@ import { env } from "../config/env.js";
 const getPositiveNumber = (value, fallback) => (Number.isFinite(value) && value > 0 ? value : fallback);
 
 const normalizeRateLimitValue = (value) => String(value || "").trim().replace(/\D/g, "");
+
+const readHeader = (req, name) => {
+  if (typeof req.get === "function") return req.get(name);
+  return req.headers?.[name.toLowerCase()];
+};
+
+const secretsMatch = (received, expected) => {
+  if (!received || !expected) return false;
+  const receivedBuffer = Buffer.from(String(received));
+  const expectedBuffer = Buffer.from(String(expected));
+  return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+};
+
+const normalizeIp = (value) => String(value || "").split(",")[0].trim();
+
+export const resolveRateLimitClientIp = (req, proxySecret = env.backendProxySecret) => {
+  const forwardedClientIp = normalizeIp(readHeader(req, "x-crednexa-client-ip"));
+  const receivedProxySecret = readHeader(req, "x-crednexa-proxy-secret");
+
+  if (
+    net.isIP(forwardedClientIp) &&
+    secretsMatch(receivedProxySecret, proxySecret)
+  ) {
+    return forwardedClientIp;
+  }
+
+  return normalizeIp(req.ip || req.socket?.remoteAddress) || "unknown";
+};
 
 const getOtpSubject = (req) => {
   const body = req.body && typeof req.body === "object" ? req.body : {};
@@ -33,6 +63,7 @@ export const generalRateLimiter = rateLimit({
   limit: getPositiveNumber(env.rateLimitMaxRequests, 300),
   standardHeaders: "draft-7",
   legacyHeaders: false,
+  keyGenerator: (req) => ipKeyGenerator(resolveRateLimitClientIp(req)),
   message: "Too many requests. Please try again later.",
   handler: createRateLimitHandler("Too many requests. Please try again later.")
 });

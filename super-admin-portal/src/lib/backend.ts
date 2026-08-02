@@ -1,7 +1,8 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { BACKEND_API_URL, SUPER_ADMIN_COOKIE } from "@/lib/constants";
+import { getBackendProxyHeaders } from "@/lib/backend-proxy-headers";
 import { refreshAccessToken } from "@/lib/session";
 import type { ApiResponse } from "@/types/api";
 
@@ -19,10 +20,11 @@ function buildUrl(path: string, query?: FetchOptions["query"]) {
 
 export async function backendFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const cookieStore = await cookies();
+  const requestHeaders = await headers();
   let token = cookieStore.get(SUPER_ADMIN_COOKIE)?.value;
 
   if (!token) {
-    const refreshedToken = await refreshAccessToken(cookieStore.toString());
+    const refreshedToken = await refreshAccessToken(cookieStore.toString(), requestHeaders);
     token = refreshedToken || undefined;
   }
 
@@ -34,6 +36,7 @@ export async function backendFetch<T>(path: string, options: FetchOptions = {}):
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...getBackendProxyHeaders(requestHeaders),
       Authorization: `Bearer ${token}`,
       ...options.headers
     },
@@ -41,7 +44,7 @@ export async function backendFetch<T>(path: string, options: FetchOptions = {}):
   });
 
   if (response.status === 401) {
-    const refreshedToken = await refreshAccessToken(cookieStore.toString());
+    const refreshedToken = await refreshAccessToken(cookieStore.toString(), requestHeaders);
 
     if (!refreshedToken) {
       redirect("/login");
@@ -51,6 +54,7 @@ export async function backendFetch<T>(path: string, options: FetchOptions = {}):
       ...options,
       headers: {
         "Content-Type": "application/json",
+        ...getBackendProxyHeaders(requestHeaders),
         Authorization: `Bearer ${refreshedToken}`,
         ...options.headers
       },

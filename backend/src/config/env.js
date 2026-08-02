@@ -24,6 +24,7 @@ export const env = {
   cronSecret: process.env.CRON_SECRET || process.env.VERCEL_CRON_SECRET,
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 300),
+  backendProxySecret: process.env.BACKEND_PROXY_SECRET,
   otpRateLimitWindowMs: Number(process.env.OTP_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
   otpRateLimitMaxRequests: Number(process.env.OTP_RATE_LIMIT_MAX_REQUESTS || 5),
   otpProvider: (process.env.OTP_PROVIDER || "mock").trim().toLowerCase(),

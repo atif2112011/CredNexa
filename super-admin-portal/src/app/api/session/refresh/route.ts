@@ -4,7 +4,7 @@ import { REFRESH_COOKIE, SUPER_ADMIN_COOKIE, SUPER_ADMIN_EMAIL_COOKIE } from "@/
 import { refreshAccessToken } from "@/lib/session";
 
 export async function POST(request: Request) {
-  const accessToken = await refreshAccessToken(request.headers.get("cookie"));
+  const accessToken = await refreshAccessToken(request.headers.get("cookie"), request.headers);
 
   if (!accessToken) {
     const response = NextResponse.json({ error: "Session expired" }, { status: 401 });

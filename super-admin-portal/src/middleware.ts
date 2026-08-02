@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { BACKEND_API_URL, REFRESH_COOKIE, SUPER_ADMIN_COOKIE, SUPER_ADMIN_EMAIL_COOKIE } from "@/lib/constants";
+import { getBackendProxyHeaders } from "@/lib/backend-proxy-headers";
 import type { ApiResponse, RecordItem } from "@/types/api";
 
 const protectedPrefixes = [
@@ -37,9 +38,12 @@ function redirectToLogin(request: NextRequest) {
   return response;
 }
 
-async function fetchCurrentUser(accessToken: string) {
+async function fetchCurrentUser(accessToken: string, requestHeaders: Headers) {
   const response = await fetch(`${BACKEND_API_URL}/auth/me`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
+    headers: {
+      ...getBackendProxyHeaders(requestHeaders),
+      Authorization: `Bearer ${accessToken}`
+    },
     cache: "no-store"
   });
   const payload = (await response.json().catch(() => null)) as ApiResponse<CurrentUserData> | null;
@@ -51,11 +55,12 @@ async function fetchCurrentUser(accessToken: string) {
   return payload.data.account;
 }
 
-async function refreshToken(cookieHeader: string) {
+async function refreshToken(cookieHeader: string, requestHeaders: Headers) {
   const response = await fetch(`${BACKEND_API_URL}/auth/refresh-token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...getBackendProxyHeaders(requestHeaders),
       Cookie: cookieHeader
     },
     cache: "no-store"
@@ -77,17 +82,17 @@ export async function middleware(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   const cookieHeader = request.headers.get("cookie") || "";
   let accessToken = request.cookies.get(SUPER_ADMIN_COOKIE)?.value;
-  let account = accessToken ? await fetchCurrentUser(accessToken) : null;
+  let account = accessToken ? await fetchCurrentUser(accessToken, request.headers) : null;
 
   if (!account) {
-    const refreshedToken = await refreshToken(cookieHeader);
+    const refreshedToken = await refreshToken(cookieHeader, request.headers);
 
     if (!refreshedToken) {
       return redirectToLogin(request);
     }
 
     accessToken = refreshedToken;
-    account = await fetchCurrentUser(refreshedToken);
+    account = await fetchCurrentUser(refreshedToken, request.headers);
 
     if (!account) {
       return redirectToLogin(request);

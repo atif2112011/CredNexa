@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { BACKEND_API_URL, SUPER_ADMIN_COOKIE } from "@/lib/constants";
+import { getBackendProxyHeaders } from "@/lib/backend-proxy-headers";
 import type { ApiResponse, RecordItem } from "@/types/api";
 
 type RefreshData = {
@@ -12,9 +13,11 @@ type CurrentUserData = {
   account: RecordItem;
 };
 
-export async function refreshAccessToken(cookieHeader?: string | null) {
+export async function refreshAccessToken(cookieHeader?: string | null, incomingHeaders?: Headers | null) {
+  const requestHeaders = incomingHeaders || (await import("next/headers").then(({ headers }) => headers()));
   const headers: HeadersInit = {
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    ...getBackendProxyHeaders(requestHeaders)
   };
 
   if (cookieHeader) {
@@ -37,8 +40,9 @@ export async function refreshAccessToken(cookieHeader?: string | null) {
 }
 
 export async function getCurrentUser({ redirectOnFail = true }: { redirectOnFail?: boolean } = {}) {
-  const { cookies } = await import("next/headers");
+  const { cookies, headers } = await import("next/headers");
   const cookieStore = await cookies();
+  const requestHeaders = await headers();
   const token = cookieStore.get(SUPER_ADMIN_COOKIE)?.value;
 
   if (!token) {
@@ -47,7 +51,10 @@ export async function getCurrentUser({ redirectOnFail = true }: { redirectOnFail
   }
 
   let response = await fetch(`${BACKEND_API_URL}/auth/me`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      ...getBackendProxyHeaders(requestHeaders),
+      Authorization: `Bearer ${token}`
+    },
     cache: "no-store"
   });
 

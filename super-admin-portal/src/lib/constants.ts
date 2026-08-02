@@ -1,4 +1,5 @@
 export const BACKEND_API_URL = process.env.BACKEND_API_URL || "http://localhost:5000/api";
+export const BACKEND_PROXY_SECRET = process.env.BACKEND_PROXY_SECRET || "";
 
 export const SUPER_ADMIN_COOKIE = "crednexa_super_admin_token";
 export const SUPER_ADMIN_EMAIL_COOKIE = "crednexa_super_admin_email";
