@@ -1,6 +1,7 @@
 import { DetailGrid } from "@/components/data/detail-grid";
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
+import { DeviceSummaryPanel } from "@/components/data/visual-panels";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { partnerUpdateFields, statusFields } from "@/lib/forms";
@@ -55,6 +56,21 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
             { label: "Created", key: "createdAt", type: "date" }
           ]}
         />
+        <DetailGrid
+          title="Partner Metrics"
+          data={(data.partnerMetrics as RecordItem) || {}}
+          fields={[
+            { label: "Total tenants", key: "tenants.total" },
+            { label: "Active tenants", key: "tenants.active" },
+            { label: "Inactive tenants", key: "tenants.inactive" },
+            { label: "Tenant admins", key: "accounts.tenantAdmins" },
+            { label: "Total borrowers", key: "borrowers.total" },
+            { label: "Total devices", key: "devices.total" },
+            { label: "Open cases", key: "cases.open" },
+            { label: "Escalated to partner", key: "cases.escalatedToPartner" }
+          ]}
+        />
+        <DeviceSummaryPanel summary={data.deviceSummary} />
         <Card>
           <CardHeader>
             <CardTitle>Tenants</CardTitle>

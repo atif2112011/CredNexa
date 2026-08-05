@@ -881,10 +881,44 @@ export const getChannelPartnerById = async (req, res) => {
       return sendError(res, 400, "Channel partner not found");
     }
 
+    const tenantIds = tenants.map((tenant) => tenant._id);
+    const openCaseStatuses = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
+    const [totalBorrowers, totalDevices, deviceSummary, openCases, escalatedToPartner] = await Promise.all([
+      User.countDocuments({ tenantId: { $in: tenantIds } }),
+      Device.countDocuments({ tenantId: { $in: tenantIds } }),
+      Device.aggregate([
+        { $match: { tenantId: { $in: tenantIds } } },
+        { $group: { _id: "$state", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      UnlockRequest.countDocuments({ channelPartnerId: channelPartner._id, status: { $in: openCaseStatuses } }),
+      UnlockRequest.countDocuments({ channelPartnerId: channelPartner._id, status: "ESCALATED_PARTNER" })
+    ]);
+
+    const activeTenants = tenants.filter((tenant) => tenant.isActive).length;
+    const partnerMetrics = {
+      tenants: {
+        total: tenants.length,
+        active: activeTenants,
+        inactive: tenants.length - activeTenants
+      },
+      accounts: {
+        tenantAdmins: accounts.filter((account) => account.role === ACCOUNT_ROLES.TENANT_ADMIN).length
+      },
+      borrowers: { total: totalBorrowers },
+      devices: { total: totalDevices },
+      cases: {
+        open: openCases,
+        escalatedToPartner
+      }
+    };
+
     return sendSuccess(res, 200, "Channel partner fetched successfully", {
       channelPartner,
       tenants,
-      accounts
+      accounts,
+      partnerMetrics,
+      deviceSummary
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");

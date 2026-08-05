@@ -35,6 +35,17 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
       />
       <div className="space-y-6">
         <DetailGrid title="Tenant Detail" data={tenant} fields={[{ label: "Name", key: "name" }, { label: "Type", key: "type" }, { label: "Partner", key: "channelPartnerId.name" }, { label: "Active", key: "isActive", type: "boolean" }, { label: "Support email", key: "supportEmail" }, { label: "Support phone", key: "supportPhone" }, { label: "Per key price", key: "creditPurchasePerKeyPrice" }, { label: "POC name", key: "pocName" }, { label: "POC phone", key: "pocPhone" }, { label: "POC designation", key: "pocDesignation" }, { label: "Address", key: "address.street" }, { label: "City", key: "address.city" }, { label: "District", key: "address.district" }, { label: "State", key: "address.state" }, { label: "Pincode", key: "address.pincode" }]} />
+        <DetailGrid
+          title="Tenant Metrics"
+          data={tenant}
+          fields={[
+            { label: "Total borrowers", key: "metrics.borrowers.total" },
+            { label: "Total devices", key: "metrics.devices.total" },
+            { label: "Open cases", key: "metrics.cases.open" },
+            { label: "Escalated to partner", key: "metrics.cases.escalatedToPartner" },
+            { label: "Metrics refreshed", key: "metrics.updatedAt", type: "date" }
+          ]}
+        />
         <TenantPolicyPanel policy={data.tenantPolicy} />
         <DevicePoliciesPanel policies={data.devicePolicies} />
         <Card>
