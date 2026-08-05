@@ -13,6 +13,8 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
   const partner = data.channelPartner as RecordItem;
   const partnerFormDefaults = {
     ...partner,
+    pincodeRestrictionEnabled: partner.pincodeRestrictionEnabled === true ? "true" : "false",
+    tenantOnboardingLimit: String(partner.tenantOnboardingLimit || 5),
     addressStreet: String((partner.address as RecordItem | undefined)?.street || ""),
     addressCity: String((partner.address as RecordItem | undefined)?.city || ""),
     addressDistrict: String((partner.address as RecordItem | undefined)?.district || ""),
@@ -43,6 +45,8 @@ export default async function PartnerDetailPage({ params }: { params: Promise<{ 
             { label: "Email", key: "contactEmail" },
             { label: "Phone", key: "contactPhone" },
             { label: "Credit percentage", key: "creditPercentage" },
+            { label: "Pincode restriction", key: "pincodeRestrictionEnabled", type: "boolean" },
+            { label: "Tenant onboarding limit", key: "tenantOnboardingLimit" },
             { label: "Address", key: "address.street" },
             { label: "City", key: "address.city" },
             { label: "District", key: "address.district" },

@@ -33,6 +33,17 @@ const partnerProfileFields: FieldConfig[] = [
   { name: "contactEmail", label: "Contact email", type: "email" },
   { name: "contactPhone", label: "Contact phone", required: true },
   { name: "creditPercentage", label: "Credit percentage", type: "number" },
+  {
+    name: "pincodeRestrictionEnabled",
+    label: "Pincode onboarding restriction",
+    type: "select",
+    required: true,
+    options: [
+      { label: "Enabled", value: "true" },
+      { label: "Disabled", value: "false" }
+    ]
+  },
+  { name: "tenantOnboardingLimit", label: "Tenant onboarding limit", type: "number", required: true },
   { name: "addressStreet", label: "Address", required: true },
   { name: "addressCity", label: "City", required: true },
   { name: "addressDistrict", label: "District", required: true },

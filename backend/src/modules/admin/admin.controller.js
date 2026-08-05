@@ -84,6 +84,13 @@ import {
   getActiveRiskFilter
 } from "../../services/riskManagement.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import {
+  DEFAULT_TENANT_ONBOARDING_LIMIT,
+  enforcePartnerTenantOnboarding,
+  isValidPincode,
+  isValidTenantOnboardingLimit,
+  PartnerTenantOnboardingError
+} from "../../services/partnerTenantOnboarding.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import {
@@ -179,6 +186,7 @@ const getAddressValidationError = (address) => {
   if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
+  if (!isValidPincode(address.pincode)) return "address.pincode must be a valid 6 digit pincode";
   return null;
 };
 
@@ -737,6 +745,15 @@ export const createChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    const pincodeRestrictionEnabled = req.body.pincodeRestrictionEnabled ?? true;
+    const tenantOnboardingLimit = req.body.tenantOnboardingLimit ?? DEFAULT_TENANT_ONBOARDING_LIMIT;
+    if (typeof pincodeRestrictionEnabled !== "boolean") {
+      return sendError(res, 400, "pincodeRestrictionEnabled must be a boolean");
+    }
+    if (!isValidTenantOnboardingLimit(tenantOnboardingLimit)) {
+      return sendError(res, 400, "tenantOnboardingLimit must be a positive integer");
+    }
+
     const address = normalizeAddressPayload(req.body);
     const addressError = getAddressValidationError(address);
     if (addressError) {
@@ -770,6 +787,8 @@ export const createChannelPartner = async (req, res) => {
           ...(contactEmail ? { contactEmail } : {}),
           ...(req.body.creditPercentage !== undefined ? { creditPercentage: req.body.creditPercentage } : {}),
           address,
+          pincodeRestrictionEnabled,
+          tenantOnboardingLimit: Number(tenantOnboardingLimit),
           createdBy: req.auth.id
         }
       ],
@@ -886,6 +905,19 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    if (
+      req.body.pincodeRestrictionEnabled !== undefined &&
+      typeof req.body.pincodeRestrictionEnabled !== "boolean"
+    ) {
+      return sendError(res, 400, "pincodeRestrictionEnabled must be a boolean");
+    }
+    if (
+      req.body.tenantOnboardingLimit !== undefined &&
+      !isValidTenantOnboardingLimit(req.body.tenantOnboardingLimit)
+    ) {
+      return sendError(res, 400, "tenantOnboardingLimit must be a positive integer");
+    }
+
     const contactPhone = normalizeMobile(req.body.contactPhone);
     const contactEmail = normalizeEmail(req.body.contactEmail);
     if (!isValidIndianMobile(contactPhone)) {
@@ -901,11 +933,24 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, addressError);
     }
 
-    const allowedUpdates = ["name", "type", "contactEmail", "contactPhone", "creditPercentage", "payoutUpiId", "payoutUpiName"];
+    const allowedUpdates = [
+      "name",
+      "type",
+      "contactEmail",
+      "contactPhone",
+      "creditPercentage",
+      "payoutUpiId",
+      "payoutUpiName",
+      "pincodeRestrictionEnabled",
+      "tenantOnboardingLimit"
+    ];
     const updates = {
       ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
       contactPhone,
       contactEmail: contactEmail || undefined,
+      ...(req.body.tenantOnboardingLimit !== undefined
+        ? { tenantOnboardingLimit: Number(req.body.tenantOnboardingLimit) }
+        : {}),
       address
     };
 
@@ -1289,6 +1334,12 @@ export const createTenant = async (req, res) => {
 
     session.startTransaction();
 
+    await enforcePartnerTenantOnboarding({
+      channelPartner,
+      tenantPincode: address.pincode,
+      session
+    });
+
     const tenant = await Tenant.create(
       [
         {
@@ -1428,6 +1479,9 @@ export const createTenant = async (req, res) => {
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
+    }
+    if (error instanceof PartnerTenantOnboardingError) {
+      return sendError(res, error.statusCode, error.message);
     }
     if (error?.code === 11000) return sendError(res, 400, "Phone number or email is already used");
     return sendError(res, 500, error.message || "Internal server error");

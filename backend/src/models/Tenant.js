@@ -107,7 +107,8 @@ const tenantSchema = new mongoose.Schema(
       pincode: {
         type: String,
         required: true,
-        trim: true
+        trim: true,
+        match: [/^\d{6}$/, "address.pincode must be a valid 6 digit pincode"]
       }
     },
     pocName: {

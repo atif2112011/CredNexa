@@ -55,6 +55,7 @@ import {
   parseLocationTelemetry,
   sanitizePingEventPayload
 } from "../../services/deviceTelemetry.service.js";
+import { isExpiredLocationCommand } from "../../services/deviceLocation.service.js";
 import {
   findNewlyAppliedAppLocks,
   shouldAdvanceAppliedRestrictionState
@@ -2755,6 +2756,12 @@ export const acknowledgeDeviceCommand = async (req, res) => {
 
     if (!["acknowledged", "failed"].includes(req.body.status)) {
       return sendError(res, 400, "Status must be acknowledged or failed");
+    }
+
+    if (isExpiredLocationCommand(command)) {
+      return sendError(res, 409, "Location request is no longer active", {
+        code: "COMMAND_EXPIRED"
+      });
     }
 
     if (getDeviceSecurityControlByCommandType(command.commandType)) {

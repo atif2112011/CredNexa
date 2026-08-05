@@ -26,6 +26,12 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
 import { sendPayoutMail } from "../../services/mail.service.js";
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
+import {
+  DEFAULT_TENANT_ONBOARDING_LIMIT,
+  enforcePartnerTenantOnboarding,
+  isValidPincode,
+  PartnerTenantOnboardingError
+} from "../../services/partnerTenantOnboarding.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
@@ -93,6 +99,7 @@ const getAddressValidationError = (address) => {
   if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
+  if (!isValidPincode(address.pincode)) return "address.pincode must be a valid 6 digit pincode";
   return null;
 };
 
@@ -379,6 +386,8 @@ export const completePartnerSignup = async (req, res) => {
           ...email && { contactEmail: email },
           // contactEmail: email,
           address,
+          pincodeRestrictionEnabled: true,
+          tenantOnboardingLimit: DEFAULT_TENANT_ONBOARDING_LIMIT,
           isActive: true
         }
       ],
@@ -1252,6 +1261,12 @@ export const createPartnerTenant = async (req, res) => {
 
     session.startTransaction();
 
+    await enforcePartnerTenantOnboarding({
+      channelPartner,
+      tenantPincode: address.pincode,
+      session
+    });
+
     const tenants = await Tenant.create(
       [
         {
@@ -1414,6 +1429,9 @@ export const createPartnerTenant = async (req, res) => {
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
+    }
+    if (error instanceof PartnerTenantOnboardingError) {
+      return sendError(res, error.statusCode, error.message);
     }
     return sendError(res, 500, error.message || "Internal server error");
   } finally {

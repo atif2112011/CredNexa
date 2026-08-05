@@ -63,6 +63,13 @@ function buildPartnerOrTenantPayload(values: Record<string, string | undefined>)
   delete payload.addressState;
   delete payload.addressPincode;
 
+  if (values.pincodeRestrictionEnabled !== undefined) {
+    payload.pincodeRestrictionEnabled = values.pincodeRestrictionEnabled === "true";
+  }
+  if (values.tenantOnboardingLimit !== undefined && values.tenantOnboardingLimit !== "") {
+    payload.tenantOnboardingLimit = Number(values.tenantOnboardingLimit);
+  }
+
   return payload;
 }
 
@@ -154,7 +161,7 @@ export function FormDialog({
         const field = fields.find((item) => item.name === key);
         const normalizedValue = String(value ?? "");
         if (field?.type === "number") return [key, Number(normalizedValue)];
-        if (key === "isActive") return [key, value === "true"];
+        if (key === "isActive" || key === "pincodeRestrictionEnabled") return [key, value === "true"];
         return [key, normalizedValue];
       })
     );

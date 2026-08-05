@@ -10,6 +10,9 @@ export const buildActiveLocationCommandFilter = (deviceId) => ({
   status: { $in: ACTIVE_COMMAND_STATUSES }
 });
 
+export const isExpiredLocationCommand = (command) =>
+  command?.commandType === GET_LOCATION_COMMAND_TYPE && command?.status === "expired";
+
 export const queueGetLocationCommand = async ({
   device,
   accountId,

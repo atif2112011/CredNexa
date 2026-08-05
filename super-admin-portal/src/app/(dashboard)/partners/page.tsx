@@ -12,7 +12,16 @@ export default async function PartnersPage() {
       <PageHeader
         title="Channel Partners"
         description="Create, inspect, update, activate, and deactivate partner organizations."
-        actions={<FormDialog title="Create partner" triggerLabel="Create partner" endpoint="/api/admin/channel-partners" fields={partnerCreateFields} successVariant="partner" />}
+        actions={
+          <FormDialog
+            title="Create partner"
+            triggerLabel="Create partner"
+            endpoint="/api/admin/channel-partners"
+            fields={partnerCreateFields}
+            defaultValues={{ pincodeRestrictionEnabled: "true", tenantOnboardingLimit: "5" }}
+            successVariant="partner"
+          />
+        }
       />
       <ResourceTable
         rows={data.items}

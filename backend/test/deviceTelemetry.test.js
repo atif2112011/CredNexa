@@ -9,7 +9,8 @@ import {
 import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
 import {
   buildActiveLocationCommandFilter,
-  GET_LOCATION_COMMAND_TYPE
+  GET_LOCATION_COMMAND_TYPE,
+  isExpiredLocationCommand
 } from "../src/services/deviceLocation.service.js";
 
 test("accepts a valid newer location", () => {
@@ -152,6 +153,21 @@ test("supersedes only active GET_LOCATION commands when refreshing location", ()
     commandType: GET_LOCATION_COMMAND_TYPE,
     status: { $in: ["pending", "sent"] }
   });
+});
+
+test("rejects only expired GET_LOCATION commands as obsolete location requests", () => {
+  assert.equal(
+    isExpiredLocationCommand({ commandType: GET_LOCATION_COMMAND_TYPE, status: "expired" }),
+    true
+  );
+  assert.equal(
+    isExpiredLocationCommand({ commandType: GET_LOCATION_COMMAND_TYPE, status: "sent" }),
+    false
+  );
+  assert.equal(
+    isExpiredLocationCommand({ commandType: "LOCK", status: "expired" }),
+    false
+  );
 });
 
 test("sanitizes precise telemetry from device ping events", () => {
