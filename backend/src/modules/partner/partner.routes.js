@@ -28,6 +28,7 @@ import {
   unlockPartnerEscalation,
   updatePartnerAccount,
   updatePartnerAccountStatus,
+  updatePartnerTenantCreditPurchaseDiscounts,
   verifyTenantCreationVerification,
   verifyPartnerSignupOtp
 } from "./partner.controller.js";
@@ -40,15 +41,10 @@ const requirePartnerAdmin = [
   requireRole(ACCOUNT_ROLES.PARTNER_ADMIN)
 ];
 
-<<<<<<< HEAD
 partnerRoutes.post("/leads", createPartnerLead);
-partnerRoutes.post("/signup/initiate-otp", initiatePartnerSignupOtp);
-partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
-=======
 partnerRoutes.post("/signup/initiate-otp", otpRateLimiter, initiatePartnerSignupOtp);
 partnerRoutes.post("/signup/resend-otp", otpRateLimiter, resendPartnerSignupOtp);
 partnerRoutes.post("/signup/verify-otp", otpRateLimiter, verifyPartnerSignupOtp);
->>>>>>> b082da18f408804748c032769ee7b7ff414fad5f
 partnerRoutes.post("/signup/complete", completePartnerSignup);
 
 partnerRoutes.get("/dashboard", ...requirePartnerAdmin, getPartnerDashboard);
@@ -60,6 +56,7 @@ partnerRoutes.post("/tenants/resend-verification", ...requirePartnerAdmin, otpRa
 partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, otpRateLimiter, verifyTenantCreationVerification);
 partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
 partnerRoutes.get("/tenants/:tenantId", ...requirePartnerAdmin, getPartnerTenantById);
+partnerRoutes.put("/tenants/:tenantId/credit-purchase-discounts", ...requirePartnerAdmin, updatePartnerTenantCreditPurchaseDiscounts);
 partnerRoutes.post("/tenants", ...requirePartnerAdmin, createPartnerTenant);
 
 partnerRoutes.get("/accounts", ...requirePartnerAdmin, listPartnerAccounts);

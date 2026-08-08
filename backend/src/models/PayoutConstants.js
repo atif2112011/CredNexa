@@ -37,7 +37,7 @@ const payoutConstantsSchema = new mongoose.Schema(
     },
     maxTenantCreditPurchase: {
       type: Number,
-      default: 500,
+      default: 2000,
       min: 0
     },
     adminCreditPurchaseUpiId: {

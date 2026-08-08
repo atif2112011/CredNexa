@@ -35,6 +35,28 @@ const tenantCreditPurchaseRequestSchema = new mongoose.Schema(
       required: true,
       min: 0
     },
+    grossPurchaseAmount: {
+      type: Number,
+      min: 0
+    },
+    discountPercentage: {
+      type: Number,
+      min: 0,
+      max: 50
+    },
+    discountAmount: {
+      type: Number,
+      min: 0
+    },
+    discountSlabSnapshot: {
+      minKeys: { type: Number, min: 0 },
+      maxKeys: { type: Number, default: null, min: 0 },
+      discountPercentage: { type: Number, min: 0, max: 50 }
+    },
+    discountConfigVersion: {
+      type: Number,
+      min: 1
+    },
     currency: {
       type: String,
       default: "INR"

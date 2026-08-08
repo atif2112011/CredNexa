@@ -7,11 +7,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { statusFields, tenantUpdateFields } from "@/lib/forms";
 import { getDetail } from "@/services/admin";
 import type { RecordItem } from "@/types/api";
+import { DiscountSlabsForm } from "./discount-slabs-form";
 
 export default async function TenantDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const data = await getDetail(`/admin/tenants/${id}`);
   const tenant = data.tenant as RecordItem;
+  const discountSlabs = Array.isArray(tenant.creditPurchaseDiscountSlabs)
+    ? tenant.creditPurchaseDiscountSlabs.map((slab) => {
+        const item = slab as RecordItem;
+        return {
+          minKeys: Number(item.minKeys),
+          maxKeys: item.maxKeys === null || item.maxKeys === undefined ? null : Number(item.maxKeys),
+          discountPercentage: Number(item.discountPercentage)
+        };
+      })
+    : [];
   const tenantFormDefaults = {
     ...tenant,
     addressStreet: String((tenant.address as RecordItem | undefined)?.street || ""),
@@ -35,6 +46,12 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
       />
       <div className="space-y-6">
         <DetailGrid title="Tenant Detail" data={tenant} fields={[{ label: "Name", key: "name" }, { label: "Type", key: "type" }, { label: "Partner", key: "channelPartnerId.name" }, { label: "Active", key: "isActive", type: "boolean" }, { label: "Support email", key: "supportEmail" }, { label: "Support phone", key: "supportPhone" }, { label: "Per key price", key: "creditPurchasePerKeyPrice" }, { label: "POC name", key: "pocName" }, { label: "POC phone", key: "pocPhone" }, { label: "POC designation", key: "pocDesignation" }, { label: "Address", key: "address.street" }, { label: "City", key: "address.city" }, { label: "District", key: "address.district" }, { label: "State", key: "address.state" }, { label: "Pincode", key: "address.pincode" }]} />
+        <DiscountSlabsForm
+          tenantId={id}
+          initialSlabs={discountSlabs}
+          initialVersion={Number(tenant.creditPurchaseDiscountVersion || 1)}
+          maximumPurchase={2000}
+        />
         <DetailGrid
           title="Tenant Metrics"
           data={tenant}

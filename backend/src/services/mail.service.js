@@ -89,7 +89,9 @@ const buildApprovalMailBody = ({ creditPurchaseRequest, tenant }) =>
       ["Request ID", creditPurchaseRequest?._id?.toString() || "Not available"],
       ["Requested keys", creditPurchaseRequest?.requestedCredits ?? "Not available"],
       ["Price per key", formatCurrency(creditPurchaseRequest?.perKeyPrice)],
-      ["Total amount", formatCurrency(creditPurchaseRequest?.purchaseAmount)],
+      ["Gross amount", formatCurrency(creditPurchaseRequest?.grossPurchaseAmount ?? creditPurchaseRequest?.purchaseAmount)],
+      ["Discount", `${creditPurchaseRequest?.discountPercentage ?? 0}% (${formatCurrency(creditPurchaseRequest?.discountAmount || 0)})`],
+      ["Amount paid", formatCurrency(creditPurchaseRequest?.purchaseAmount)],
       ["Payment reference", creditPurchaseRequest?.referenceNumber || "Not provided"],
       ["Requested at", formatDate(creditPurchaseRequest?.requestedAt || creditPurchaseRequest?.createdAt)]
     ]

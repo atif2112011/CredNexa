@@ -1,6 +1,19 @@
 import mongoose from "mongoose";
 
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../constants/tenant.js";
+import {
+  cloneDefaultTenantCreditDiscountSlabs,
+  normalizeTenantCreditDiscountSlabs
+} from "../utils/tenantCreditDiscount.js";
+
+const creditPurchaseDiscountSlabSchema = new mongoose.Schema(
+  {
+    minKeys: { type: Number, required: true, min: 0 },
+    maxKeys: { type: Number, default: null, min: 0 },
+    discountPercentage: { type: Number, required: true, min: 0, max: 50 }
+  },
+  { _id: false }
+);
 
 const qrCodeSchema = new mongoose.Schema(
   {
@@ -135,6 +148,31 @@ const tenantSchema = new mongoose.Schema(
     creditPurchasePerKeyPrice: {
       type: Number,
       min: 0
+    },
+    creditPurchaseDiscountSlabs: {
+      type: [creditPurchaseDiscountSlabSchema],
+      default: cloneDefaultTenantCreditDiscountSlabs,
+      validate: {
+        validator(slabs) {
+          try {
+            normalizeTenantCreditDiscountSlabs(slabs);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        message: "Invalid tenant credit purchase discount slabs"
+      }
+    },
+    creditPurchaseDiscountVersion: {
+      type: Number,
+      default: 1,
+      min: 1
+    },
+    creditPurchaseDiscountUpdatedAt: Date,
+    creditPurchaseDiscountUpdatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Account"
     },
     totalCreditsPurchased: {
       type: Number,

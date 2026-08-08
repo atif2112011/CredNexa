@@ -112,6 +112,7 @@ import {
   parseRupeeAmount,
   roundRupeeAmount
 } from "../../utils/payout.js";
+import { normalizeTenantCreditDiscountSlabs } from "../../utils/tenantCreditDiscount.js";
 
 const getPagination = (query) => {
   const page = Math.max(Number(query.page || 1), 1);
@@ -299,6 +300,9 @@ const awardPartnerCreditForTenantCreditPurchase = async ({
   tenant,
   keysPurchased,
   perKeyPrice,
+  grossPurchaseAmount,
+  purchaseDiscountPercentage,
+  purchaseDiscountAmount,
   purchaseAmount,
   tenantCreditLedgerId,
   actorId,
@@ -344,6 +348,9 @@ const awardPartnerCreditForTenantCreditPurchase = async ({
         balanceAfter,
         keysPurchased,
         perKeyPrice,
+        ...(grossPurchaseAmount !== undefined ? { grossPurchaseAmount } : {}),
+        ...(purchaseDiscountPercentage !== undefined ? { purchaseDiscountPercentage } : {}),
+        ...(purchaseDiscountAmount !== undefined ? { purchaseDiscountAmount } : {}),
         purchaseAmount,
         creditPercentage,
         actorId,
@@ -351,7 +358,8 @@ const awardPartnerCreditForTenantCreditPurchase = async ({
         reason: reason || "Tenant credit purchase commission",
         metadata: {
           source: "tenant_credit_purchase",
-          formula: "keysPurchased * perKeyPrice * creditPercentage / 100"
+          formula: "purchaseAmount * creditPercentage / 100",
+          purchaseAmountType: grossPurchaseAmount !== undefined ? "net_after_discount" : "legacy_calculated_amount"
         }
       }
     ],
@@ -368,6 +376,9 @@ const awardPartnerCreditForTenantCreditPurchase = async ({
       metadata: {
         keysPurchased,
         perKeyPrice,
+        ...(grossPurchaseAmount !== undefined ? { grossPurchaseAmount } : {}),
+        ...(purchaseDiscountPercentage !== undefined ? { purchaseDiscountPercentage } : {}),
+        ...(purchaseDiscountAmount !== undefined ? { purchaseDiscountAmount } : {}),
         purchaseAmount,
         creditPercentage,
         creditAmount,
@@ -387,6 +398,9 @@ const awardPartnerCreditForTenantCreditPurchase = async ({
     balanceBefore,
     balanceAfter,
     ledgerEntryId: ledgerEntries[0]._id,
+    ...(grossPurchaseAmount !== undefined ? { grossPurchaseAmount } : {}),
+    ...(purchaseDiscountPercentage !== undefined ? { purchaseDiscountPercentage } : {}),
+    ...(purchaseDiscountAmount !== undefined ? { purchaseDiscountAmount } : {}),
     purchaseAmount
   };
 };
@@ -1618,6 +1632,75 @@ export const updateTenant = async (req, res) => {
 };
 
 /**
+ * Replace one tenant's key-purchase discount percentages while keeping the configured ranges fixed.
+ * Sample body: { "discountConfigVersion": 1, "slabs": [{ "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 }, ...] }
+ */
+export const updateTenantCreditPurchaseDiscounts = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Invalid tenant ID");
+    }
+
+    let slabs;
+    try {
+      slabs = normalizeTenantCreditDiscountSlabs(req.body.slabs);
+    } catch (error) {
+      return sendError(res, 400, error.message);
+    }
+
+    const expectedVersion =
+      req.body.discountConfigVersion !== undefined ? Number(req.body.discountConfigVersion) : null;
+    if (expectedVersion !== null && (!Number.isInteger(expectedVersion) || expectedVersion < 1)) {
+      return sendError(res, 400, "discountConfigVersion must be a positive integer");
+    }
+
+    const filter = { _id: req.params.id };
+    if (expectedVersion !== null) filter.creditPurchaseDiscountVersion = expectedVersion;
+
+    const tenant = await Tenant.findOneAndUpdate(
+      filter,
+      {
+        $set: {
+          creditPurchaseDiscountSlabs: slabs,
+          creditPurchaseDiscountUpdatedAt: new Date(),
+          creditPurchaseDiscountUpdatedBy: req.auth.id
+        },
+        $inc: { creditPurchaseDiscountVersion: 1 }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!tenant) {
+      const exists = await Tenant.exists({ _id: req.params.id });
+      return sendError(
+        res,
+        exists ? 409 : 404,
+        exists ? "Discount configuration changed. Refresh before saving" : "Tenant not found"
+      );
+    }
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNTS_UPDATED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      metadata: {
+        creditPurchaseDiscountVersion: tenant.creditPurchaseDiscountVersion,
+        slabs
+      }
+    });
+
+    return sendSuccess(res, 200, "Tenant credit purchase discounts updated successfully", {
+      tenantId: tenant._id,
+      discountConfigVersion: tenant.creditPurchaseDiscountVersion,
+      slabs: tenant.creditPurchaseDiscountSlabs
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Activate or deactivate tenant.
  * Sample body: { "isActive": false, "reason": "Tenant offboarded" }
  */
@@ -1661,7 +1744,9 @@ export const updateTenantStatus = async (req, res) => {
 };
 
 /**
- * Adjust tenant credits after offline/manual payment handling.
+ * @legacy Adjust tenant credits after offline/manual payment handling.
+ * Kept for backwards compatibility. New paid key purchases must use the tenant credit purchase request flow.
+ * Do not extend this route with discount-slab behavior.
  * Sample body: { "delta": 25, "reason": "Credits purchased manually" }
  */
 export const adjustTenantCredits = async (req, res) => {
@@ -2152,6 +2237,9 @@ export const approveTenantCreditPurchaseRequest = async (req, res) => {
             creditPurchaseRequestId: creditPurchaseRequest._id,
             requestedCredits: creditPurchaseRequest.requestedCredits,
             perKeyPrice: creditPurchaseRequest.perKeyPrice,
+            grossPurchaseAmount: creditPurchaseRequest.grossPurchaseAmount,
+            discountPercentage: creditPurchaseRequest.discountPercentage,
+            discountAmount: creditPurchaseRequest.discountAmount,
             purchaseAmount: creditPurchaseRequest.purchaseAmount,
             referenceNumber: creditPurchaseRequest.referenceNumber,
             source: "tenant_credit_purchase_request"
@@ -2165,6 +2253,9 @@ export const approveTenantCreditPurchaseRequest = async (req, res) => {
       tenant,
       keysPurchased: creditPurchaseRequest.requestedCredits,
       perKeyPrice: creditPurchaseRequest.perKeyPrice,
+      grossPurchaseAmount: creditPurchaseRequest.grossPurchaseAmount,
+      purchaseDiscountPercentage: creditPurchaseRequest.discountPercentage,
+      purchaseDiscountAmount: creditPurchaseRequest.discountAmount,
       purchaseAmount: creditPurchaseRequest.purchaseAmount,
       tenantCreditLedgerId: tenantLedgerEntries[0]._id,
       actorId: req.auth.id,
@@ -2198,6 +2289,9 @@ export const approveTenantCreditPurchaseRequest = async (req, res) => {
           partnerCredit,
           requestedCredits: creditPurchaseRequest.requestedCredits,
           perKeyPrice: creditPurchaseRequest.perKeyPrice,
+          grossPurchaseAmount: creditPurchaseRequest.grossPurchaseAmount,
+          discountPercentage: creditPurchaseRequest.discountPercentage,
+          discountAmount: creditPurchaseRequest.discountAmount,
           purchaseAmount: creditPurchaseRequest.purchaseAmount
         }
       },

@@ -529,7 +529,7 @@ Store these in `PayoutConstants`:
 ```text
 defaultTenantCreditPerKeyPrice = 100
 minTenantCreditPurchase = 1
-maxTenantCreditPurchase = 500
+maxTenantCreditPurchase = 2000
 adminCreditPurchaseUpiId = test@ybl.in
 adminCreditPurchaseUpiName = Test Admin
 adminCreditPurchaseQrImageUrl = https://placehold.co/600x400
@@ -548,10 +548,12 @@ else PayoutConstants.defaultTenantCreditPerKeyPrice
 
 The effective price is returned to the tenant app from the credit purchase options API.
 
-The backend calculates the amount:
+The backend selects the tenant-specific quantity slab and calculates:
 
 ```text
-purchaseAmount = requestedCredits * effectivePerKeyPrice
+grossPurchaseAmount = requestedCredits * effectivePerKeyPrice
+discountAmount = grossPurchaseAmount * discountPercentage / 100
+purchaseAmount = grossPurchaseAmount - discountAmount
 ```
 
 The frontend can display the calculated amount, but backend does not trust frontend amount values.
@@ -559,7 +561,7 @@ The frontend can display the calculated amount, but backend does not trust front
 If frontend sends `purchaseAmount` or `amount`, backend verifies:
 
 ```text
-submitted amount == requestedCredits * effectivePerKeyPrice
+submitted amount == backend-calculated discounted purchaseAmount
 ```
 
 If the values do not match, the request fails.
@@ -570,6 +572,10 @@ Add these fields to `Tenant`:
 
 ```text
 creditPurchasePerKeyPrice
+creditPurchaseDiscountSlabs
+creditPurchaseDiscountVersion
+creditPurchaseDiscountUpdatedAt
+creditPurchaseDiscountUpdatedBy
 totalCreditsPurchased
 lifetimeCreditPurchaseAmount
 lastCreditPurchasedAt
@@ -588,7 +594,12 @@ Fields:
 ```text
 requested credit quantity
 perKeyPrice snapshot
-purchaseAmount snapshot
+grossPurchaseAmount snapshot
+discountPercentage snapshot
+discountAmount snapshot
+discountSlabSnapshot
+discountConfigVersion
+purchaseAmount snapshot (net amount paid)
 admin UPI/QR snapshot
 payment proof image
 referenceNumber optional
@@ -619,9 +630,9 @@ Tenant gets options:
 
 ```text
 Tenant opens purchase credits screen
--> App fetches effective per key price, min/max limits, Admin UPI/QR
+-> App fetches effective per key price, tenant discount slabs, config version, min/max limits, Admin UPI/QR
 -> Tenant enters requested credits
--> App displays amount = requestedCredits * perKeyPrice
+-> App displays gross amount, slab discount, and net payable amount
 -> Tenant pays externally through UPI/payment app
 -> Tenant uploads payment proof image
 -> Tenant optionally enters referenceNumber
@@ -639,6 +650,7 @@ requestedCredits <= maxTenantCreditPurchase when max > 0
 payment proof image is required
 only one pending request per tenant is allowed
 purchaseAmount is calculated by backend
+gross amount, matched slab, percentage, discount amount, net amount, and config version are snapshotted
 tenant creditBalance does not change
 partner payout balance does not change
 ```
@@ -675,7 +687,7 @@ Tenant.totalCreditsPurchased increases
 Tenant.lifetimeCreditPurchaseAmount increases
 Tenant.lastCreditPurchasedAt is set
 TenantCreditLedger entry type = TENANT_CREDIT_PURCHASE
-Partner credit is calculated from purchaseAmount if tenant belongs to a partner
+Partner credit is calculated from the discounted net purchaseAmount if tenant belongs to a partner
 TenantCreditPurchaseRequest status becomes APPROVED
 ```
 
@@ -698,6 +710,17 @@ POST /api/tenant/credits/purchase/requests
 GET /api/tenant/credits/purchase/requests
 GET /api/tenant/credits/purchase/requests/:requestId
 ```
+
+Discount management:
+
+```text
+PUT /api/admin/tenants/:tenantId/credit-purchase-discounts
+PUT /api/partner/tenants/:tenantId/credit-purchase-discounts
+```
+
+Both endpoints replace the complete percentage set, keep quantity ranges fixed, lock 0-25 at 0%, cap every percentage at 50%, increment the tenant configuration version, and write an audit log. The partner endpoint can update only tenants owned by that partner.
+
+The legacy `POST /api/admin/tenants/:tenantId/credits/adjust` route is retained unchanged for backwards compatibility and does not use discount slabs.
 
 Admin:
 

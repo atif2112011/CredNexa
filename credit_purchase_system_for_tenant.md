@@ -61,11 +61,22 @@ Response:
     "pricing": {
       "currency": "INR",
       "perKeyPrice": 100,
-      "source": "default"
+      "basePerKeyPrice": 100,
+      "source": "default",
+      "discountConfigVersion": 1,
+      "discountSlabs": [
+        { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
+        { "minKeys": 26, "maxKeys": 75, "discountPercentage": 10 },
+        { "minKeys": 76, "maxKeys": 150, "discountPercentage": 15 },
+        { "minKeys": 151, "maxKeys": 250, "discountPercentage": 20 },
+        { "minKeys": 251, "maxKeys": 450, "discountPercentage": 25 },
+        { "minKeys": 451, "maxKeys": 750, "discountPercentage": 30 },
+        { "minKeys": 751, "maxKeys": null, "discountPercentage": 35 }
+      ]
     },
     "limits": {
       "minCredits": 1,
-      "maxCredits": 500,
+      "maxCredits": 2000,
       "hasMaximumCap": true
     },
     "adminPayment": {
@@ -80,7 +91,9 @@ Response:
 UI logic:
 
 ```text
-amount = requestedCredits * pricing.perKeyPrice
+grossAmount = requestedCredits * pricing.basePerKeyPrice
+discountAmount = grossAmount * matchingSlab.discountPercentage / 100
+amount = grossAmount - discountAmount
 ```
 
 Show this calculated amount before the tenant pays.
@@ -141,6 +154,8 @@ Multipart fields:
 
 ```text
 requestedCredits = 10
+discountConfigVersion = 1
+purchaseAmount = 1000 optional display-value verification
 referenceNumber = UTR123456 optional
 proofImage = image file
 ```
@@ -158,7 +173,12 @@ Response:
       "channelPartnerId": "channelPartnerId",
       "requestedCredits": 10,
       "perKeyPrice": 100,
+      "grossPurchaseAmount": 1000,
+      "discountPercentage": 0,
+      "discountAmount": 0,
       "purchaseAmount": 1000,
+      "discountSlabSnapshot": { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
+      "discountConfigVersion": 1,
       "currency": "INR",
       "status": "PENDING",
       "adminPaymentSnapshot": {
@@ -224,6 +244,9 @@ Response:
         "_id": "requestId",
         "requestedCredits": 10,
         "perKeyPrice": 100,
+        "grossPurchaseAmount": 1000,
+        "discountPercentage": 0,
+        "discountAmount": 0,
         "purchaseAmount": 1000,
         "status": "PENDING",
         "referenceNumber": "UTR123456",
@@ -274,7 +297,9 @@ Use this screen to show:
 ```text
 requested credits
 per key price
-total amount
+gross amount
+discount percentage and amount
+net amount paid
 status
 UPI details used at request time
 proof image
@@ -314,13 +339,15 @@ Amount:
 
 ```text
 display only
-calculated as requestedCredits * perKeyPrice
+calculated from the matching discount slab returned by the options API
 do not allow manual edit
 ```
 
 ## Important Backend Rules
 
 - Backend calculates `purchaseAmount`.
+- `purchaseAmount` is the net amount after discount; gross and discount values are snapshotted separately.
+- If `discountConfigVersion` is supplied, backend rejects a stale version with HTTP 409.
 - Backend rejects mismatched frontend `purchaseAmount` or `amount` if sent.
 - Backend requires payment proof image.
 - Backend allows only one pending credit purchase request per tenant.
@@ -358,8 +385,9 @@ Possible messages:
 requestedCredits must be a positive integer
 Payment proof image is required
 Minimum credit purchase is 1
-Maximum credit purchase is 500
-purchaseAmount must equal requestedCredits * perKeyPrice
+Maximum credit purchase is 2000
+purchaseAmount must equal the backend-calculated discounted amount
+Discount configuration changed. Refresh pricing before submitting the purchase
 A credit purchase request is already pending approval
 Invalid credit purchase status
 Credit purchase request not found

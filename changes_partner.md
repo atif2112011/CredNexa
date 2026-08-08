@@ -190,3 +190,37 @@ In the sidebar, show only:
 Account Name
 Account Number
 ```
+
+## Tenant Key-Purchase Discount Slabs
+
+Partner admins can update discount percentages for their own tenants:
+
+```http
+PUT /api/partner/tenants/:tenantId/credit-purchase-discounts
+```
+
+Request body:
+
+```json
+{
+  "discountConfigVersion": 1,
+  "slabs": [
+    { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
+    { "minKeys": 26, "maxKeys": 75, "discountPercentage": 10 },
+    { "minKeys": 76, "maxKeys": 150, "discountPercentage": 15 },
+    { "minKeys": 151, "maxKeys": 250, "discountPercentage": 20 },
+    { "minKeys": 251, "maxKeys": 450, "discountPercentage": 25 },
+    { "minKeys": 451, "maxKeys": 750, "discountPercentage": 30 },
+    { "minKeys": 751, "maxKeys": null, "discountPercentage": 35 }
+  ]
+}
+```
+
+Rules:
+
+- Quantity ranges are fixed.
+- The 0-25 percentage is fixed at 0%.
+- Every other percentage must be between 0% and 50%.
+- Send the complete slab array and the latest version returned on the tenant document.
+- HTTP 409 means another user changed the configuration; refresh the tenant before retrying.
+- A partner cannot update a tenant belonging to another partner.

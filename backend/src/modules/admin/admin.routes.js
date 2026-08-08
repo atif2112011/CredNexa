@@ -80,6 +80,7 @@ import {
   updateAdminUnknownAppInstallsControl,
   updatePayoutConstants,
   updateTenant,
+  updateTenantCreditPurchaseDiscounts,
   updateTenantStatus,
   upsertProvisioningDetails,
   getProvisioningDetails,
@@ -134,7 +135,9 @@ adminRoutes.get("/tenants", listTenants);
 adminRoutes.post("/tenants", createTenant);
 adminRoutes.get("/tenants/:id", getTenantById);
 adminRoutes.patch("/tenants/:id", updateTenant);
+adminRoutes.put("/tenants/:id/credit-purchase-discounts", updateTenantCreditPurchaseDiscounts);
 adminRoutes.patch("/tenants/:id/status", updateTenantStatus);
+// @legacy Backwards-compatible manual balance adjustment. Paid purchases use tenant-credit-purchases.
 adminRoutes.post("/tenants/:id/credits/adjust", adjustTenantCredits);
 
 adminRoutes.get("/accounts", listAdminAccounts);

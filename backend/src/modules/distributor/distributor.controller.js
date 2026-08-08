@@ -70,6 +70,10 @@ import {
   parseRupeeAmount,
   roundRupeeAmount
 } from "../../utils/payout.js";
+import {
+  calculateTenantCreditPurchasePricing,
+  getEffectiveTenantCreditDiscountSlabs
+} from "../../utils/tenantCreditDiscount.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { deliverDeviceCommandImmediately } from "../../jobs/fcmDeliveryWorker.js";
 
@@ -856,6 +860,7 @@ export const getCreditPurchaseOptions = async (req, res) => {
     const payoutConstants = await getOrCreatePayoutConstants();
     const perKeyPrice = getEffectiveTenantCreditPerKeyPrice(tenant, payoutConstants);
     const limits = getTenantCreditPurchaseLimits(payoutConstants);
+    const discountSlabs = getEffectiveTenantCreditDiscountSlabs(tenant);
 
     return sendSuccess(res, 200, "Credit purchase options fetched successfully", {
       credits: {
@@ -866,7 +871,10 @@ export const getCreditPurchaseOptions = async (req, res) => {
       pricing: {
         currency: "INR",
         perKeyPrice,
-        source: tenant.creditPurchasePerKeyPrice !== undefined && tenant.creditPurchasePerKeyPrice !== null ? "tenant_override" : "default"
+        basePerKeyPrice: perKeyPrice,
+        source: tenant.creditPurchasePerKeyPrice !== undefined && tenant.creditPurchasePerKeyPrice !== null ? "tenant_override" : "default",
+        discountConfigVersion: Number(tenant.creditPurchaseDiscountVersion || 1),
+        discountSlabs
       },
       limits: {
         minCredits: limits.min,
@@ -924,7 +932,28 @@ export const submitCreditPurchaseRequest = async (req, res) => {
     }
 
     const perKeyPrice = getEffectiveTenantCreditPerKeyPrice(tenant, payoutConstants);
-    const purchaseAmount = roundRupeeAmount(requestedCredits * perKeyPrice);
+    const discountConfigVersion = Number(tenant.creditPurchaseDiscountVersion || 1);
+    const submittedDiscountConfigVersion =
+      req.body.discountConfigVersion !== undefined ? Number(req.body.discountConfigVersion) : null;
+    if (
+      submittedDiscountConfigVersion !== null &&
+      (!Number.isInteger(submittedDiscountConfigVersion) || submittedDiscountConfigVersion !== discountConfigVersion)
+    ) {
+      return sendError(res, 409, "Discount configuration changed. Refresh pricing before submitting the purchase");
+    }
+
+    const pricing = calculateTenantCreditPurchasePricing({
+      requestedCredits,
+      perKeyPrice,
+      discountSlabs: getEffectiveTenantCreditDiscountSlabs(tenant)
+    });
+    const {
+      grossPurchaseAmount,
+      discountPercentage,
+      discountAmount,
+      purchaseAmount,
+      discountSlabSnapshot
+    } = pricing;
     const submittedAmount =
       req.body.purchaseAmount !== undefined
         ? parseRupeeAmount(req.body.purchaseAmount)
@@ -933,7 +962,7 @@ export const submitCreditPurchaseRequest = async (req, res) => {
           : null;
 
     if (submittedAmount !== null && submittedAmount !== purchaseAmount) {
-      return sendError(res, 400, "purchaseAmount must equal requestedCredits * perKeyPrice");
+      return sendError(res, 400, "purchaseAmount must equal the backend-calculated discounted amount");
     }
 
     const requestId = new mongoose.Types.ObjectId();
@@ -945,7 +974,12 @@ export const submitCreditPurchaseRequest = async (req, res) => {
       channelPartnerId: tenant.channelPartnerId,
       requestedCredits,
       perKeyPrice,
+      grossPurchaseAmount,
+      discountPercentage,
+      discountAmount,
       purchaseAmount,
+      discountSlabSnapshot,
+      discountConfigVersion,
       adminPaymentSnapshot: {
         upiId: payoutConstants.adminCreditPurchaseUpiId,
         upiName: payoutConstants.adminCreditPurchaseUpiName,
@@ -956,7 +990,9 @@ export const submitCreditPurchaseRequest = async (req, res) => {
       referenceNumber: req.body.referenceNumber,
       requestedBy: req.auth.id,
       metadata: {
-        amountFormula: "requestedCredits * perKeyPrice"
+        amountFormula: "grossPurchaseAmount - discountAmount",
+        grossAmountFormula: "requestedCredits * perKeyPrice",
+        discountFormula: "grossPurchaseAmount * discountPercentage / 100"
       }
     });
 
@@ -969,6 +1005,9 @@ export const submitCreditPurchaseRequest = async (req, res) => {
         creditPurchaseRequestId: creditPurchaseRequest._id,
         requestedCredits,
         perKeyPrice,
+        grossPurchaseAmount,
+        discountPercentage,
+        discountAmount,
         purchaseAmount
       }
     });

@@ -69,6 +69,19 @@ const partnerCreditLedgerSchema = new mongoose.Schema(
       type: Number,
       min: 0
     },
+    grossPurchaseAmount: {
+      type: Number,
+      min: 0
+    },
+    purchaseDiscountPercentage: {
+      type: Number,
+      min: 0,
+      max: 50
+    },
+    purchaseDiscountAmount: {
+      type: Number,
+      min: 0
+    },
     creditPercentage: {
       type: Number,
       min: 0,

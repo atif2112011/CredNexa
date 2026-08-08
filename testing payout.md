@@ -736,7 +736,7 @@ Default values:
 ```text
 defaultTenantCreditPerKeyPrice = 100
 minTenantCreditPurchase = 1
-maxTenantCreditPurchase = 500
+maxTenantCreditPurchase = 2000
 adminCreditPurchaseUpiId = test@ybl.in
 adminCreditPurchaseUpiName = Test Admin
 adminCreditPurchaseQrImageUrl = https://placehold.co/600x400

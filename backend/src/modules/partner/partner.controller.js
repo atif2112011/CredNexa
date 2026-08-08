@@ -42,6 +42,7 @@ import {
   parseRupeeAmount,
   roundRupeeAmount
 } from "../../utils/payout.js";
+import { normalizeTenantCreditDiscountSlabs } from "../../utils/tenantCreditDiscount.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 
 const getPagination = (query) => {
@@ -104,11 +105,7 @@ const getAddressValidationError = (address) => {
 };
 
 const normalizeTenantPocPayload = (payload = {}) => ({
-<<<<<<< HEAD
-  pocName: String(payload.pocName || payload.pocname ||"").trim(),
-=======
   pocName: String(payload.pocName || payload.pocname || "").trim(),
->>>>>>> b082da18f408804748c032769ee7b7ff414fad5f
   pocPhone: normalizeMobile(payload.pocPhone),
   pocDesignation: String(payload.pocDesignation || "").trim()
 });
@@ -906,6 +903,82 @@ export const getPartnerTenantById = async (req, res) => {
     }
 
     return sendSuccess(res, 200, "Partner tenant fetched successfully", tenant);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/** Replace discount percentages for a tenant owned by the authenticated partner. */
+export const updatePartnerTenantCreditPurchaseDiscounts = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    if (!isValidObjectId(req.params.tenantId)) {
+      return sendError(res, 400, "Invalid tenant ID");
+    }
+
+    let slabs;
+    try {
+      slabs = normalizeTenantCreditDiscountSlabs(req.body.slabs);
+    } catch (error) {
+      return sendError(res, 400, error.message);
+    }
+
+    const expectedVersion =
+      req.body.discountConfigVersion !== undefined ? Number(req.body.discountConfigVersion) : null;
+    if (expectedVersion !== null && (!Number.isInteger(expectedVersion) || expectedVersion < 1)) {
+      return sendError(res, 400, "discountConfigVersion must be a positive integer");
+    }
+
+    const filter = {
+      _id: req.params.tenantId,
+      channelPartnerId: channelPartner._id
+    };
+    if (expectedVersion !== null) filter.creditPurchaseDiscountVersion = expectedVersion;
+
+    const tenant = await Tenant.findOneAndUpdate(
+      filter,
+      {
+        $set: {
+          creditPurchaseDiscountSlabs: slabs,
+          creditPurchaseDiscountUpdatedAt: new Date(),
+          creditPurchaseDiscountUpdatedBy: req.auth.id
+        },
+        $inc: { creditPurchaseDiscountVersion: 1 }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!tenant) {
+      const ownedTenant = await Tenant.exists({
+        _id: req.params.tenantId,
+        channelPartnerId: channelPartner._id
+      });
+      return sendError(
+        res,
+        ownedTenant ? 409 : 404,
+        ownedTenant ? "Discount configuration changed. Refresh before saving" : "Tenant not found"
+      );
+    }
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNTS_UPDATED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      channelPartnerId: channelPartner._id,
+      metadata: {
+        source: "partner_app",
+        creditPurchaseDiscountVersion: tenant.creditPurchaseDiscountVersion,
+        slabs
+      }
+    });
+
+    return sendSuccess(res, 200, "Tenant credit purchase discounts updated successfully", {
+      tenantId: tenant._id,
+      discountConfigVersion: tenant.creditPurchaseDiscountVersion,
+      slabs: tenant.creditPurchaseDiscountSlabs
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
