@@ -4,6 +4,7 @@ import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
+import { createPartnerLead } from "./partnerLead.controller.js";
 import {
   completePartnerSignup,
   createPartnerTenant,
@@ -36,6 +37,7 @@ const requirePartnerAdmin = [
   requireRole(ACCOUNT_ROLES.PARTNER_ADMIN)
 ];
 
+partnerRoutes.post("/leads", createPartnerLead);
 partnerRoutes.post("/signup/initiate-otp", initiatePartnerSignupOtp);
 partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
 partnerRoutes.post("/signup/complete", completePartnerSignup);

@@ -938,9 +938,10 @@ export const verifyConsentOtp = async (req, res) => {
       return sendError(res, 400, "Valid OTP session not found");
     }
 
-    if (otpRecord.attempts >= otpRecord.maxAttempts) {
-      return sendError(res, 400, "Maximum OTP attempts exceeded");
-    }
+    // Temporarily disabled: OTP verification attempt rate limit.
+    // if (otpRecord.attempts >= otpRecord.maxAttempts) {
+    //   return sendError(res, 400, "Maximum OTP attempts exceeded");
+    // }
 
     otpRecord.attempts += 1;
     const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });

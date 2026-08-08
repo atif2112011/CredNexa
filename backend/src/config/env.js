@@ -29,6 +29,7 @@ export const env = {
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
   twilioVerifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
   twilioDefaultCountryCode: process.env.TWILIO_DEFAULT_COUNTRY_CODE || "+91",
+  partnerLeadWebhookUrl: process.env.PARTNER_LEAD_WEBHOOK_URL,
   deviceIntegrityMode: (process.env.DEVICE_INTEGRITY_MODE || "observe").trim().toLowerCase(),
   playIntegrityPackageName: process.env.PLAY_INTEGRITY_PACKAGE_NAME || "com.crednexa.app",
   playIntegrityChallengeTtlSeconds: Number(process.env.PLAY_INTEGRITY_CHALLENGE_TTL_SECONDS || 600),

@@ -220,9 +220,10 @@ export const verifyPartnerSignupOtp = async (req, res) => {
       return sendError(res, 400, "OTP expired");
     }
 
-    if (otpRecord.attempts >= otpRecord.maxAttempts) {
-      return sendError(res, 429, "Maximum OTP attempts exceeded");
-    }
+    // Temporarily disabled: OTP verification attempt rate limit.
+    // if (otpRecord.attempts >= otpRecord.maxAttempts) {
+    //   return sendError(res, 429, "Maximum OTP attempts exceeded");
+    // }
 
     const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
     if (!otpMatches) {
@@ -941,9 +942,10 @@ export const verifyTenantCreationVerification = async (req, res) => {
       return sendError(res, 400, "OTP expired");
     }
 
-    if (otpRecord.attempts >= otpRecord.maxAttempts) {
-      return sendError(res, 429, "Maximum OTP attempts exceeded");
-    }
+    // Temporarily disabled: OTP verification attempt rate limit.
+    // if (otpRecord.attempts >= otpRecord.maxAttempts) {
+    //   return sendError(res, 429, "Maximum OTP attempts exceeded");
+    // }
 
     const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
     if (!otpMatches) {

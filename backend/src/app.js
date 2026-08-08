@@ -37,8 +37,13 @@ const SENSITIVE_LOG_FIELDS = new Set([
   "cookie",
   "authorization",
   "otp",
+  "name",
+  "email",
+  "workemail",
+  "phone",
   "mobile",
   "mobilenumber",
+  "organization",
   "imei",
   "aadhaar",
   "aadhar",
@@ -64,8 +69,7 @@ const redactRequestBodyForLogs = (value) => {
   );
 };
 
-// morgan.token("body", (req) => JSON.stringify(redactRequestBodyForLogs(req.body)));
-morgan.token("body", (req) => JSON.stringify(req.body));
+morgan.token("body", (req) => JSON.stringify(redactRequestBodyForLogs(req.body)));
 if (env.nodeEnv !== "test") {
   app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
   app.use(morgan("Request Body: :body"));
