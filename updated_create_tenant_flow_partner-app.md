@@ -210,6 +210,7 @@ Request:
   "address": {
     "street": "20 MI Road",
     "city": "Jaipur",
+    "district": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302001"
   },
@@ -227,6 +228,7 @@ Rules:
 - `name` must match the name used in OTP initiate.
 - `tenantCreationVerificationMode` must match the mode used in OTP initiate and verify.
 - `tenantCreationVerificationSessionId` must be the verified session ID.
+- `address.district` is required.
 - `tenantAdmin.mobile` is required and becomes the tenant admin login identifier.
 - `tenantAdmin.email` is optional.
 - The verified OTP session can be used only once.

@@ -1,6 +1,45 @@
 import mongoose from "mongoose";
 
+import { DEFAULT_DEVICE_RESTRICTIONS } from "../constants/deviceRestrictions.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../constants/deviceStates.js";
+
+const deviceRestrictionValuesSchema = new mongoose.Schema(
+  {
+    dialer: { type: Boolean, default: false },
+    camera: { type: Boolean, default: false },
+    whatsapp: { type: Boolean, default: false },
+    youtube: { type: Boolean, default: false },
+    playStore: { type: Boolean, default: false }
+  },
+  { _id: false }
+);
+
+const deviceSecurityControlEntrySchema = new mongoose.Schema(
+  {
+    desiredBlocked: { type: Boolean, default: false },
+    appliedBlocked: { type: Boolean, default: false },
+    desiredVersion: { type: Number, default: 0 },
+    appliedVersion: { type: Number, default: 0 },
+    updatedAt: Date,
+    appliedAt: Date,
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Account"
+    }
+  },
+  { _id: false }
+);
+
+const locationSchema = new mongoose.Schema(
+  {
+    latitude: { type: Number, required: true },
+    longitude: { type: Number, required: true },
+    accuracyMeters: { type: Number, required: true },
+    capturedAt: { type: Date, required: true },
+    receivedAt: { type: Date, required: true }
+  },
+  { _id: false }
+);
 
 const deviceSchema = new mongoose.Schema(
   {
@@ -17,7 +56,7 @@ const deviceSchema = new mongoose.Schema(
     imei: {
       type: String,
       required: true,
-      unique: true,
+      index: true,
       trim: true
     },
     imei2: {
@@ -47,6 +86,12 @@ const deviceSchema = new mongoose.Schema(
     stateUpdatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account"
+    },
+    releaseRequestedAt: Date,
+    releasedAt: Date,
+    releaseCommandId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeviceCommand"
     },
     tempUnlockExpiresAt: Date,
     graceReminderHistory: [
@@ -88,6 +133,48 @@ const deviceSchema = new mongoose.Schema(
     lastSyncAt: Date,
     batteryLevel: Number,
     networkType: String,
+    lastLocation: {
+      type: locationSchema,
+      default: null
+    },
+    restrictionState: {
+      desired: {
+        type: deviceRestrictionValuesSchema,
+        default: () => ({ ...DEFAULT_DEVICE_RESTRICTIONS })
+      },
+      applied: {
+        type: deviceRestrictionValuesSchema,
+        default: () => ({ ...DEFAULT_DEVICE_RESTRICTIONS })
+      },
+      desiredVersion: {
+        type: Number,
+        default: 0
+      },
+      appliedVersion: {
+        type: Number,
+        default: 0
+      },
+      updatedAt: Date,
+      appliedAt: Date,
+      updatedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Account"
+      }
+    },
+    securityControlState: {
+      factoryReset: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
+      },
+      usbDebugging: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
+      },
+      unknownAppInstalls: {
+        type: deviceSecurityControlEntrySchema,
+        default: () => ({})
+      }
+    },
     isOnline: {
       type: Boolean,
       default: false
@@ -100,6 +187,34 @@ const deviceSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    deviceOwnerStatus: {
+      type: String,
+      enum: ["CONFIRMED", "UNKNOWN", "LOST", "RELEASED"],
+      default: "UNKNOWN"
+    },
+    deviceSecurityState: {
+      type: String,
+      enum: ["HEALTHY", "WARNING", "LOCKED", "REMEDIATION", "COMPROMISED_PERMANENT", "WIPED_PENDING_REPROVISION"],
+      default: "HEALTHY"
+    },
+    lastIntegrityCheckAt: Date,
+    lastCleanIntegrityAt: Date,
+    lastRiskAt: Date,
+    integrityStaleAfter: Date,
+    autoWipeEnabled: {
+      type: Boolean,
+      default: false
+    },
+    destructiveEnforcementEnabled: {
+      type: Boolean,
+      default: false
+    },
+    currentRiskIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "RiskFlag"
+      }
+    ],
     simChangedAt: Date
   },
   { timestamps: true }

@@ -1,5 +1,5 @@
 import { CommandFilters } from "@/components/commands/command-filters";
-import { ResourceTable } from "@/components/data/resource-table";
+import { CommandsTable } from "@/components/commands/commands-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getList } from "@/services/admin";
 
@@ -28,24 +28,10 @@ export default async function CommandsPage({ searchParams }: CommandsPageProps) 
     <>
       <PageHeader
         title="Commands Triggered"
-        description="Track lock, unlock, temporary unlock, FCM delivery, and device acknowledgements."
+        description="Track device commands and select any row to view its delivery and acknowledgement details."
         actions={<CommandFilters />}
       />
-      <ResourceTable
-        rows={data.items}
-        columns={[
-          { key: "commandType", header: "Command", type: "status" },
-          { key: "status", header: "Status", type: "status" },
-          { key: "triggeredBy", header: "Triggered By", type: "status" },
-          { key: "tenantId.name", header: "Tenant", className: "max-w-48 truncate" },
-          { key: "deviceId.imei", header: "IMEI", className: "max-w-40 truncate" },
-          { key: "deviceId.state", header: "Device State", type: "status" },
-          { key: "triggeredByAccountId.name", header: "Actor", className: "max-w-40 truncate" },
-          { key: "sentAt", header: "Sent", type: "date" },
-          { key: "acknowledgedAt", header: "Acknowledged", type: "date" },
-          { key: "createdAt", header: "Created", type: "date" }
-        ]}
-      />
+      <CommandsTable rows={data.items} />
     </>
   );
 }

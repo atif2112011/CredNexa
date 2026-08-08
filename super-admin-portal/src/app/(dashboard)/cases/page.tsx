@@ -8,9 +8,9 @@ type CasesPageProps = {
 };
 
 const filterLabels: Record<string, string> = {
-  all: "All cases",
-  ESCALATED_PARTNER: "Cases escalated to partners",
-  ESCALATED_ADMIN: "Cases escalated to admin"
+  all: "All temporary unlock requests",
+  ESCALATED_PARTNER: "Requests escalated to partners",
+  ESCALATED_ADMIN: "Requests escalated to admin"
 };
 
 export default async function CasesPage({ searchParams }: CasesPageProps) {
@@ -20,8 +20,8 @@ export default async function CasesPage({ searchParams }: CasesPageProps) {
   return (
     <>
       <PageHeader
-        title="Cases"
-        description={filterLabels[status] || "All cases"}
+        title="Temp Unlock Requests"
+        description={filterLabels[status] || "All temporary unlock requests"}
         actions={<CaseFilter />}
       />
       <CasesTable rows={data.items} />

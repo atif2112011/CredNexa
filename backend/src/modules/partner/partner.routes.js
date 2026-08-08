@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
+import { otpRateLimiter } from "../../middleware/rateLimiters.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
@@ -20,6 +21,8 @@ import {
   listPartnerEscalations,
   listPartnerPayoutRequests,
   rejectPartnerEscalation,
+  resendPartnerSignupOtp,
+  resendTenantCreationVerification,
   requestPartnerPayout,
   tempUnlockPartnerEscalation,
   unlockPartnerEscalation,
@@ -37,17 +40,24 @@ const requirePartnerAdmin = [
   requireRole(ACCOUNT_ROLES.PARTNER_ADMIN)
 ];
 
+<<<<<<< HEAD
 partnerRoutes.post("/leads", createPartnerLead);
 partnerRoutes.post("/signup/initiate-otp", initiatePartnerSignupOtp);
 partnerRoutes.post("/signup/verify-otp", verifyPartnerSignupOtp);
+=======
+partnerRoutes.post("/signup/initiate-otp", otpRateLimiter, initiatePartnerSignupOtp);
+partnerRoutes.post("/signup/resend-otp", otpRateLimiter, resendPartnerSignupOtp);
+partnerRoutes.post("/signup/verify-otp", otpRateLimiter, verifyPartnerSignupOtp);
+>>>>>>> b082da18f408804748c032769ee7b7ff414fad5f
 partnerRoutes.post("/signup/complete", completePartnerSignup);
 
 partnerRoutes.get("/dashboard", ...requirePartnerAdmin, getPartnerDashboard);
 partnerRoutes.get("/payout/summary", ...requirePartnerAdmin, getPartnerPayoutSummary);
 partnerRoutes.get("/payout/requests", ...requirePartnerAdmin, listPartnerPayoutRequests);
 partnerRoutes.post("/payout/requests", ...requirePartnerAdmin, requestPartnerPayout);
-partnerRoutes.post("/tenants/initiate-verification", ...requirePartnerAdmin, initiateTenantCreationVerification);
-partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, verifyTenantCreationVerification);
+partnerRoutes.post("/tenants/initiate-verification", ...requirePartnerAdmin, otpRateLimiter, initiateTenantCreationVerification);
+partnerRoutes.post("/tenants/resend-verification", ...requirePartnerAdmin, otpRateLimiter, resendTenantCreationVerification);
+partnerRoutes.post("/tenants/verify-verification", ...requirePartnerAdmin, otpRateLimiter, verifyTenantCreationVerification);
 partnerRoutes.get("/tenants", ...requirePartnerAdmin, getPartnerTenants);
 partnerRoutes.get("/tenants/:tenantId", ...requirePartnerAdmin, getPartnerTenantById);
 partnerRoutes.post("/tenants", ...requirePartnerAdmin, createPartnerTenant);

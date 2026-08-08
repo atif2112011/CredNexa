@@ -11,9 +11,10 @@ Mobile Number                 already OTP verified(show as a view only field wit
 Email                         optional
 Password                      required
 Confirm Password              required, validation only
-City                          optional
-State                         optional
-Address                       optional
+City                          required
+District                      required
+State                         required
+Address                       required
 ```
 
 ## UI Guidance
@@ -32,9 +33,10 @@ email             -> ChannelPartner.contactEmail and Account.email
 password          -> Account.passwordHash
 confirmPassword   -> validation only, not stored
 city              -> ChannelPartner.address.city
+district          -> ChannelPartner.address.district
 state             -> ChannelPartner.address.state
 address           -> ChannelPartner.address.street
-pincode           -> ChannelPartner.address.pincode, if collected later
+pincode           -> ChannelPartner.address.pincode
 ```
 
 ## API Support
@@ -45,13 +47,14 @@ Endpoint:
 POST /api/partner/signup/complete?createAccount=true
 ```
 
-The API accepts optional `address` using the same format as tenant address:
+The API requires `address` using the same format as tenant address:
 
 ```json
 {
   "address": {
     "street": "Shop 12, Main Road",
     "city": "Pune",
+    "district": "Pune",
     "state": "Maharashtra",
     "pincode": "411001"
   }
@@ -63,6 +66,7 @@ For the app form, map:
 ```text
 Address -> address.street
 City    -> address.city
+District -> address.district
 State   -> address.state
 ```
 

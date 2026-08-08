@@ -1,16 +1,23 @@
 {
   "name": "emi-shield-backend",
   "version": "0.1.0",
-  "description": "Node.js, Express, and Mongoose API server for EMI Shield.",
+  "description": "Firebase Functions, Express, and Mongoose backend for EMI Shield.",
   "type": "module",
-  "main": "src/server.js",
+  "main": "index.js",
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "lint": "eslint src --ext .js",
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions",
+    "lint": "eslint . --ext .js",
+    "test": "node --test",
     "worker:fcm": "node src/jobs/fcmDeliveryWorker.js",
     "jobs:scheduled": "node src/jobs/scheduledJobs.js",
-    "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js"
+    "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js",
+    "migrate:risk-auto-lock-types": "node src/scripts/migrateRiskAutoLockTypes.js",
+    "migrate:partner-tenant-onboarding": "node src/scripts/backfillPartnerTenantOnboarding.js",
+    "cleanup:security-control-commands": "node src/scripts/cleanupSecurityControlCommands.js",
+    "backfill:tenant-poc": "node src/scripts/backfillTenantPoc.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -18,17 +25,19 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.6.0",
     "firebase": "^12.14.0",
     "firebase-admin": "^13.10.0",
+    "firebase-functions": "^6.6.0",
     "googleapis": "^173.0.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
+    "nodemailer": "^9.0.3",
     "qrcode": "^1.5.4",
-    "sharp": "^0.35.2",
-    "twilio": "^6.0.2"
+    "sharp": "^0.35.2"
   },
   "devDependencies": {
     "eslint": "^9.18.0",

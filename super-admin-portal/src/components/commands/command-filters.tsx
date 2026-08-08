@@ -11,7 +11,8 @@ const filterSets = [
       ["Pending", "pending"],
       ["Sent", "sent"],
       ["Acknowledged", "acknowledged"],
-      ["Failed", "failed"]
+      ["Failed", "failed"],
+      ["Expired", "expired"]
     ]
   },
   {
@@ -21,7 +22,11 @@ const filterSets = [
       ["All", "all"],
       ["Lock", "LOCK"],
       ["Unlock", "UNLOCK"],
-      ["Temp unlock", "TEMP_UNLOCK"]
+      ["Temp unlock", "TEMP_UNLOCK"],
+      ["Factory reset control", "SET_FACTORY_RESET_BLOCKED"],
+      ["USB debugging control", "SET_USB_DEBUGGING_BLOCKED"],
+      ["Unknown app install control", "SET_UNKNOWN_APP_INSTALL_BLOCKED"],
+      ["Get location", "GET_LOCATION"]
     ]
   },
   {

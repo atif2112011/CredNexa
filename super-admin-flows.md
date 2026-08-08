@@ -436,7 +436,7 @@ GET /admin/devices/:deviceId
 Authorization: Bearer <superAdminToken>
 ```
 
-**Response includes:** device identifiers, borrower and tenant summary, current policy, consent status, EMI overdue summary, unlock requests, latest command status, and risk flags.
+**Response includes:** device identifiers, borrower and tenant summary, current policy, consent status, EMI schedule status, `settlementTime`, completed/total installment counts, release eligibility, latest release command, unlock requests, and risk flags.
 
 ### Step SA-11.3 — View Device Command History
 
@@ -452,4 +452,15 @@ GET /admin/devices/:deviceId/audit-logs
 Authorization: Bearer <superAdminToken>
 ```
 
-**Rule:** Device oversight is read-heavy. Super Admin does not use this flow for casual lock/unlock. Unlock actions go through Flow SA-8 when a case is escalated.
+### Step SA-11.5 — Retry Settled Device Release
+
+```http
+POST /admin/devices/:deviceId/release
+Authorization: Bearer <superAdminToken>
+```
+
+The device page shows **Release Device** only when the schedule is settled and the device is not released. An active release command disables the button as **Release pending**; a failed or expired command changes it to **Retry Release**.
+
+The backend revalidates that every installment is `paid` or `waived`, rejects duplicate active commands, queues `RELEASE_DEVICE`, and writes an audit entry. This is a recovery action, not a second settlement approval.
+
+**Rule:** Device oversight is read-heavy. Casual lock/unlock actions still use their existing governed flows; permanent release retry is allowed only for a settled schedule.

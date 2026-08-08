@@ -1,6 +1,18 @@
 # EMI Shield Backend
 
-Node.js, Express, and Mongoose API server scaffold.
+Firebase Functions repo for the EMI Shield backend. The existing Express API is exported as a single HTTP function, and each cron is exported as its own scheduled function.
+
+## Functions Exposed
+
+- `api`: wraps the Express app and exposes all existing `/api/*` routes plus `/`.
+- `fcmDeliveryJob`: every minute.
+- `tempUnlockExpiryJob`: every 10 minutes.
+- `slaEscalationJob`: every 30 minutes.
+- `emiPolicyJob`: every 30 minutes.
+- `manualOverrideTokenRenewalJob`: daily at `00:00` in `FIREBASE_SCHEDULER_TIME_ZONE`.
+- `tenantMetricsReconciliationJob`: daily at `01:00` in `FIREBASE_SCHEDULER_TIME_ZONE`.
+
+The root Express middleware in `src/app.js` still connects to MongoDB before every request, so all HTTP-triggered Firebase API calls keep the same DB bootstrapping behavior.
 
 ## Setup
 
@@ -16,17 +28,37 @@ npm install
 cp .env.example .env
 ```
 
-3. Start the development server:
+Use `APP_PORT`, `APP_FIREBASE_*`, `ADMIN_FIREBASE_*`, `FUNCTIONS_REGION`, and `SCHEDULER_TIME_ZONE` variable names in `.env`. Firebase Functions rejects `.env` keys named `PORT` or starting with the reserved `FIREBASE_` prefix during deploy.
+
+3. Select a Firebase project:
+
+```bash
+firebase use <project-id>
+```
+
+4. Run the local Functions emulator:
+
+```bash
+npm run serve
+```
+
+5. For standalone Express development, you can still run:
 
 ```bash
 npm run dev
 ```
 
-The API mounts routes under `/api`.
+## Deploy
+
+```bash
+npm run deploy
+```
 
 ## Current Structure
 
 ```text
+index.js
+firebase.json
 src/
   app.js
   server.js
@@ -38,15 +70,6 @@ src/
   routes/
   utils/
 ```
-
-Controllers use the response shape from `instructions.md`:
-
-```js
-{ success: true, message: "", data }
-{ success: false, error: "" }
-```
-
-Module controllers contain endpoint logic directly. Keep shared cross-cutting behavior in middleware, utilities, or models.
 
 ## Auth Token Flow
 

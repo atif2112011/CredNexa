@@ -212,6 +212,9 @@ If neither service-account option is set and `FCM_MOCK_MODE=false`, Firebase Adm
 | `GRACE_PERIOD_REMINDER` | Borrower App | `DeviceCommand` `NOTIFICATION` | `runEmiPolicyJob` | FCM delivery cron | none |
 | `UPCOMING_PAYMENT` | Borrower App | `DeviceCommand` `UPCOMING_PAYMENT` | `POST /api/tenant/devices/:id/upcoming-payment-reminder` | FCM delivery cron | `DEVICE_COMMAND_CREATED` |
 | `OVERDUE_EMI_REMINDER` | Borrower App | `DeviceCommand` `NOTIFICATION` | `POST /api/tenant/users/:userId/overdue-emi-reminder` or bulk reminder API | FCM delivery cron | `DEVICE_COMMAND_CREATED` |
+| `PAYMENT_APPROVED` | Borrower App | `DeviceCommand` `NOTIFICATION` | `POST /api/tenant/payments/:paymentId/approve` | FCM delivery cron | `PAYMENT_APPROVED`, `UNLOCK_TRIGGERED` |
+| `PAYMENT_REJECTED` | Borrower App | `DeviceCommand` `NOTIFICATION` | `POST /api/tenant/payments/:paymentId/reject` | FCM delivery cron | `PAYMENT_REJECTED` |
+| `PAYMENT_SUBMITTED` | Tenant App | `AppNotificationJob` | Borrower submits a payment approval request | FCM delivery cron | `PAYMENT_SUBMITTED` |
 | `UNLOCK_REQUEST_CREATED` | Tenant App | `AppNotificationJob` | Borrower creates unlock request | FCM delivery cron | `UNLOCK_REQUEST_CREATED` |
 | `UNLOCK_REQUEST_ESCALATED_TO_PARTNER` | Tenant App | `AppNotificationJob` | SLA escalation job | FCM delivery cron | `SLA_BREACHED` |
 | `UNLOCK_REQUEST_ESCALATED_TO_PARTNER` | Partner App | `AppNotificationJob` | SLA escalation job | FCM delivery cron | `SLA_BREACHED` |
@@ -450,6 +453,108 @@ Audit:
 DEVICE_COMMAND_CREATED
 ```
 
+### `PAYMENT_APPROVED`
+
+Created by tenant API:
+
+```text
+POST /api/tenant/payments/:paymentId/approve
+```
+
+When:
+
+- Tenant admin approves a pending borrower QR payment.
+- The payment is applied to the EMI schedule.
+- The backend queues `UNLOCK` when installments remain, or `RELEASE_DEVICE` when the payment settles every installment.
+
+Queue:
+
+```text
+DeviceCommand.commandType = "NOTIFICATION"
+DeviceCommand.payload.notificationType = "PAYMENT_APPROVED"
+DeviceCommand.triggeredBy = "manual_tenant"
+```
+
+Payload fields:
+
+```text
+paymentId
+deviceId
+userId
+matchedInstallments
+commandId
+commandType
+releaseQueued
+```
+
+Current title/text:
+
+```text
+Regular payment:
+Payment approved / Your payment has been approved and your device unlock is being processed.
+
+Final EMI:
+All EMIs completed / All your EMIs are complete and your device release is being processed.
+```
+
+Delivery:
+
+- Visible borrower notification.
+- Delivered by `fcmDeliveryJob`.
+
+Audit:
+
+```text
+PAYMENT_APPROVED
+UNLOCK_TRIGGERED
+```
+
+### `PAYMENT_REJECTED`
+
+Created by tenant API:
+
+```text
+POST /api/tenant/payments/:paymentId/reject
+```
+
+When:
+
+- Tenant admin rejects a pending borrower QR payment.
+
+Queue:
+
+```text
+DeviceCommand.commandType = "NOTIFICATION"
+DeviceCommand.payload.notificationType = "PAYMENT_REJECTED"
+DeviceCommand.triggeredBy = "manual_tenant"
+```
+
+Payload fields:
+
+```text
+paymentId
+deviceId
+userId
+rejectionReason
+```
+
+Current title/text:
+
+```text
+Payment rejected / Your payment was rejected. Please review the reason and submit again if needed.
+```
+
+Delivery:
+
+- Visible borrower notification.
+- Delivered by `fcmDeliveryJob`.
+
+Audit:
+
+```text
+PAYMENT_REJECTED
+```
+
 ### `UNLOCK_REQUEST_CREATED`
 
 Created by borrower API:
@@ -461,6 +566,7 @@ POST /api/app/unlock-request
 When:
 
 - Borrower creates an unlock request.
+- This also covers temporary unlock requests submitted from the borrower app by using `reasonCategory: "temporary_emergency"`.
 - Tenant admins for the borrower tenant have active tenant-app push tokens.
 
 Queue:
@@ -486,6 +592,49 @@ Audit:
 
 ```text
 UNLOCK_REQUEST_CREATED
+```
+
+### `PAYMENT_SUBMITTED`
+
+Created by borrower API:
+
+```text
+POST /api/app/payment/submit
+```
+
+When:
+
+- Borrower submits a payment proof request for tenant approval.
+- Tenant admins for the borrower tenant have active tenant-app push tokens.
+
+Queue:
+
+```text
+AppNotificationJob.targetApp = "tenant_app"
+AppNotificationJob.notificationType = "PAYMENT_SUBMITTED"
+```
+
+Payload fields:
+
+```text
+paymentId
+tenantId
+userId
+deviceId
+amount
+reference
+```
+
+Current title/text:
+
+```text
+New payment approval request / A borrower payment has been submitted for review.
+```
+
+Audit:
+
+```text
+PAYMENT_SUBMITTED
 ```
 
 ### `UNLOCK_REQUEST_ESCALATED_TO_PARTNER`

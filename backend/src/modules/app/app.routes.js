@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { verifyJwt } from "../../middleware/verifyJwt.js";
+import { otpRateLimiter } from "../../middleware/rateLimiters.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
 import { parsePaymentProofUpload, parseUnlockRequestImageUpload } from "../../middleware/parsePaymentProofUpload.js";
 import {
@@ -9,6 +10,7 @@ import {
   checkAppUpdate,
   createUnlockRequest,
   createIntegrityChallenge,
+  createRiskIntegrityChallenge,
   getActiveUnlockRequest,
   getAppDashboard,
   getConsentTerms,
@@ -18,6 +20,7 @@ import {
   getPaymentDetail,
   getPaymentHistory,
   getPaymentQr,
+  getCompanySupportContact,
   getTenantUtility,
   listBorrowerUnlockRequests,
   generateTestUserAccessToken,
@@ -25,9 +28,11 @@ import {
   pingDevice,
   reportSecurityEvent,
   refreshUserAccessToken,
+  resendConsentOtp,
   submitPayment,
   syncDevice,
   verifyIntegrity,
+  verifyRiskIntegrity,
   verifyConsentOtp,
   registerDevice
 } from "./app.controller.js";
@@ -38,11 +43,16 @@ appRoutes.post("/testing/access-token", generateTestUserAccessToken);
 appRoutes.post("/refresh-token", refreshUserAccessToken);
 appRoutes.get("/update/check", checkAppUpdate);
 appRoutes.post("/update/check", checkAppUpdate);
+appRoutes.get("/support-contact", getCompanySupportContact);
 appRoutes.get("/consent/terms", getConsentTerms);
-appRoutes.post("/consent/initiate", initiateConsentOtp);
-appRoutes.post("/consent/verify-otp", verifyConsentOtp);
+appRoutes.post("/consent/terms", getConsentTerms);
+appRoutes.post("/consent/initiate", otpRateLimiter, initiateConsentOtp);
+appRoutes.post("/consent/resend-otp", otpRateLimiter, resendConsentOtp);
+appRoutes.post("/consent/verify-otp", otpRateLimiter, verifyConsentOtp);
 appRoutes.post("/integrity/challenge", verifyJwt, requireTokenType("user"), createIntegrityChallenge);
 appRoutes.post("/integrity/verify", verifyJwt, requireTokenType("user"), verifyIntegrity);
+appRoutes.post("/integrity/risk/challenge", verifyJwt, requireTokenType("user"), createRiskIntegrityChallenge);
+appRoutes.post("/integrity/risk/verify", verifyJwt, requireTokenType("user"), verifyRiskIntegrity);
 appRoutes.post("/consent/accept", verifyJwt, requireTokenType("user"), acceptConsent);
 
 appRoutes.post("/device/register", verifyJwt, requireTokenType("user"), registerDevice);

@@ -4,11 +4,16 @@ import mongoose from "mongoose";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { DEFAULT_DEVICE_POLICIES, DEFAULT_TENANT_POLICY } from "../../constants/defaultPolicies.js";
+import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
+import {
+  DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES, TENANT_TYPES } from "../../constants/tenant.js";
 import { Account } from "../../models/Account.js";
-import { APP_BUILD_STATUSES, AppBuild } from "../../models/AppBuild.js";
+import { APP_BUILD_CHANNELS, APP_BUILD_PLATFORMS, APP_BUILD_STATUSES, APP_BUILD_TYPES, AppBuild } from "../../models/AppBuild.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ChannelPartner } from "../../models/ChannelPartner.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
@@ -17,6 +22,7 @@ import { DeviceCommand } from "../../models/DeviceCommand.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
 import { EmiSchedule } from "../../models/EmiSchedule.js";
 import { FcmDeliveryLog } from "../../models/FcmDeliveryLog.js";
+import { IntegrityCheck } from "../../models/IntegrityCheck.js";
 import { MANUAL_OVERRIDE_TOKEN_STATUSES, ManualOverrideToken } from "../../models/ManualOverrideToken.js";
 import {
   PARTNER_CREDIT_BALANCE_TYPES,
@@ -25,7 +31,7 @@ import {
 } from "../../models/PartnerCreditLedger.js";
 import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/PartnerPayoutRequest.js";
 import { PayoutConstants } from "../../models/PayoutConstants.js";
-import { RiskFlag } from "../../models/RiskFlag.js";
+import { INACTIVE_RISK_FLAG_STATUSES, RISK_FLAG_STATUSES, RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
 import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
@@ -34,20 +40,63 @@ import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import {
+  BORROWER_ANDROID_PACKAGE_NAME,
   publishBuild,
   uploadBuildApk,
   validateAppBuildIdentity,
   validateBuildPayload
 } from "../../services/appUpdate.service.js";
 import {
+  AppBuildUploadError,
+  completeDirectBuildUploadSession,
+  createDirectBuildUploadSession
+} from "../../services/appBuildDirectUpload.service.js";
+import {
+  getOrCreateCompanySupportContact,
+  validateCompanySupportContactPayload
+} from "../../services/companySupportContact.service.js";
+import {
+  queueDeviceRestrictionUpdate,
+  validateDeviceRestrictionUpdate
+} from "../../services/deviceRestrictions.service.js";
+import {
+  buildSecurityControlConfirmations,
+  formatLatestSecurityControlCommands,
+  queueDeviceSecurityControlUpdate,
+  validateDeviceSecurityControlUpdate
+} from "../../services/deviceSecurityControls.service.js";
+import {
+  getDeviceReleaseSummary,
+  queueDeviceRelease,
+  RELEASE_COMMAND_TYPE
+} from "../../services/deviceRelease.service.js";
+import {
+  GET_LOCATION_COMMAND_TYPE,
+  queueGetLocationCommand
+} from "../../services/deviceLocation.service.js";
+import {
   backfillManualOverrideTokens,
   generateManualOverrideTokenForDevice,
   renewExpiringManualOverrideTokens
 } from "../../services/manualOverrideToken.service.js";
+import {
+  getActiveCriticalRiskFlagsForDevice,
+  getActiveRiskFilter
+} from "../../services/riskManagement.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import {
+  DEFAULT_TENANT_ONBOARDING_LIMIT,
+  enforcePartnerTenantOnboarding,
+  isValidPincode,
+  isValidTenantOnboardingLimit,
+  PartnerTenantOnboardingError
+} from "../../services/partnerTenantOnboarding.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
-import { runFcmDeliveryBatch } from "../../jobs/fcmDeliveryWorker.js";
+import {
+  deliverDeviceCommandImmediately,
+  runFcmDeliveryBatch
+} from "../../jobs/fcmDeliveryWorker.js";
 import {
   NOTIFICATION_AUDIENCES,
   queuePartnerAppNotification,
@@ -77,6 +126,25 @@ const buildPagination = (page, limit, total) => ({
   pages: Math.ceil(total / limit)
 });
 
+const getDateRangeFilter = (query) => {
+  if (!query.from && !query.to) return { value: undefined };
+
+  const from = query.from ? new Date(query.from) : null;
+  const to = query.to ? new Date(query.to) : null;
+  if (to && /^\d{4}-\d{2}-\d{2}$/.test(String(query.to))) to.setUTCHours(23, 59, 59, 999);
+  if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+    return { error: "from and to must be valid dates" };
+  }
+  if (from && to && from > to) return { error: "from must be earlier than or equal to to" };
+
+  return {
+    value: {
+      ...(from ? { $gte: from } : {}),
+      ...(to ? { $lte: to } : {})
+    }
+  };
+};
+
 const buildRegex = (value) => new RegExp(String(value).trim(), "i");
 
 const escapeRegex = (value) => String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -86,8 +154,19 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
 const parseBoolean = (value) => value === true || isTruthyQueryParam(value);
-const normalizeMobile = (mobile) => String(mobile || "").trim();
+const normalizeMobile = (mobile) => {
+  const digits = String(mobile || "").trim().replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  return digits;
+};
 const isValidIndianMobile = (mobile) => /^\d{10}$/.test(normalizeMobile(mobile));
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+const isValidEmail = (email) => !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const isValidPassword = (password) => {
+  const value = String(password || "");
+  return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
+};
 
 const normalizeAddressPayload = (payload = {}) => {
   const addressInput = payload.address && typeof payload.address === "object" && !Array.isArray(payload.address) ? payload.address : {};
@@ -95,6 +174,7 @@ const normalizeAddressPayload = (payload = {}) => {
   return {
     street: String(addressInput.street || payload.street || payload.address || "").trim(),
     city: String(addressInput.city || payload.city || "").trim(),
+    district: String(addressInput.district || payload.district || "").trim(),
     state: String(addressInput.state || payload.state || "").trim(),
     pincode: String(addressInput.pincode || payload.pincode || "").trim()
   };
@@ -103,8 +183,10 @@ const normalizeAddressPayload = (payload = {}) => {
 const getAddressValidationError = (address) => {
   if (!address.street) return "address.street is required";
   if (!address.city) return "address.city is required";
+  if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
+  if (!isValidPincode(address.pincode)) return "address.pincode must be a valid 6 digit pincode";
   return null;
 };
 
@@ -113,6 +195,25 @@ const normalizeTenantPocPayload = (payload = {}) => ({
   pocPhone: normalizeMobile(payload.pocPhone),
   pocDesignation: String(payload.pocDesignation || "").trim()
 });
+
+const WIPE_ELIGIBLE_RISK_TYPES = new Set([
+  "DEVICE_INTEGRITY_COMPROMISED",
+  "ROOT_DETECTED",
+  "TAMPER_DETECTED",
+  "SYSTEM_TAMPER_DETECTED",
+  "CUSTOM_ROM_DETECTED",
+  "BOOTLOADER_UNLOCKED"
+]);
+
+const isRiskFlagWipeEligible = (riskFlag) => {
+  const riskType = riskFlag?.riskType || riskFlag?.type;
+  return (
+    riskFlag?.severity === "critical" &&
+    (riskFlag?.riskBucket === "device_compromise" ||
+      riskFlag?.status === RISK_FLAG_STATUSES.COMPROMISED_PERMANENT ||
+      WIPE_ELIGIBLE_RISK_TYPES.has(riskType))
+  );
+};
 
 const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
   if (!pocName) return "pocName is required";
@@ -296,7 +397,7 @@ const getTenantDetailData = async (tenantId) => {
       Tenant.findById(tenantId).populate("channelPartnerId", "name type").lean(),
       TenantPolicy.findOne({ tenantId }).lean(),
       DevicePolicy.find({ tenantId }).sort({ policyKey: 1 }).lean(),
-      Account.find({ tenantId }).select("-passwordHash").lean(),
+      Account.find({ tenantId }).select("-passwordHash").sort({ createdAt: -1, _id: -1 }).lean(),
       Device.aggregate([
         { $match: { tenantId: new mongoose.Types.ObjectId(tenantId) } },
         { $group: { _id: "$state", count: { $sum: 1 } } }
@@ -304,8 +405,8 @@ const getTenantDetailData = async (tenantId) => {
       UnlockRequest.find({
         tenantId,
         status: { $in: ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"] }
-      }).lean(),
-      RiskFlag.find({ tenantId, status: { $ne: "resolved" } }).lean()
+      }).sort({ createdAt: -1, _id: -1 }).lean(),
+      RiskFlag.find(getActiveRiskFilter({ tenantId })).sort({ createdAt: -1, _id: -1 }).lean()
     ]);
 
   return {
@@ -370,7 +471,17 @@ const applyEscalationDeviceCommand = async ({
   return { device, command: command[0] };
 };
 
-const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetState, policyKey, reason, durationHours, session }) => {
+const queueAdminDeviceCommand = async ({
+  device,
+  accountId,
+  commandType,
+  targetState,
+  policyKey,
+  reason,
+  durationHours,
+  extraPayload = {},
+  session
+}) => {
   const activePolicy = await DevicePolicy.findOne({
     tenantId: device.tenantId,
     policyKey,
@@ -416,7 +527,8 @@ const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetS
           reason,
           durationHours,
           policyKey,
-          policyVersion: nextPolicyVersion
+          policyVersion: nextPolicyVersion,
+          ...extraPayload
         }
       }
     ],
@@ -424,6 +536,24 @@ const queueAdminDeviceCommand = async ({ device, accountId, commandType, targetS
   );
 
   return { device: updatedDevice, command: command[0] };
+};
+
+const buildRiskWarningPayload = async (deviceId) => {
+  const activeCriticalRiskFlags = await getActiveCriticalRiskFlagsForDevice(deviceId);
+
+  return {
+    activeCriticalRiskFlags,
+    riskWarning: activeCriticalRiskFlags.length
+      ? {
+          hasActiveCriticalRisk: true,
+          riskFlagIds: activeCriticalRiskFlags.map((flag) => flag._id),
+          message: "Active critical security risks exist. Admin override is allowed, but the risk is not cleared."
+        }
+      : {
+          hasActiveCriticalRisk: false,
+          riskFlagIds: []
+        }
+  };
 };
 
 const resolveAllUnpaidInstallments = async ({ userId, tenantId, accountId, reason, emiAction, session }) => {
@@ -523,7 +653,7 @@ export const getAdminDashboard = async (req, res) => {
         .sort({ updatedAt: -1 })
         .limit(8)
         .lean(),
-      RiskFlag.find({ status: { $ne: "resolved" } }).sort({ createdAt: -1 }).limit(8).lean(),
+      RiskFlag.find(getActiveRiskFilter()).sort({ createdAt: -1 }).limit(8).lean(),
       AuditLog.find({}).sort({ timestamp: -1 }).limit(10).lean()
     ]);
 
@@ -570,7 +700,7 @@ export const listChannelPartners = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      ChannelPartner.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      ChannelPartner.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       ChannelPartner.countDocuments(filter)
     ]);
 
@@ -588,13 +718,40 @@ export const listChannelPartners = async (req, res) => {
  * Sample body: { "name": "Bharat Finance Group", "type": "nbfc_group", "contactEmail": "ops@bharatfinance.in", "contactPhone": "9800000001" }
  */
 export const createChannelPartner = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
-    if (!hasRequiredFields(req.body, ["name", "type"])) {
-      return sendError(res, 400, "Name and type are required");
+    const contactPhone = normalizeMobile(req.body.contactPhone);
+    const contactEmail = normalizeEmail(req.body.contactEmail);
+    const temporaryPassword = req.body.temporaryPassword || createTemporaryPassword();
+
+    if (!hasRequiredFields({ ...req.body, contactPhone }, ["name", "type", "contactPhone"])) {
+      return sendError(res, 400, "Name, type, and contactPhone are required");
+    }
+
+    if (!isValidIndianMobile(contactPhone)) {
+      return sendError(res, 400, "contactPhone must be a valid 10 digit mobile number");
+    }
+
+    if (!isValidEmail(contactEmail)) {
+      return sendError(res, 400, "contactEmail must be a valid email address");
+    }
+
+    if (req.body.temporaryPassword && !isValidPassword(req.body.temporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     if (req.body.creditPercentage !== undefined && !isValidPercentage(req.body.creditPercentage)) {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
+    }
+
+    const pincodeRestrictionEnabled = req.body.pincodeRestrictionEnabled ?? true;
+    const tenantOnboardingLimit = req.body.tenantOnboardingLimit ?? DEFAULT_TENANT_ONBOARDING_LIMIT;
+    if (typeof pincodeRestrictionEnabled !== "boolean") {
+      return sendError(res, 400, "pincodeRestrictionEnabled must be a boolean");
+    }
+    if (!isValidTenantOnboardingLimit(tenantOnboardingLimit)) {
+      return sendError(res, 400, "tenantOnboardingLimit must be a positive integer");
     }
 
     const address = normalizeAddressPayload(req.body);
@@ -603,22 +760,104 @@ export const createChannelPartner = async (req, res) => {
       return sendError(res, 400, addressError);
     }
 
-    const channelPartner = await ChannelPartner.create({
-      ...req.body,
-      address,
-      createdBy: req.auth.id
-    });
+    const duplicateFilters = [
+      { mobile: contactPhone, role: ACCOUNT_ROLES.PARTNER_ADMIN },
+      ...(contactEmail ? [{ email: contactEmail }] : [])
+    ];
+    const [existingAccount, existingPartner] = await Promise.all([
+      Account.findOne({ $or: duplicateFilters }).lean(),
+      ChannelPartner.findOne({ contactPhone }).lean()
+    ]);
 
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.CHANNEL_PARTNER_CREATED,
-      actorId: req.auth.id,
-      channelPartnerId: channelPartner._id,
-      metadata: { name: channelPartner.name, type: channelPartner.type }
-    });
+    if (existingPartner || existingAccount?.mobile === contactPhone) {
+      return sendError(res, 400, "Phone number is already used");
+    }
+    if (contactEmail && existingAccount?.email === contactEmail) {
+      return sendError(res, 400, "Account with this email already exists");
+    }
 
-    return sendSuccess(res, 201, "Channel partner created successfully", channelPartner);
+    session.startTransaction();
+
+    const partnerDocuments = await ChannelPartner.create(
+      [
+        {
+          name: req.body.name,
+          type: req.body.type,
+          contactPhone,
+          ...(contactEmail ? { contactEmail } : {}),
+          ...(req.body.creditPercentage !== undefined ? { creditPercentage: req.body.creditPercentage } : {}),
+          address,
+          pincodeRestrictionEnabled,
+          tenantOnboardingLimit: Number(tenantOnboardingLimit),
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+    const channelPartner = partnerDocuments[0];
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
+    const accountDocuments = await Account.create(
+      [
+        {
+          name: `${String(req.body.name).trim()} Admin`,
+          ...(contactEmail ? { email: contactEmail } : {}),
+          mobile: contactPhone,
+          role: ACCOUNT_ROLES.PARTNER_ADMIN,
+          channelPartnerId: channelPartner._id,
+          passwordHash,
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+    const partnerAdmin = accountDocuments[0];
+    channelPartner.adminAccountId = partnerAdmin._id;
+    await channelPartner.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.CHANNEL_PARTNER_CREATED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        metadata: { name: channelPartner.name, type: channelPartner.type, source: "admin_portal" }
+      },
+      { session }
+    );
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+        actorId: req.auth.id,
+        channelPartnerId: channelPartner._id,
+        metadata: { accountId: partnerAdmin._id, role: partnerAdmin.role, source: "admin_partner_create" }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 201, "Channel partner created successfully", {
+      channelPartner,
+      partnerAdmin: {
+        accountId: partnerAdmin._id,
+        name: partnerAdmin.name,
+        email: partnerAdmin.email || null,
+        mobile: partnerAdmin.mobile,
+        role: partnerAdmin.role,
+        channelPartnerId: partnerAdmin.channelPartnerId
+      },
+      credentials: {
+        identifier: partnerAdmin.mobile,
+        mobile: partnerAdmin.mobile,
+        email: partnerAdmin.email || null,
+        temporaryPassword
+      }
+    });
   } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    if (error?.code === 11000) return sendError(res, 400, "Phone number or email is already used");
     return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 
@@ -634,18 +873,52 @@ export const getChannelPartnerById = async (req, res) => {
 
     const [channelPartner, tenants, accounts] = await Promise.all([
       ChannelPartner.findById(req.params.id).lean(),
-      Tenant.find({ channelPartnerId: req.params.id }).lean(),
-      Account.find({ channelPartnerId: req.params.id }).select("-passwordHash").lean()
+      Tenant.find({ channelPartnerId: req.params.id }).sort({ createdAt: -1, _id: -1 }).lean(),
+      Account.find({ channelPartnerId: req.params.id }).select("-passwordHash").sort({ createdAt: -1, _id: -1 }).lean()
     ]);
 
     if (!channelPartner) {
       return sendError(res, 400, "Channel partner not found");
     }
 
+    const tenantIds = tenants.map((tenant) => tenant._id);
+    const openCaseStatuses = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
+    const [totalBorrowers, totalDevices, deviceSummary, openCases, escalatedToPartner] = await Promise.all([
+      User.countDocuments({ tenantId: { $in: tenantIds } }),
+      Device.countDocuments({ tenantId: { $in: tenantIds } }),
+      Device.aggregate([
+        { $match: { tenantId: { $in: tenantIds } } },
+        { $group: { _id: "$state", count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      UnlockRequest.countDocuments({ channelPartnerId: channelPartner._id, status: { $in: openCaseStatuses } }),
+      UnlockRequest.countDocuments({ channelPartnerId: channelPartner._id, status: "ESCALATED_PARTNER" })
+    ]);
+
+    const activeTenants = tenants.filter((tenant) => tenant.isActive).length;
+    const partnerMetrics = {
+      tenants: {
+        total: tenants.length,
+        active: activeTenants,
+        inactive: tenants.length - activeTenants
+      },
+      accounts: {
+        tenantAdmins: accounts.filter((account) => account.role === ACCOUNT_ROLES.TENANT_ADMIN).length
+      },
+      borrowers: { total: totalBorrowers },
+      devices: { total: totalDevices },
+      cases: {
+        open: openCases,
+        escalatedToPartner
+      }
+    };
+
     return sendSuccess(res, 200, "Channel partner fetched successfully", {
       channelPartner,
       tenants,
-      accounts
+      accounts,
+      partnerMetrics,
+      deviceSummary
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -666,15 +939,52 @@ export const updateChannelPartner = async (req, res) => {
       return sendError(res, 400, "creditPercentage must be between 0 and 100");
     }
 
+    if (
+      req.body.pincodeRestrictionEnabled !== undefined &&
+      typeof req.body.pincodeRestrictionEnabled !== "boolean"
+    ) {
+      return sendError(res, 400, "pincodeRestrictionEnabled must be a boolean");
+    }
+    if (
+      req.body.tenantOnboardingLimit !== undefined &&
+      !isValidTenantOnboardingLimit(req.body.tenantOnboardingLimit)
+    ) {
+      return sendError(res, 400, "tenantOnboardingLimit must be a positive integer");
+    }
+
+    const contactPhone = normalizeMobile(req.body.contactPhone);
+    const contactEmail = normalizeEmail(req.body.contactEmail);
+    if (!isValidIndianMobile(contactPhone)) {
+      return sendError(res, 400, "contactPhone must be a valid 10 digit mobile number");
+    }
+    if (!isValidEmail(contactEmail)) {
+      return sendError(res, 400, "contactEmail must be a valid email address");
+    }
+
     const address = normalizeAddressPayload(req.body);
     const addressError = getAddressValidationError(address);
     if (addressError) {
       return sendError(res, 400, addressError);
     }
 
-    const allowedUpdates = ["name", "type", "contactEmail", "contactPhone", "creditPercentage", "payoutUpiId", "payoutUpiName"];
+    const allowedUpdates = [
+      "name",
+      "type",
+      "contactEmail",
+      "contactPhone",
+      "creditPercentage",
+      "payoutUpiId",
+      "payoutUpiName",
+      "pincodeRestrictionEnabled",
+      "tenantOnboardingLimit"
+    ];
     const updates = {
       ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      contactPhone,
+      contactEmail: contactEmail || undefined,
+      ...(req.body.tenantOnboardingLimit !== undefined
+        ? { tenantOnboardingLimit: Number(req.body.tenantOnboardingLimit) }
+        : {}),
       address
     };
 
@@ -746,6 +1056,46 @@ export const updateChannelPartnerStatus = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Channel partner status updated successfully", channelPartner);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch company support contact.
+ * Sample query: /admin/support-contact
+ */
+export const getCompanySupportContact = async (req, res) => {
+  try {
+    const supportContact = await getOrCreateCompanySupportContact();
+    return sendSuccess(res, 200, "Company support contact fetched successfully", supportContact);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update company support contact.
+ * Sample body: { "supportEmail": "support@example.com", "supportPhone": "+911234567890", "supportWhatsapp": "+911234567890" }
+ */
+export const updateCompanySupportContact = async (req, res) => {
+  try {
+    const validation = validateCompanySupportContactPayload(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const supportContact = await getOrCreateCompanySupportContact();
+    Object.assign(supportContact, validation.value, { updatedBy: req.auth.id });
+    await supportContact.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.COMPANY_SUPPORT_CONTACT_UPDATED,
+      actorId: req.auth.id,
+      metadata: validation.value
+    });
+
+    return sendSuccess(res, 200, "Company support contact updated successfully", supportContact);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -919,7 +1269,7 @@ export const listTenants = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      Tenant.find(filter).populate("channelPartnerId", "name type").skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      Tenant.find(filter).populate("channelPartnerId", "name type").skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       Tenant.countDocuments(filter)
     ]);
 
@@ -940,11 +1290,10 @@ export const createTenant = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
-    const shouldCreateTenantAdmin = isTruthyQueryParam(req.query.app);
-    const requiredFields = ["name", "type", "capabilities", "channelPartnerId"];
+    const requiredFields = ["name", "type", "channelPartnerId", "supportPhone"];
 
     if (!hasRequiredFields(req.body, requiredFields)) {
-      return sendError(res, 400, "Name, type, capabilities, and channelPartnerId are required");
+      return sendError(res, 400, "Name, type, channelPartnerId, and supportPhone are required");
     }
 
     if (req.body.tenantPolicy || req.body.devicePolicies) {
@@ -959,18 +1308,22 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, "Invalid channel partner ID");
     }
 
-    const capabilities = req.body.capabilities;
+    const capabilities = [TENANT_CAPABILITIES.LEND, TENANT_CAPABILITIES.DISTRIBUTE];
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const supportEmail = normalizeEmail(req.body.supportEmail);
+    const requestedTemporaryPassword = req.body.temporaryPassword;
+    const tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
 
-    if (!Array.isArray(capabilities) || capabilities.length === 0) {
-      return sendError(res, 400, "At least one tenant capability is required");
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "supportPhone must be a valid 10 digit mobile number");
     }
 
-    const invalidCapability = capabilities.find(
-      (capability) => !Object.values(TENANT_CAPABILITIES).includes(capability)
-    );
+    if (!isValidEmail(supportEmail)) {
+      return sendError(res, 400, "supportEmail must be a valid email address");
+    }
 
-    if (invalidCapability) {
-      return sendError(res, 400, `Invalid capability: ${invalidCapability}`);
+    if (requestedTemporaryPassword && !isValidPassword(requestedTemporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     const creditPurchasePerKeyPrice =
@@ -1001,35 +1354,25 @@ export const createTenant = async (req, res) => {
       return sendError(res, 400, "Active channel partner not found");
     }
 
-    let tenantAdminInput = null;
-    let tenantAdminPassword = null;
-
-    if (shouldCreateTenantAdmin) {
-      tenantAdminInput = req.body.tenantAdmin || {};
-      const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || req.body.supportEmail || "")
-        .trim()
-        .toLowerCase();
-      const requestedTemporaryPassword = tenantAdminInput.temporaryPassword || req.body.temporaryPassword;
-
-      if (!tenantAdminEmail) {
-        return sendError(res, 400, "Tenant admin email is required when app=true");
-      }
-
-      const existingAccount = await Account.findOne({ email: tenantAdminEmail }).lean();
-      if (existingAccount) {
-        return sendError(res, 400, "Account with this email already exists");
-      }
-
-      tenantAdminInput = {
-        name: tenantAdminInput.name || req.body.adminName || `${req.body.name} Admin`,
-        email: tenantAdminEmail,
-        mobile: tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone,
-        channelPartnerId: req.body.channelPartnerId
-      };
-      tenantAdminPassword = requestedTemporaryPassword || createTemporaryPassword();
+    const duplicateFilters = [
+      { mobile: supportPhone, role: ACCOUNT_ROLES.TENANT_ADMIN },
+      ...(supportEmail ? [{ email: supportEmail }] : [])
+    ];
+    const existingAccount = await Account.findOne({ $or: duplicateFilters }).lean();
+    if (existingAccount?.mobile === supportPhone) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+    if (supportEmail && existingAccount?.email === supportEmail) {
+      return sendError(res, 400, "Account with this email already exists");
     }
 
     session.startTransaction();
+
+    await enforcePartnerTenantOnboarding({
+      channelPartner,
+      tenantPincode: address.pincode,
+      session
+    });
 
     const tenant = await Tenant.create(
       [
@@ -1039,9 +1382,8 @@ export const createTenant = async (req, res) => {
           capabilities,
           channelPartnerId: req.body.channelPartnerId,
           parentTenantId: req.body.parentTenantId || null,
-          supportPhone: req.body.supportPhone,
-          supportEmail: req.body.supportEmail,
-          supportWhatsapp: req.body.supportWhatsapp,
+          supportPhone,
+          ...(supportEmail ? { supportEmail } : {}),
           address,
           ...poc,
           ...(creditPurchasePerKeyPrice !== undefined ? { creditPurchasePerKeyPrice } : {}),
@@ -1078,44 +1420,41 @@ export const createTenant = async (req, res) => {
       { session, ordered: true }
     );
 
-    if (shouldCreateTenantAdmin) {
-      const passwordHash = await bcrypt.hash(tenantAdminPassword, 12);
-      const tenantAdminAccounts = await Account.create(
-        [
-          {
-            name: tenantAdminInput.name,
-            email: tenantAdminInput.email,
-            mobile: tenantAdminInput.mobile,
-            role: ACCOUNT_ROLES.TENANT_ADMIN,
-            tenantId: createdTenant._id,
-            channelPartnerId: tenantAdminInput.channelPartnerId,
-            passwordHash,
-            createdBy: req.auth.id
-          }
-        ],
-        { session, ordered: true }
-      );
-
-      createdTenantAdmin = tenantAdminAccounts[0];
-      createdTenant.adminAccountId = createdTenantAdmin._id;
-      await createdTenant.save({ session });
-
-      await createAuditLog(
+    const passwordHash = await bcrypt.hash(tenantAdminPassword, 12);
+    const tenantAdminAccounts = await Account.create(
+      [
         {
-          eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
-          actorId: req.auth.id,
+          name: `${String(req.body.name).trim()} Admin`,
+          ...(supportEmail ? { email: supportEmail } : {}),
+          mobile: supportPhone,
+          role: ACCOUNT_ROLES.TENANT_ADMIN,
           tenantId: createdTenant._id,
-          channelPartnerId: createdTenant.channelPartnerId,
-          metadata: {
-            accountId: createdTenantAdmin._id,
-            role: createdTenantAdmin.role,
-            email: createdTenantAdmin.email,
-            source: "tenant_create_app"
-          }
-        },
-        { session }
-      );
-    }
+          channelPartnerId: req.body.channelPartnerId,
+          passwordHash,
+          createdBy: req.auth.id
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    createdTenantAdmin = tenantAdminAccounts[0];
+    createdTenant.adminAccountId = createdTenantAdmin._id;
+    await createdTenant.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.ACCOUNT_CREATED,
+        actorId: req.auth.id,
+        tenantId: createdTenant._id,
+        channelPartnerId: createdTenant.channelPartnerId,
+        metadata: {
+          accountId: createdTenantAdmin._id,
+          role: createdTenantAdmin.role,
+          source: "admin_tenant_create"
+        }
+      },
+      { session }
+    );
 
     await createAuditLog(
       {
@@ -1155,28 +1494,30 @@ export const createTenant = async (req, res) => {
       tenant: createdTenant,
       tenantPolicy,
       devicePolicies,
-      ...(createdTenantAdmin
-        ? {
-            tenantAdmin: {
-              accountId: createdTenantAdmin._id,
-              name: createdTenantAdmin.name,
-              email: createdTenantAdmin.email,
-              mobile: createdTenantAdmin.mobile,
-              role: createdTenantAdmin.role,
-              tenantId: createdTenantAdmin.tenantId,
-              channelPartnerId: createdTenantAdmin.channelPartnerId
-            },
-            credentials: {
-              email: createdTenantAdmin.email,
-              temporaryPassword: tenantAdminPassword
-            }
-          }
-        : {})
+      tenantAdmin: {
+        accountId: createdTenantAdmin._id,
+        name: createdTenantAdmin.name,
+        email: createdTenantAdmin.email || null,
+        mobile: createdTenantAdmin.mobile,
+        role: createdTenantAdmin.role,
+        tenantId: createdTenantAdmin.tenantId,
+        channelPartnerId: createdTenantAdmin.channelPartnerId
+      },
+      credentials: {
+        identifier: createdTenantAdmin.mobile,
+        mobile: createdTenantAdmin.mobile,
+        email: createdTenantAdmin.email || null,
+        temporaryPassword: tenantAdminPassword
+      }
     });
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
+    if (error instanceof PartnerTenantOnboardingError) {
+      return sendError(res, error.statusCode, error.message);
+    }
+    if (error?.code === 11000) return sendError(res, 400, "Phone number or email is already used");
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
     session.endSession();
@@ -1235,9 +1576,20 @@ export const updateTenant = async (req, res) => {
       return sendError(res, 400, pocError);
     }
 
-    const allowedUpdates = ["name", "supportPhone", "supportEmail", "supportWhatsapp", "parentTenantId", "creditPurchasePerKeyPrice"];
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const supportEmail = normalizeEmail(req.body.supportEmail);
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "supportPhone must be a valid 10 digit mobile number");
+    }
+    if (!isValidEmail(supportEmail)) {
+      return sendError(res, 400, "supportEmail must be a valid email address");
+    }
+
+    const allowedUpdates = ["name", "supportPhone", "supportEmail", "parentTenantId", "creditPurchasePerKeyPrice"];
     const updates = {
       ...Object.fromEntries(Object.entries(req.body).filter(([key]) => allowedUpdates.includes(key))),
+      supportPhone,
+      supportEmail: supportEmail || undefined,
       address,
       ...poc
     };
@@ -1458,6 +1810,116 @@ export const adjustTenantCredits = async (req, res) => {
  * List tenant credit purchase requests.
  * Sample query: /admin/tenant-credit-purchases?status=PENDING&tenantId=665f...&sortBy=requestedAt&sortOrder=desc&page=1&limit=20
  */
+export const listPartnerCreditLedger = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) return sendError(res, 400, "Invalid channel partner ID");
+      filter.channelPartnerId = req.query.channelPartnerId;
+    }
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) return sendError(res, 400, "Invalid tenant ID");
+      filter.tenantId = req.query.tenantId;
+    }
+    if (req.query.type && req.query.type !== "all") {
+      if (!Object.values(PARTNER_CREDIT_LEDGER_TYPES).includes(req.query.type)) {
+        return sendError(res, 400, "Invalid partner ledger type");
+      }
+      filter.type = req.query.type;
+    }
+    if (req.query.balanceType && req.query.balanceType !== "all") {
+      if (!Object.values(PARTNER_CREDIT_BALANCE_TYPES).includes(req.query.balanceType)) {
+        return sendError(res, 400, "Invalid partner ledger balance type");
+      }
+      filter.balanceType = req.query.balanceType;
+    }
+    if (req.query.direction && req.query.direction !== "all") {
+      if (!['credit', 'debit'].includes(req.query.direction)) return sendError(res, 400, "direction must be credit or debit");
+      filter.delta = req.query.direction === "credit" ? { $gt: 0 } : { $lt: 0 };
+    }
+
+    const dateRange = getDateRangeFilter(req.query);
+    if (dateRange.error) return sendError(res, 400, dateRange.error);
+    if (dateRange.value) filter.createdAt = dateRange.value;
+
+    const [items, total] = await Promise.all([
+      PartnerCreditLedger.find(filter)
+        .populate("channelPartnerId", "name type")
+        .populate("tenantId", "name type")
+        .populate("payoutRequestId", "amount status adminReferenceId requestedAt")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      PartnerCreditLedger.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Partner credit ledger fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const listTenantCreditLedger = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) return sendError(res, 400, "Invalid tenant ID");
+      filter.tenantId = req.query.tenantId;
+    }
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) return sendError(res, 400, "Invalid channel partner ID");
+      const tenantFilter = { channelPartnerId: req.query.channelPartnerId };
+      if (filter.tenantId) tenantFilter._id = filter.tenantId;
+      const tenantIds = await Tenant.find(tenantFilter).distinct("_id");
+      filter.tenantId = { $in: tenantIds };
+    }
+    if (req.query.type && req.query.type !== "all") {
+      if (!Object.values(TENANT_CREDIT_LEDGER_TYPES).includes(req.query.type)) {
+        return sendError(res, 400, "Invalid tenant ledger type");
+      }
+      filter.type = req.query.type;
+    }
+    if (req.query.direction && req.query.direction !== "all") {
+      if (!["credit", "debit"].includes(req.query.direction)) return sendError(res, 400, "direction must be credit or debit");
+      filter.delta = req.query.direction === "credit" ? { $gt: 0 } : { $lt: 0 };
+    }
+
+    const dateRange = getDateRangeFilter(req.query);
+    if (dateRange.error) return sendError(res, 400, dateRange.error);
+    if (dateRange.value) filter.createdAt = dateRange.value;
+
+    const [items, total] = await Promise.all([
+      TenantCreditLedger.find(filter)
+        .populate({
+          path: "tenantId",
+          select: "name type channelPartnerId",
+          populate: { path: "channelPartnerId", select: "name type" }
+        })
+        .populate("userId", "name mobile loanId")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      TenantCreditLedger.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Tenant credit ledger fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
 export const listTenantCreditPurchaseRequests = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
@@ -2353,43 +2815,60 @@ export const getAdminAccountById = async (req, res) => {
  */
 export const createAdminAccount = async (req, res) => {
   try {
-    if (!hasRequiredFields(req.body, ["name", "email", "role", "temporaryPassword"])) {
-      return sendError(res, 400, "Name, email, role, and temporaryPassword are required");
+    const mobile = normalizeMobile(req.body.mobile);
+    const email = normalizeEmail(req.body.email);
+
+    if (!hasRequiredFields({ ...req.body, mobile }, ["name", "mobile", "role", "temporaryPassword"])) {
+      return sendError(res, 400, "Name, mobile, role, and temporaryPassword are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Mobile must be a valid 10 digit number");
+    }
+
+    if (!isValidEmail(email)) {
+      return sendError(res, 400, "Email must be a valid email address");
+    }
+
+    if (!isValidPassword(req.body.temporaryPassword)) {
+      return sendError(res, 400, "Password must be at least 8 characters and include at least one letter and one number");
     }
 
     if (![ACCOUNT_ROLES.PARTNER_ADMIN, ACCOUNT_ROLES.TENANT_ADMIN].includes(req.body.role)) {
       return sendError(res, 400, "Only partner_admin and tenant_admin can be created here");
     }
 
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && !isValidObjectId(req.body.tenantId)) {
-      return sendError(res, 400, "Valid tenantId is required for tenant_admin");
+    if (
+      req.body.role === ACCOUNT_ROLES.TENANT_ADMIN &&
+      (!isValidObjectId(req.body.tenantId) || !isValidObjectId(req.body.channelPartnerId))
+    ) {
+      return sendError(res, 400, "Valid tenantId and channelPartnerId are required for tenant_admin");
     }
 
     if (req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN && !isValidObjectId(req.body.channelPartnerId)) {
       return sendError(res, 400, "Valid channelPartnerId is required for partner_admin");
     }
 
-    const existingAccount = await Account.findOne({ email: req.body.email.toLowerCase() });
+    const duplicateFilters = [
+      { mobile, role: req.body.role },
+      ...(email ? [{ email }] : [])
+    ];
+    const existingAccount = await Account.findOne({ $or: duplicateFilters });
 
-    if (existingAccount) {
+    if (existingAccount?.mobile === mobile && existingAccount?.role === req.body.role) {
+      return sendError(res, 400, "Account with this mobile and role already exists");
+    }
+    if (email && existingAccount?.email === email) {
       return sendError(res, 400, "Account with this email already exists");
     }
 
     if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN) {
-      const tenant = await Tenant.findOne({ _id: req.body.tenantId, isActive: true });
-      if (!tenant) return sendError(res, 400, "Active tenant not found");
-    }
-
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId && !isValidObjectId(req.body.channelPartnerId)) {
-      return sendError(res, 400, "Valid channelPartnerId is required when provided");
-    }
-
-    if (req.body.role === ACCOUNT_ROLES.TENANT_ADMIN && req.body.channelPartnerId) {
-      const channelPartner = await ChannelPartner.findOne({
-        _id: req.body.channelPartnerId,
+      const tenant = await Tenant.findOne({
+        _id: req.body.tenantId,
+        channelPartnerId: req.body.channelPartnerId,
         isActive: true
       });
-      if (!channelPartner) return sendError(res, 400, "Active channel partner not found");
+      if (!tenant) return sendError(res, 400, "Active tenant not found under the selected channel partner");
     }
 
     if (req.body.role === ACCOUNT_ROLES.PARTNER_ADMIN) {
@@ -2403,8 +2882,8 @@ export const createAdminAccount = async (req, res) => {
     const passwordHash = await bcrypt.hash(req.body.temporaryPassword, 12);
     const account = await Account.create({
       name: req.body.name,
-      email: req.body.email,
-      mobile: req.body.mobile,
+      ...(email ? { email } : {}),
+      mobile,
       role: req.body.role,
       tenantId: req.body.role === ACCOUNT_ROLES.TENANT_ADMIN ? req.body.tenantId : undefined,
       channelPartnerId:
@@ -2547,7 +3026,7 @@ export const listConsentVersions = async (req, res) => {
     if (req.query.status === "draft") filter.isCurrent = false;
 
     const [items, total] = await Promise.all([
-      ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
       ConsentVersion.countDocuments(filter)
     ]);
 
@@ -2593,6 +3072,70 @@ export const createConsentVersion = async (req, res) => {
     });
 
     return sendSuccess(res, 201, "Consent version created successfully", consentVersion);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update an unpublished consent draft.
+ * Published consent versions are immutable because borrowers may already have accepted them.
+ */
+export const updateConsentVersion = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Invalid consent version ID");
+    }
+
+    const requiredFields = [
+      "version",
+      "title",
+      "borrowerAgreementText",
+      "deviceControlConsentText",
+      "privacyPolicyText"
+    ];
+
+    if (!hasRequiredFields(req.body, requiredFields)) {
+      return sendError(res, 400, "Version, title, borrowerAgreementText, deviceControlConsentText, and privacyPolicyText are required");
+    }
+
+    const consentVersion = await ConsentVersion.findById(req.params.id);
+    if (!consentVersion) {
+      return sendError(res, 404, "Consent version not found");
+    }
+
+    if (consentVersion.isCurrent || consentVersion.publishedAt) {
+      return sendError(res, 409, "Published consent versions cannot be edited. Duplicate this consent to create a new version.");
+    }
+
+    const duplicateVersion = await ConsentVersion.findOne({
+      _id: { $ne: consentVersion._id },
+      version: req.body.version
+    }).lean();
+    if (duplicateVersion) {
+      return sendError(res, 400, "Consent version already exists");
+    }
+
+    const editableFields = [
+      "version",
+      "title",
+      "borrowerAgreementText",
+      "deviceControlConsentText",
+      "privacyPolicyText",
+      "tripartiteAckText"
+    ];
+    for (const field of editableFields) {
+      consentVersion[field] = req.body[field] ?? "";
+    }
+    await consentVersion.save();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.CONSENT_VERSION_UPDATED,
+      actorId: req.auth.id,
+      metadata: { consentVersionId: consentVersion._id, version: consentVersion.version }
+    });
+
+    return sendSuccess(res, 200, "Consent version updated successfully", consentVersion);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -3036,23 +3579,127 @@ export const getDeviceById = async (req, res) => {
     if (!device) {
       return sendError(res, 400, "Device not found");
     }
+    device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+    device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
 
-    const [policy, commands, cases, riskFlags] = await Promise.all([
+    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
-      RiskFlag.find({ deviceId: device._id, status: { $ne: "resolved" } }).lean()
+      RiskFlag.find(getActiveRiskFilter({ deviceId: device._id })).sort({ createdAt: -1, _id: -1 }).lean(),
+      EmiSchedule.findOne({
+        userId: device.userId?._id || device.userId,
+        tenantId: device.tenantId?._id || device.tenantId
+      }).lean(),
+      DeviceCommand.findOne({
+        deviceId: device._id,
+        commandType: RELEASE_COMMAND_TYPE
+      }).sort({ createdAt: -1 }).lean(),
+      Promise.all(
+        DEVICE_SECURITY_CONTROL_COMMAND_TYPES.map((commandType) =>
+          DeviceCommand.findOne({
+            deviceId: device._id,
+            commandType
+          }).sort({ createdAt: -1 }).lean()
+        )
+      )
     ]);
+    const release = getDeviceReleaseSummary({
+      schedule: emiSchedule,
+      device,
+      latestReleaseCommand
+    });
 
     return sendSuccess(res, 200, "Device fetched successfully", {
       device,
       policy,
       commands,
+      latestSecurityControlCommands: formatLatestSecurityControlCommands(
+        latestSecurityControlCommands
+      ),
+      securityControlConfirmations: buildSecurityControlConfirmations({
+        state: device.securityControlState,
+        commands: latestSecurityControlCommands
+      }),
       cases,
-      riskFlags
+      riskFlags,
+      emiSchedule: emiSchedule
+        ? {
+            _id: emiSchedule._id,
+            loanId: emiSchedule.loanId,
+            status: emiSchedule.status,
+            settlementTime: emiSchedule.settlementTime,
+            completedInstallments: release.completedInstallments,
+            totalInstallments: release.totalInstallments
+          }
+        : null,
+      release
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue or retry permanent release for a fully settled device.
+ * Sample params: POST /admin/devices/665f.../release
+ */
+export const releaseAdminDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    const schedule = await EmiSchedule.findOne({
+      userId: device.userId,
+      tenantId: device.tenantId
+    }).session(session);
+
+    if (!schedule) {
+      return sendError(res, 400, "EMI schedule not found for device");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceRelease({
+      device,
+      schedule,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      reason: "Manual release retry for settled EMI schedule",
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_RELEASE_QUEUED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: "Manual release retry for settled EMI schedule",
+        metadata: {
+          commandId: result.command._id,
+          emiScheduleId: schedule._id,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device release queued successfully", result);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 
@@ -3073,6 +3720,198 @@ export const getDeviceCommands = async (req, res) => {
     return sendSuccess(res, 200, "Device commands fetched successfully", commands);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update one persistent per-device restriction and queue the complete desired
+ * restriction snapshot for device-owner enforcement.
+ * Sample body: { "restriction": "camera", "locked": true }
+ */
+export const updateAdminDeviceRestrictions = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    const validation = validateDeviceRestrictionUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceRestrictionUpdate({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          restriction: validation.value.restriction,
+          locked: validation.value.locked,
+          restrictionVersion: result.restrictionState.desiredVersion,
+          retry: validation.value.retry,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device restriction update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+const updateAdminDeviceSecurityControl = async (req, res, controlKey) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+    const validation = validateDeviceSecurityControlUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceSecurityControlUpdate({
+      device,
+      controlKey,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          control: controlKey,
+          blocked: validation.value.blocked,
+          controlVersion: result.controlState.desiredVersion,
+          retry: validation.value.retry,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device security control update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+export const updateAdminFactoryResetControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "factoryReset");
+
+export const updateAdminUsbDebuggingControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "usbDebugging");
+
+export const updateAdminUnknownAppInstallsControl = (req, res) =>
+  updateAdminDeviceSecurityControl(req, res, "unknownAppInstalls");
+
+export const requestAdminDeviceLocation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+    const device = await Device.findById(req.params.deviceId).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueGetLocationCommand({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "super_admin",
+      session
+    });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: GET_LOCATION_COMMAND_TYPE,
+          source: "admin_device_detail"
+        }
+      },
+      { session }
+    );
+    await session.commitTransaction();
+
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+
+    return sendSuccess(res, 201, "Location request sent successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 
@@ -3158,6 +3997,7 @@ export const tempUnlockAdminDevice = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3169,6 +4009,9 @@ export const tempUnlockAdminDevice = async (req, res) => {
       policyKey: DEVICE_POLICY_KEYS.TEMP_UNLOCKED,
       reason: req.body.reason,
       durationHours,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3187,7 +4030,11 @@ export const tempUnlockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Temporary unlock queued successfully", result);
+    return sendSuccess(res, 200, "Temporary unlock queued successfully", {
+      ...result,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");
@@ -3216,6 +4063,7 @@ export const unlockAdminDevice = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3226,6 +4074,9 @@ export const unlockAdminDevice = async (req, res) => {
       targetState: DEVICE_STATES.UNLOCK_PENDING,
       policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
       reason: req.body.reason,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3244,7 +4095,11 @@ export const unlockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Device unlock queued successfully", result);
+    return sendSuccess(res, 200, "Device unlock queued successfully", {
+      ...result,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
+    });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");
@@ -3277,6 +4132,7 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    const riskWarningPayload = await buildRiskWarningPayload(device._id);
 
     session.startTransaction();
 
@@ -3302,6 +4158,9 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
       targetState: DEVICE_STATES.UNLOCK_PENDING,
       policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
       reason: req.body.reason,
+      extraPayload: {
+        riskWarning: riskWarningPayload.riskWarning
+      },
       session
     });
 
@@ -3327,7 +4186,9 @@ export const unlockAdminDeviceWithWaive = async (req, res) => {
 
     return sendSuccess(res, 200, "Device unlock with EMI update queued successfully", {
       ...result,
-      updatedInstallmentIds: emiUpdate.updatedInstallmentIds
+      updatedInstallmentIds: emiUpdate.updatedInstallmentIds,
+      riskWarning: riskWarningPayload.riskWarning,
+      activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
     });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
@@ -3781,7 +4642,7 @@ export const listFcmDeliveryLogs = async (req, res) => {
 
     const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
     const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
-    const sort = sortBy === "createdAt" ? { createdAt: sortOrder } : { [sortBy]: sortOrder, createdAt: -1 };
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder, _id: -1 } : { [sortBy]: sortOrder, createdAt: -1, _id: -1 };
 
     const [rawItems, total] = await Promise.all([
       FcmDeliveryLog.find(filter)
@@ -3838,20 +4699,92 @@ export const getAdminRiskFlags = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
     const filter = {};
+    const allowedSortFields = new Set(["createdAt", "updatedAt", "lastDetectedAt", "severity", "status", "type", "riskBucket"]);
 
-    if (req.query.severity) filter.severity = req.query.severity;
-    if (req.query.status) filter.status = req.query.status;
+    if (req.query.severity && req.query.severity !== "all") filter.severity = req.query.severity;
+    if (req.query.status && req.query.status !== "all") {
+      filter.status = req.query.status === "active" ? { $nin: INACTIVE_RISK_FLAG_STATUSES } : req.query.status;
+    }
     if (req.query.type) filter.type = req.query.type;
+    if (req.query.riskBucket && req.query.riskBucket !== "all") filter.riskBucket = req.query.riskBucket;
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+    if (req.query.deviceId) filter.deviceId = req.query.deviceId;
+    if (req.query.userId) filter.userId = req.query.userId;
+    if (req.query.search) {
+      const search = new RegExp(escapeRegex(req.query.search), "i");
+      filter.$or = [{ type: search }, { riskType: search }, { message: search }, { caseId: search }];
+    }
+
+    const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sort = sortBy === "createdAt" ? { createdAt: sortOrder, _id: -1 } : { [sortBy]: sortOrder, createdAt: -1, _id: -1 };
 
     const [items, total] = await Promise.all([
-      RiskFlag.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).lean(),
+      RiskFlag.find(filter)
+        .populate("tenantId", "name")
+        .populate("deviceId", "imei deviceModel manufacturer state deviceSecurityState")
+        .populate("userId", "name mobile loanId")
+        .populate("acknowledgedBy", "name email role")
+        .populate("clearedBy", "name email role")
+        .skip(skip)
+        .limit(limit)
+        .sort(sort)
+        .lean(),
       RiskFlag.countDocuments(filter)
     ]);
 
     return sendSuccess(res, 200, "Risk flags fetched successfully", {
       items,
       pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const getAdminRiskFlagById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await RiskFlag.findById(req.params.flagId)
+      .populate("tenantId", "name supportPhone supportEmail")
+      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey deviceSecurityState lastIntegrityCheckAt lastCleanIntegrityAt lastRiskAt")
+      .populate("userId", "name mobile email loanId")
+      .populate("acknowledgedBy", "name email role")
+      .populate("clearedBy", "name email role")
+      .lean();
+
+    if (!riskFlag) {
+      return sendError(res, 404, "Risk flag not found");
+    }
+
+    const deviceId = riskFlag.deviceId?._id || riskFlag.deviceId;
+    const [integrityChecks, commands, auditLogs, activeCriticalRiskFlags] = await Promise.all([
+      deviceId
+        ? IntegrityCheck.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean()
+        : IntegrityCheck.find({ userId: riskFlag.userId?._id || riskFlag.userId }).sort({ createdAt: -1 }).limit(10).lean(),
+      deviceId ? DeviceCommand.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean() : [],
+      AuditLog.find({
+        $or: [
+          { "metadata.riskFlagId": riskFlag._id },
+          { "metadata.riskFlagIds": riskFlag._id },
+          ...(deviceId ? [{ deviceId }] : [])
+        ]
+      })
+        .sort({ timestamp: -1 })
+        .limit(10)
+        .lean(),
+      deviceId ? getActiveCriticalRiskFlagsForDevice(deviceId) : []
+    ]);
+
+    return sendSuccess(res, 200, "Risk flag fetched successfully", {
+      riskFlag,
+      integrityChecks,
+      commands,
+      auditLogs,
+      activeCriticalRiskFlags
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -3873,7 +4806,8 @@ export const acknowledgeRiskFlag = async (req, res) => {
       {
         status: "acknowledged",
         acknowledgedBy: req.auth.id,
-        acknowledgedAt: new Date()
+        acknowledgedAt: new Date(),
+        acknowledgedNote: req.body.note
       },
       { new: true }
     );
@@ -3882,7 +4816,256 @@ export const acknowledgeRiskFlag = async (req, res) => {
       return sendError(res, 400, "Risk flag not found");
     }
 
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_FLAG_ACKNOWLEDGED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.note,
+      metadata: { riskFlagId: riskFlag._id }
+    });
+
     return sendSuccess(res, 200, "Risk flag acknowledged successfully", riskFlag);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const getActionableRiskFlag = async (flagId) => {
+  return RiskFlag.findById(flagId);
+};
+
+const getRiskFlagDevice = async (riskFlag) => {
+  if (!riskFlag.deviceId) return null;
+  return Device.findById(riskFlag.deviceId).lean();
+};
+
+export const requestRiskFlagRecheck = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "RUN_INTEGRITY_CHECK",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      payload: {
+        source: "risk_admin_recheck",
+        reason: req.body.reason || "Admin requested security recheck",
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        action: "ADMIN_RECHECK"
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_RECHECK_REQUESTED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id }
+    });
+
+    return sendSuccess(res, 201, "Security recheck command queued successfully", { command });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const clearRiskFlag = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const resolution =
+      req.body.resolution === RISK_FLAG_STATUSES.FALSE_POSITIVE
+        ? RISK_FLAG_STATUSES.FALSE_POSITIVE
+        : RISK_FLAG_STATUSES.CLEARED;
+
+    const riskFlag = await RiskFlag.findByIdAndUpdate(
+      req.params.flagId,
+      {
+        status: resolution,
+        clearedBy: req.auth.id,
+        clearedAt: new Date(),
+        clearanceReason: req.body.reason
+      },
+      { new: true }
+    );
+
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    if (riskFlag.deviceId) {
+      const hasOtherActiveRisk = await RiskFlag.exists({
+        deviceId: riskFlag.deviceId,
+        _id: { $ne: riskFlag._id },
+        ...getActiveRiskFilter()
+      });
+      const deviceUpdate = {
+        $pull: { currentRiskIds: riskFlag._id }
+      };
+      if (!hasOtherActiveRisk) {
+        deviceUpdate.$set = { deviceSecurityState: "HEALTHY" };
+      }
+      await Device.findByIdAndUpdate(riskFlag.deviceId, deviceUpdate);
+    }
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_FLAG_CLEARED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, resolution }
+    });
+
+    return sendSuccess(res, 200, "Risk flag updated successfully", riskFlag);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const queueRiskFlagAppUpdate = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const build = await AppBuild.findOne({
+      platform: APP_BUILD_PLATFORMS.ANDROID,
+      packageName: BORROWER_ANDROID_PACKAGE_NAME,
+      channel: APP_BUILD_CHANNELS.PRODUCTION,
+      buildType: APP_BUILD_TYPES.RELEASE,
+      status: APP_BUILD_STATUSES.PUBLISHED
+    })
+      .sort({ versionCode: -1, publishedAt: -1 })
+      .lean();
+
+    if (!build) {
+      return sendError(res, 404, "Published production Android build not found");
+    }
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "INSTALL_UPDATE",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      payload: {
+        source: "risk_admin_app_update",
+        reason: req.body.reason || "Admin pushed trusted app repair",
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        packageName: build.packageName,
+        versionName: build.versionName,
+        versionCode: build.versionCode,
+        apkUrl: build.apkUrl,
+        apkSha256: build.apkSha256,
+        checksumRequired: build.checksumRequired
+      }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_APP_UPDATE_QUEUED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id, buildId: build._id }
+    });
+
+    return sendSuccess(res, 201, "App update command queued successfully", { command, build });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const queueRiskFlagWipe = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.flagId)) {
+      return sendError(res, 400, "Invalid risk flag ID");
+    }
+
+    if (!req.body.reason) {
+      return sendError(res, 400, "Reason is required");
+    }
+
+    const riskFlag = await getActionableRiskFlag(req.params.flagId);
+    if (!riskFlag) return sendError(res, 404, "Risk flag not found");
+    if (!isRiskFlagWipeEligible(riskFlag)) {
+      return sendError(res, 400, "Wipe is allowed only for critical permanent device-compromise risks");
+    }
+
+    const device = await getRiskFlagDevice(riskFlag);
+    if (!device) return sendError(res, 400, "Risk flag is not linked to a device");
+
+    const command = await DeviceCommand.create({
+      deviceId: device._id,
+      tenantId: device.tenantId,
+      commandType: "WIPE_DEVICE",
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      payload: {
+        source: "risk_admin_wipe",
+        reason: req.body.reason,
+        riskFlagId: riskFlag._id.toString(),
+        riskType: riskFlag.type,
+        destructiveAction: true,
+        requireDeviceOwner: true
+      }
+    });
+
+    riskFlag.status = RISK_FLAG_STATUSES.WIPED_PENDING_REPROVISION;
+    riskFlag.metadata = {
+      ...(riskFlag.metadata || {}),
+      wipeCommandId: command._id,
+      wipeQueuedAt: new Date()
+    };
+    await riskFlag.save();
+
+    await Device.findByIdAndUpdate(device._id, {
+      $set: { deviceSecurityState: "WIPED_PENDING_REPROVISION" }
+    });
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.RISK_WIPE_QUEUED,
+      actorId: req.auth.id,
+      tenantId: riskFlag.tenantId,
+      userId: riskFlag.userId,
+      deviceId: riskFlag.deviceId,
+      reason: req.body.reason,
+      metadata: { riskFlagId: riskFlag._id, commandId: command._id }
+    });
+
+    return sendSuccess(res, 201, "Admin wipe command queued successfully", { command, riskFlag });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -4203,6 +5386,13 @@ const handleAppBuildWriteError = (res, error) => {
   return sendError(res, 500, error.message || "Internal server error");
 };
 
+const handleDirectBuildUploadError = (res, error) => {
+  if (error instanceof AppBuildUploadError) {
+    return sendError(res, error.statusCode, error.message);
+  }
+  return handleAppBuildWriteError(res, error);
+};
+
 /**
  * List Android app builds for Super Admin release management. Filters are safe
  * operational metadata only; borrower/device identifiers are not involved.
@@ -4233,6 +5423,35 @@ export const listAppBuilds = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const createAppBuildUploadSession = async (req, res) => {
+  try {
+    const uploadSession = await createDirectBuildUploadSession({
+      body: req.body,
+      actorId: req.auth.id,
+      requestedOrigin: req.get("x-upload-origin") || req.get("origin")
+    });
+    return sendSuccess(res, 201, "Build upload session created successfully", uploadSession);
+  } catch (error) {
+    return handleDirectBuildUploadError(res, error);
+  }
+};
+
+export const completeAppBuildUploadSession = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.sessionId)) {
+      return sendError(res, 400, "Invalid build upload session ID");
+    }
+
+    const appBuild = await completeDirectBuildUploadSession({
+      sessionId: req.params.sessionId,
+      actorId: req.auth.id
+    });
+    return sendSuccess(res, 201, "App build created successfully", appBuild);
+  } catch (error) {
+    return handleDirectBuildUploadError(res, error);
   }
 };
 

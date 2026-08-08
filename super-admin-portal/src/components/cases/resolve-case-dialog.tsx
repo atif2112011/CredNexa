@@ -20,14 +20,8 @@ const tempDurations = [
 ];
 
 const actions = [
-  { label: "Full unlock", value: "full-unlock" },
   { label: "Temporary unlock", value: "temp-unlock" },
-  { label: "Reject case", value: "reject" }
-];
-
-const emiActions = [
-  { label: "All pending paid", value: "mark_paid" },
-  { label: "All pending waived", value: "waive" }
+  { label: "Reject request", value: "reject" }
 ];
 
 function isResolvable(status: unknown) {
@@ -37,8 +31,7 @@ function isResolvable(status: unknown) {
 export function ResolveCaseDialog({ item }: { item: RecordItem }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [action, setAction] = useState("full-unlock");
-  const [emiAction, setEmiAction] = useState("mark_paid");
+  const [action, setAction] = useState("temp-unlock");
   const [durationHours, setDurationHours] = useState("24");
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -51,18 +44,13 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
       return;
     }
 
-    const endpoint =
-      action === "temp-unlock"
-        ? `/api/admin/escalations/${caseId}/temp-unlock`
-        : action === "reject"
-          ? `/api/admin/escalations/${caseId}/reject`
-          : `/api/admin/escalations/${caseId}/unlock`;
+    const endpoint = action === "temp-unlock"
+      ? `/api/admin/escalations/${caseId}/temp-unlock`
+      : `/api/admin/escalations/${caseId}/reject`;
     const body =
       action === "temp-unlock"
         ? { reason, durationHours: Number(durationHours) }
-        : action === "reject"
-          ? { reason }
-          : { reason, emiAction };
+        : { reason };
 
     setIsSubmitting(true);
     const response = await fetch(endpoint, {
@@ -74,11 +62,11 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      toast.error(payload?.error || "Unable to resolve case");
+      toast.error(payload?.error || "Unable to resolve request");
       return;
     }
 
-    toast.success("Case action queued");
+    toast.success("Request action queued");
     setOpen(false);
     router.refresh();
   }
@@ -93,7 +81,7 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Resolve {caseId}</DialogTitle>
-          <DialogDescription>Permanent unlock requires marking all pending EMIs paid or waived. Temporary unlock does not resolve EMI delinquency.</DialogDescription>
+          <DialogDescription>Temporarily unlock the device for a fixed duration or reject this request.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <div className="rounded-xl border bg-muted/20 p-4">
@@ -130,23 +118,6 @@ export function ResolveCaseDialog({ item }: { item: RecordItem }) {
                 className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               >
                 {tempDurations.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : null}
-          {action === "full-unlock" ? (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor={`emi-action-${caseId}`}>EMI update</Label>
-              <select
-                id={`emi-action-${caseId}`}
-                value={emiAction}
-                onChange={(event) => setEmiAction(event.target.value)}
-                className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              >
-                {emiActions.map((item) => (
                   <option key={item.value} value={item.value}>
                     {item.label}
                   </option>

@@ -1,6 +1,6 @@
 "use client";
 
-import { LockKeyhole, ShieldCheck, TimerReset } from "lucide-react";
+import { AlertTriangle, LockKeyhole, ShieldCheck, TimerReset } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -29,7 +29,7 @@ const durationOptions = [
   { label: "7 days", value: "168" }
 ];
 
-export function DeviceOverridePanel({ device }: { device: RecordItem }) {
+export function DeviceOverridePanel({ device, riskFlags = [] }: { device: RecordItem; riskFlags?: RecordItem[] }) {
   const router = useRouter();
   const [action, setAction] = useState("temp-unlock");
   const [durationHours, setDurationHours] = useState("60");
@@ -38,6 +38,11 @@ export function DeviceOverridePanel({ device }: { device: RecordItem }) {
   const deviceId = String(device._id || device.id || "");
   const selectedAction = actions.find((item) => item.value === action) || actions[0];
   const Icon = selectedAction.icon;
+  const activeCriticalRisks = riskFlags.filter((riskFlag) => {
+    const severity = String(riskFlag.severity || "").toLowerCase();
+    const status = String(riskFlag.status || "").toLowerCase();
+    return severity === "critical" && !["resolved", "cleared", "false_positive"].includes(status);
+  });
 
   async function submit() {
     if (!reason.trim()) {
@@ -96,6 +101,12 @@ export function DeviceOverridePanel({ device }: { device: RecordItem }) {
           </div>
         </div>
         <div className="flex flex-col gap-4 rounded-xl border bg-muted/20 p-4">
+          {activeCriticalRisks.length ? (
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <p>Active critical security risk exists. Unlock is allowed, but it does not clear risk status.</p>
+            </div>
+          ) : null}
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Icon className="size-5" aria-hidden="true" />

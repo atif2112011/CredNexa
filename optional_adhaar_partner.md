@@ -191,6 +191,7 @@ Example request:
   "address": {
     "street": "20 MI Road",
     "city": "Jaipur",
+    "district": "Jaipur",
     "state": "Rajasthan",
     "pincode": "302001"
   },

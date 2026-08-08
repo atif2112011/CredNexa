@@ -1,18 +1,31 @@
-import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
-import twilio from "twilio";
 
 import { env } from "../../config/env.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
+import {
+  normalizeDeviceRestrictionState,
+  normalizeDeviceRestrictions
+} from "../../constants/deviceRestrictions.js";
+import {
+  getDeviceSecurityControlByCommandType,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  isDeviceReleaseState
+} from "../../constants/deviceStates.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ConsentRecord } from "../../models/ConsentRecord.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
-import { DeviceCommand } from "../../models/DeviceCommand.js";
+import {
+  DEVICE_COMMAND_FAILURE_SOURCES,
+  DeviceCommand
+} from "../../models/DeviceCommand.js";
 import { DeviceEvent } from "../../models/DeviceEvent.js";
 import { DEVICE_INTEGRITY_ACTIONS, DeviceIntegrityChallenge } from "../../models/DeviceIntegrityChallenge.js";
 import { DevicePolicy } from "../../models/DevicePolicy.js";
@@ -31,23 +44,43 @@ import {
   parsePositiveInteger,
   validateAppBuildIdentity
 } from "../../services/appUpdate.service.js";
+import { getOrCreateCompanySupportContact } from "../../services/companySupportContact.service.js";
+import { renderConsentTerms } from "../../services/consentTerms.service.js";
 import {
   generateManualOverrideTokenForDevice,
   recordManualOverrideTokenUsage
 } from "../../services/manualOverrideToken.service.js";
+import {
+  applyDevicePingTelemetry,
+  parseLocationTelemetry,
+  sanitizePingEventPayload
+} from "../../services/deviceTelemetry.service.js";
+import { isExpiredLocationCommand } from "../../services/deviceLocation.service.js";
+import {
+  findNewlyAppliedAppLocks,
+  shouldAdvanceAppliedRestrictionState
+} from "../../services/deviceRestrictions.service.js";
+import {
+  buildReleasedDeviceSecurityControlState,
+  getExpectedSecurityControlResult,
+  parseSecurityControlBlockedValue,
+  selectLatestActiveSecurityControlCommands
+} from "../../services/deviceSecurityControls.service.js";
+import {
+  enforceRiskAutoLock,
+  recordIntegrityAssessment
+} from "../../services/riskManagement.service.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
-import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../../utils/appNotifications.js";
+import {
+  NOTIFICATION_AUDIENCES,
+  safeQueueAppLockNotification,
+  safeQueueNotification
+} from "../../utils/appNotifications.js";
 import { hasRequiredFields } from "../../utils/validators.js";
 
-const MOCK_CASHFREE_OTP = "123456";
-const OTP_EXPIRES_IN_SECONDS = 600;
-const OTP_DELIVERY_ERROR_MESSAGE = "Unable to send OTP right now";
-const OTP_PROVIDERS = Object.freeze({
-  MOCK: "mock",
-  TWILIO_VERIFY: "twilio_verify"
-});
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const OPEN_UNLOCK_REQUEST_STATUSES = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
 const RESOLVED_UNLOCK_REQUEST_STATUSES = [
@@ -58,7 +91,6 @@ const RESOLVED_UNLOCK_REQUEST_STATUSES = [
 ];
 const REJECTED_UNLOCK_REQUEST_STATUSES = ["REJECTED_TENANT", "REJECTED_PARTNER", "REJECTED_SUPER_ADMIN"];
 
-let twilioClient = null;
 let playIntegrityClient = null;
 
 const createAuditLog = async (payload, options = {}) => {
@@ -141,6 +173,24 @@ export const checkAppUpdate = async (req, res) => {
 
     const response = buildUpdateCheckResponse({ build, currentVersionCode });
     return sendSuccess(res, 200, "App update check completed", response);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Fetch company support contact details for borrower app help screens.
+ * Sample request: GET /app/support-contact
+ */
+export const getCompanySupportContact = async (req, res) => {
+  try {
+    const supportContact = await getOrCreateCompanySupportContact();
+    return sendSuccess(res, 200, "Company support contact fetched successfully", {
+      supportEmail: supportContact.supportEmail,
+      supportPhone: supportContact.supportPhone,
+      supportWhatsapp: supportContact.supportWhatsapp,
+      updatedAt: supportContact.updatedAt
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -298,152 +348,6 @@ const isMobileMatch = (user, mobile) => {
 
 const maskMobile = (mobile) => `${mobile.slice(0, 2)}****${mobile.slice(-4)}`;
 
-const getTwilioClient = () => {
-  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioVerifyServiceSid) {
-    throw new Error("Twilio Verify configuration is missing");
-  }
-
-  if (!twilioClient) {
-    twilioClient = twilio(env.twilioAccountSid, env.twilioAuthToken);
-  }
-
-  return twilioClient;
-};
-
-const normalizeMobileForTwilio = (mobile) => {
-  const value = String(mobile || "").trim().replace(/[^\d+]/g, "");
-
-  if (value.startsWith("+")) {
-    return value;
-  }
-
-  const countryCode = String(env.twilioDefaultCountryCode || "+91").startsWith("+")
-    ? String(env.twilioDefaultCountryCode || "+91")
-    : `+${env.twilioDefaultCountryCode}`;
-  const countryDigits = countryCode.replace(/\D/g, "");
-  const digits = value.replace(/\D/g, "").replace(/^0+/, "");
-
-  if (digits.startsWith(countryDigits) && digits.length > 10) {
-    return `+${digits}`;
-  }
-
-  return `${countryCode}${digits}`;
-};
-
-const sendMockOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
-  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-  const otpHash = await bcrypt.hash(MOCK_CASHFREE_OTP, 12);
-  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
-  const providerReferenceId = `mock_otp_ref_${crypto.randomBytes(8).toString("hex")}`;
-
-  await OtpRecord.create({
-    mobile,
-    otpHash,
-    purpose,
-    verificationSessionId,
-    enrollmentTokenId: enrollmentToken?._id,
-    userId: user._id,
-    provider: OTP_PROVIDERS.MOCK,
-    providerReferenceId,
-    expiresAt,
-    providerResponse: {
-      provider: OTP_PROVIDERS.MOCK,
-      mode: "mock",
-      status: "OTP_SENT",
-      flowType
-    }
-  });
-
-  return {
-    verificationSessionId,
-    providerReferenceId,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
-  };
-};
-
-const sendTwilioVerifyOtp = async ({ mobile, purpose, user, enrollmentToken, flowType }) => {
-  const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-  const expiresAt = new Date(Date.now() + OTP_EXPIRES_IN_SECONDS * 1000);
-  const to = normalizeMobileForTwilio(mobile);
-  let verification;
-
-  try {
-    verification = await getTwilioClient()
-      .verify.v2.services(env.twilioVerifyServiceSid)
-      .verifications.create({ to, channel: "sms" });
-  } catch (error) {
-    console.error("OTP provider send failed", {
-      provider: OTP_PROVIDERS.TWILIO_VERIFY,
-      mobile,
-      normalizedMobile: to,
-      purpose,
-      flowType,
-      userId: user?._id,
-      enrollmentTokenId: enrollmentToken?._id,
-      status: error.status,
-      code: error.code,
-      message: error.message
-    });
-    throw new Error(OTP_DELIVERY_ERROR_MESSAGE);
-  }
-
-  await OtpRecord.create({
-    mobile,
-    purpose,
-    verificationSessionId,
-    enrollmentTokenId: enrollmentToken?._id,
-    userId: user._id,
-    provider: OTP_PROVIDERS.TWILIO_VERIFY,
-    providerReferenceId: verification.sid,
-    expiresAt,
-    providerResponse: {
-      provider: OTP_PROVIDERS.TWILIO_VERIFY,
-      status: verification.status,
-      channel: verification.channel,
-      to,
-      flowType
-    }
-  });
-
-  return {
-    verificationSessionId,
-    providerReferenceId: verification.sid,
-    expiresInSeconds: OTP_EXPIRES_IN_SECONDS
-  };
-};
-
-const sendOtp = async (payload) => {
-  if (env.otpProvider === OTP_PROVIDERS.TWILIO_VERIFY) {
-    return sendTwilioVerifyOtp(payload);
-  }
-
-  return sendMockOtp(payload);
-};
-
-const verifyOtpCode = async ({ otpRecord, otp }) => {
-  if (otpRecord.provider === OTP_PROVIDERS.TWILIO_VERIFY) {
-    const to = otpRecord.providerResponse?.to || normalizeMobileForTwilio(otpRecord.mobile);
-    const verificationCheck = await getTwilioClient()
-      .verify.v2.services(env.twilioVerifyServiceSid)
-      .verificationChecks.create({ to, code: otp });
-
-    otpRecord.providerResponse = {
-      ...(otpRecord.providerResponse || {}),
-      checkStatus: verificationCheck.status,
-      checkSid: verificationCheck.sid,
-      checkedAt: new Date()
-    };
-
-    return verificationCheck.status === "approved";
-  }
-
-  if (!otpRecord.otpHash) {
-    return false;
-  }
-
-  return bcrypt.compare(otp, otpRecord.otpHash);
-};
-
 const getPlayIntegrityClient = async () => {
   if (playIntegrityClient) {
     return playIntegrityClient;
@@ -488,6 +392,7 @@ const getPlayIntegritySummary = (verdict = {}) => {
   const appIntegrity = verdict.appIntegrity || {};
   const deviceIntegrity = verdict.deviceIntegrity || {};
   const accountDetails = verdict.accountDetails || {};
+  const environmentDetails = verdict.environmentDetails || {};
 
   return {
     requestHash: requestDetails.requestHash || requestDetails.nonce,
@@ -495,7 +400,9 @@ const getPlayIntegritySummary = (verdict = {}) => {
     timestampMillis: requestDetails.timestampMillis,
     appIntegrity: appIntegrity.appRecognitionVerdict,
     deviceIntegrity: deviceIntegrity.deviceRecognitionVerdict || [],
-    appLicensingVerdict: accountDetails.appLicensingVerdict
+    appLicensingVerdict: accountDetails.appLicensingVerdict,
+    playProtectVerdict: environmentDetails.playProtectVerdict,
+    appAccessRiskVerdict: environmentDetails.appAccessRiskVerdict
   };
 };
 
@@ -573,112 +480,19 @@ const sendIntegrityDecision = (res, statusCode, success, message, data) => {
   });
 };
 
-const DEFAULT_RISK_AUTO_LOCK_TYPES = [
-  "ROOT_DETECTED",
-  "TAMPER_DETECTED",
-  "DEVICE_INTEGRITY_COMPROMISED",
-  "APP_INTEGRITY_COMPROMISED"
-];
+const RISK_INTEGRITY_ACTIONS = new Set([
+  DEVICE_INTEGRITY_ACTIONS.APP_STARTUP,
+  DEVICE_INTEGRITY_ACTIONS.DAILY_HEARTBEAT,
+  DEVICE_INTEGRITY_ACTIONS.BEFORE_POLICY_SYNC,
+  DEVICE_INTEGRITY_ACTIONS.BEFORE_UNLOCK,
+  DEVICE_INTEGRITY_ACTIONS.SUSPICIOUS_SIGNAL,
+  DEVICE_INTEGRITY_ACTIONS.ADMIN_RECHECK,
+  DEVICE_INTEGRITY_ACTIONS.APP_FOREGROUND,
+  DEVICE_INTEGRITY_ACTIONS.BOOT_COMPLETED,
+  DEVICE_INTEGRITY_ACTIONS.REMEDIATION_RECHECK
+]);
+
 const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
-
-const enforceRiskAutoLock = async ({ device, riskFlag, eventType, severity }) => {
-  const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId }).lean();
-  const riskRules = tenantPolicy?.riskRules || {};
-  const autoLockEnabled = riskRules.autoLockOnCriticalSecurityRisk !== false;
-  const autoLockTypes = riskRules.autoLockTypes?.length ? riskRules.autoLockTypes : DEFAULT_RISK_AUTO_LOCK_TYPES;
-
-  if (!autoLockEnabled || severity !== "critical" || !autoLockTypes.includes(eventType)) {
-    return { queued: false, reason: "RISK_RULE_NOT_MATCHED" };
-  }
-
-  if (device.state === DEVICE_STATES.LOCKED) {
-    return { queued: false, reason: "DEVICE_ALREADY_LOCKED" };
-  }
-
-  const policy = await DevicePolicy.findOne({
-    tenantId: device.tenantId,
-    policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-    isActive: true
-  }).lean();
-
-  if (!policy) {
-    return { queued: false, reason: "EMI_LOCKED_POLICY_NOT_FOUND" };
-  }
-
-  const existingCommand = await DeviceCommand.findOne({
-    deviceId: device._id,
-    commandType: "LOCK",
-    status: { $in: ["pending", "sent"] },
-    "payload.source": "risk_auto_lock",
-    "payload.riskFlagId": riskFlag._id.toString()
-  }).lean();
-
-  if (existingCommand) {
-    return { queued: false, reason: "LOCK_COMMAND_ALREADY_EXISTS", commandId: existingCommand._id };
-  }
-
-  const lockedDevice = await Device.findOneAndUpdate(
-    {
-      _id: device._id,
-      state: { $ne: DEVICE_STATES.LOCKED }
-    },
-    {
-      $set: {
-        state: DEVICE_STATES.LOCKED,
-        currentPolicyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-        currentPolicyId: policy._id,
-        stateUpdatedAt: new Date()
-      },
-      $inc: { desiredPolicyVersion: 1 },
-      $unset: { tempUnlockExpiresAt: "" }
-    },
-    { new: true }
-  );
-
-  if (!lockedDevice) {
-    return { queued: false, reason: "DEVICE_LOCK_CONDITION_FAILED" };
-  }
-
-  const command = await DeviceCommand.create({
-    deviceId: lockedDevice._id,
-    tenantId: lockedDevice.tenantId,
-    commandType: "LOCK",
-    triggeredBy: "auto_policy",
-    payload: {
-      source: "risk_auto_lock",
-      policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-      policyVersion: lockedDevice.desiredPolicyVersion,
-      reason: `Critical security risk: ${eventType}`,
-      riskFlagId: riskFlag._id.toString(),
-      riskType: eventType,
-      severity
-    }
-  });
-
-  await createAuditLog({
-    eventType: AUDIT_EVENTS.MANUAL_LOCK_TRIGGERED,
-    actorCollection: "system",
-    tenantId: lockedDevice.tenantId,
-    userId: lockedDevice.userId,
-    deviceId: lockedDevice._id,
-    reason: `Critical security risk: ${eventType}`,
-    metadata: {
-      source: "risk_auto_lock",
-      riskFlagId: riskFlag._id,
-      commandId: command._id,
-      riskType: eventType,
-      severity
-    }
-  });
-
-  return {
-    queued: true,
-    commandId: command._id,
-    deviceState: lockedDevice.state,
-    policyKey: lockedDevice.currentPolicyKey,
-    policyVersion: lockedDevice.desiredPolicyVersion
-  };
-};
 
 const getDeviceSyncState = async (device) => {
   const [policy, pendingCommands] = await Promise.all([
@@ -686,12 +500,49 @@ const getDeviceSyncState = async (device) => {
     DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
   ]);
 
+  const latestSecurityCommands = selectLatestActiveSecurityControlCommands(
+    pendingCommands
+  );
+  const latestSecurityCommandIds = new Set(
+    latestSecurityCommands.map((command) => String(command._id))
+  );
+  const syncCommands = pendingCommands.filter((command) => {
+    if (!getDeviceSecurityControlByCommandType(command.commandType)) return true;
+    return latestSecurityCommandIds.has(String(command._id));
+  });
+  const newlyDeliveredCommandIds = latestSecurityCommands
+    .filter((command) => command.status === "pending")
+    .map((command) => command._id);
+  if (newlyDeliveredCommandIds.length > 0) {
+    await DeviceCommand.updateMany(
+      { _id: { $in: newlyDeliveredCommandIds }, status: "pending" },
+      { $set: { status: "sent", sentAt: new Date() } }
+    );
+  }
+
   return {
     deviceState: device.state,
     currentPolicyKey: device.currentPolicyKey,
     desiredPolicyVersion: device.desiredPolicyVersion,
+    restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+    securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
     policy,
-    pendingCommands
+    pendingCommands: syncCommands.map((command) => {
+      if (getDeviceSecurityControlByCommandType(command.commandType)) {
+        return {
+          commandId: command._id,
+          commandType: command.commandType,
+          controlVersion: Number(command.payload?.controlVersion),
+          blocked: parseSecurityControlBlockedValue(command.payload?.blocked),
+          createdAt: command.createdAt
+        };
+      }
+
+      return {
+        ...command,
+        commandId: command._id
+      };
+    })
   };
 };
 
@@ -770,8 +621,8 @@ export const refreshUserAccessToken = async (req, res) => {
 };
 
 /**
- * Fetch current consent terms.
- * Sample request: GET /app/consent/terms
+ * Fetch current consent terms. POST may provide an enrollment token to populate placeholders.
+ * Sample requests: GET /app/consent/terms or POST /app/consent/terms { "enrollmentToken": "..." }
  */
 export const getConsentTerms = async (req, res) => {
   try {
@@ -781,9 +632,42 @@ export const getConsentTerms = async (req, res) => {
       return sendError(res, 400, "Active consent version not found");
     }
 
-    return sendSuccess(res, 200, "Consent terms fetched successfully", consentVersion);
+    const enrollmentTokenValue = req.method === "POST" ? String(req.body?.enrollmentToken || "").trim() : "";
+    if (!enrollmentTokenValue) {
+      return sendSuccess(res, 200, "Consent terms fetched successfully", consentVersion);
+    }
+
+    const enrollmentToken = await EnrollmentToken.findOne({
+      token: enrollmentTokenValue,
+      consumedAt: null,
+      cancelledAt: null,
+      expiresAt: { $gt: new Date() }
+    }).lean();
+    if (!enrollmentToken) {
+      return sendError(res, 400, "Valid enrollment token not found");
+    }
+
+    const [user, tenant] = await Promise.all([
+      User.findOne({
+        _id: enrollmentToken.userId,
+        tenantId: enrollmentToken.tenantId,
+        isActive: true
+      }).lean(),
+      Tenant.findOne({ _id: enrollmentToken.tenantId, isActive: true }).lean()
+    ]);
+    if (!user || !tenant) {
+      return sendError(res, 400, "Active borrower and tenant not found for enrollment token");
+    }
+
+    const rendered = renderConsentTerms({ consent: consentVersion, user, tenant });
+    res.set("Cache-Control", "no-store");
+
+    return sendSuccess(res, 200, "Consent terms fetched successfully", {
+      ...rendered.consent,
+      renderedConsentHash: rendered.renderedConsentHash
+    });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -863,7 +747,8 @@ export const initiateConsentOtp = async (req, res) => {
           flowType: FLOW_TYPES.ONBOARDING_CONSENT,
           nextStep: NEXT_STEPS.VERIFY_OTP,
           maskedMobile: maskMobile(mobile),
-          expiresInSeconds: otp.expiresInSeconds
+          expiresInSeconds: otp.expiresInSeconds,
+          retryAfterSeconds: otp.retryAfterSeconds
         });
       }
 
@@ -886,7 +771,8 @@ export const initiateConsentOtp = async (req, res) => {
           flowType: FLOW_TYPES.ONBOARDING_RESUME,
           nextStep: NEXT_STEPS.VERIFY_OTP,
           maskedMobile: maskMobile(mobile),
-          expiresInSeconds: otp.expiresInSeconds
+          expiresInSeconds: otp.expiresInSeconds,
+          retryAfterSeconds: otp.retryAfterSeconds
         });
       }
     }
@@ -910,10 +796,59 @@ export const initiateConsentOtp = async (req, res) => {
       flowType: FLOW_TYPES.DEVICE_LOGIN,
       nextStep: NEXT_STEPS.VERIFY_OTP,
       maskedMobile: maskMobile(mobile),
-      expiresInSeconds: otp.expiresInSeconds
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Resend an existing borrower OTP session.
+ * Sample body: { "mobile": "9876543210", "verificationSessionId": "otp_..." }
+ */
+export const resendConsentOtp = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId"])) {
+      return sendError(res, 400, "Mobile and verification session are required");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile: req.body.mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      verified: false,
+      purpose: {
+        $in: [
+          OTP_PURPOSES.CONSENT,
+          OTP_PURPOSES.AADHAAR_CONSENT,
+          OTP_PURPOSES.ONBOARDING_RESUME,
+          OTP_PURPOSES.DEVICE_LOGIN
+        ]
+      },
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Valid OTP session not found");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      maskedMobile: maskMobile(req.body.mobile),
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
+    });
+  } catch (error) {
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -1144,6 +1079,68 @@ export const createIntegrityChallenge = async (req, res) => {
 };
 
 /**
+ * Create a Play Integrity challenge for app-owned recurring risk checks.
+ * This endpoint is not for onboarding and never returns an onboarding decision.
+ */
+export const createRiskIntegrityChallenge = async (req, res) => {
+  try {
+    const action = req.body.action || DEVICE_INTEGRITY_ACTIONS.APP_STARTUP;
+
+    if (!RISK_INTEGRITY_ACTIONS.has(action)) {
+      return sendError(res, 400, "Valid risk integrity action is required");
+    }
+
+    const user = await User.findById(req.auth.id);
+
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+
+    const device = await Device.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const now = new Date();
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    const expiresAt = new Date(now.getTime() + env.playIntegrityChallengeTtlSeconds * 1000);
+    const requestHash = createRequestHash({
+      nonce,
+      userId: user._id.toString(),
+      tenantId: user.tenantId.toString(),
+      deviceId: device._id.toString(),
+      action,
+      flow: "risk_check",
+      issuedAt: now.toISOString()
+    });
+
+    const challenge = await DeviceIntegrityChallenge.create({
+      userId: user._id,
+      tenantId: user.tenantId,
+      action,
+      requestHash,
+      nonce,
+      deviceContext: {
+        ...(req.body.deviceContext || {}),
+        deviceId: device._id,
+        flow: "risk_check"
+      },
+      expiresAt
+    });
+
+    return sendSuccess(res, 200, "Risk integrity challenge created successfully", {
+      status: "challenge_created",
+      challengeId: challenge._id,
+      requestHash: challenge.requestHash,
+      expiresAt: challenge.expiresAt,
+      action: challenge.action
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
  * Verify Play Integrity token for a previously issued challenge.
  * Sample body: { "challengeId": "665f...", "integrityToken": "...", "action": "ONBOARDING_PRE_REGISTRATION", "localSignals": {} }
  */
@@ -1175,6 +1172,10 @@ export const verifyIntegrity = async (req, res) => {
       return sendError(res, 400, "Valid integrity challenge not found");
     }
 
+    if (challenge.deviceContext?.flow === "risk_check") {
+      return sendError(res, 400, "Use risk integrity verify for risk-check challenges");
+    }
+
     if (challenge.consumedAt) {
       console.error("[verifyIntegrity] Integrity challenge has already been used", { challengeId: challenge._id });
       return sendError(res, 400, "Integrity challenge has already been used");
@@ -1193,6 +1194,8 @@ export const verifyIntegrity = async (req, res) => {
     }
 
     const localSignals = req.body.localSignals || {};
+    const device = await Device.findOne({ userId: req.auth.id });
+    const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     let verdict;
 
     try {
@@ -1232,20 +1235,46 @@ export const verifyIntegrity = async (req, res) => {
       if (!["enforce", "enforcement"].includes(env.deviceIntegrityMode)) {
         challenge.consumedAt = new Date();
         await challenge.save();
+        const assessment = await recordIntegrityAssessment({
+          challenge,
+          device,
+          finalDecision,
+          localSignals,
+          providerError: {
+            status: error.status,
+            code: error.code,
+            message: error.message
+          }
+        });
         return sendSuccess(res, 200, "Device integrity observed successfully", {
           decision: "allow",
           integrityStatus: finalDecision.integrityStatus,
           reasonCode: finalDecision.reasonCode,
-          nextStep: NEXT_STEPS.SHOW_CONSENT
+          nextStep: NEXT_STEPS.SHOW_CONSENT,
+          integrityCheckId: assessment.integrityCheck._id,
+          riskFlagIds: assessment.riskFlags.map((flag) => flag._id)
         });
       }
 
       await challenge.save();
+      const assessment = await recordIntegrityAssessment({
+        challenge,
+        device,
+        finalDecision,
+        localSignals,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        }
+      });
       return sendIntegrityDecision(res, 503, false, "Unable to verify device security. Please try again.", {
         decision: "retry",
         integrityStatus: "temporary_failure",
         reasonCode: retryDecision.reasonCode,
-        retryAfterSeconds: 30
+        retryAfterSeconds: 30,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id)
       });
     }
 
@@ -1272,6 +1301,37 @@ export const verifyIntegrity = async (req, res) => {
     };
     await challenge.save();
 
+    const assessment = await recordIntegrityAssessment({
+      challenge,
+      device,
+      summary,
+      finalDecision,
+      localSignals,
+      rawVerdictSafeSnapshot: {
+        requestDetails: verdict.requestDetails,
+        appIntegrity: verdict.appIntegrity,
+        deviceIntegrity: verdict.deviceIntegrity,
+        accountDetails: verdict.accountDetails
+      }
+    });
+    const autoLocks = [];
+
+    if (device && enforcementEnabled) {
+      for (const riskFlag of assessment.riskFlags) {
+        const autoLock = await enforceRiskAutoLock({
+          device,
+          riskFlag,
+          eventType: riskFlag.type,
+          severity: riskFlag.severity,
+          enforce: enforcementEnabled
+        });
+        autoLocks.push({
+          riskFlagId: riskFlag._id,
+          ...autoLock
+        });
+      }
+    }
+
     if (finalDecision.decision === "allow") {
       return sendSuccess(res, 200, "Device integrity verified successfully", {
         decision: "allow",
@@ -1281,7 +1341,10 @@ export const verifyIntegrity = async (req, res) => {
         deviceIntegrity: summary.deviceIntegrity,
         appIntegrity: summary.appIntegrity,
         verifiedAt,
-        nextStep: NEXT_STEPS.SHOW_CONSENT
+        nextStep: NEXT_STEPS.SHOW_CONSENT,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        autoLocks
       });
     }
 
@@ -1291,7 +1354,10 @@ export const verifyIntegrity = async (req, res) => {
         decision: "retry",
         integrityStatus: finalDecision.integrityStatus,
         reasonCode: finalDecision.reasonCode,
-        retryAfterSeconds: 30
+        retryAfterSeconds: 30,
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        autoLocks
       });
     }
     console.error("[verifyIntegrity] Device integrity verification failed", { challengeId: challenge._id });
@@ -1299,10 +1365,206 @@ export const verifyIntegrity = async (req, res) => {
       decision: finalDecision.decision,
       integrityStatus: finalDecision.integrityStatus,
       reasonCode: finalDecision.reasonCode,
-      nextStep: "DEVICE_INTEGRITY_FAILED"
+      nextStep: "DEVICE_INTEGRITY_FAILED",
+      integrityCheckId: assessment.integrityCheck._id,
+      riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+      autoLocks
     });
   } catch (error) {
     console.error("[verifyIntegrity] Internal server error", { error });
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Verify Play Integrity for app-owned recurring risk checks.
+ * This endpoint records backend risk state and queues commands; the app must act from sync/FCM commands, not this response.
+ */
+export const verifyRiskIntegrity = async (req, res) => {
+  try {
+    if (!hasRequiredFields(req.body, ["challengeId", "integrityToken", "action"])) {
+      return sendError(res, 400, "Challenge ID, integrity token, and action are required");
+    }
+
+    if (!mongoose.isValidObjectId(req.body.challengeId)) {
+      return sendError(res, 400, "Valid challenge ID is required");
+    }
+
+    if (!RISK_INTEGRITY_ACTIONS.has(req.body.action)) {
+      return sendError(res, 400, "Valid risk integrity action is required");
+    }
+
+    const challenge = await DeviceIntegrityChallenge.findOne({
+      _id: req.body.challengeId,
+      userId: req.auth.id,
+      action: req.body.action
+    });
+
+    if (!challenge) {
+      return sendError(res, 400, "Valid risk integrity challenge not found");
+    }
+
+    if (challenge.deviceContext?.flow !== "risk_check") {
+      return sendError(res, 400, "Risk integrity verify requires a risk-check challenge");
+    }
+
+    if (challenge.consumedAt) {
+      return sendError(res, 400, "Risk integrity challenge has already been used");
+    }
+
+    if (new Date(challenge.expiresAt) <= new Date()) {
+      challenge.integrityStatus = "temporary_failure";
+      challenge.reasonCode = "CHALLENGE_EXPIRED";
+      await challenge.save();
+      return sendSuccess(res, 200, "Risk integrity challenge expired. Please retry with a fresh challenge.", {
+        status: "retry_required",
+        reasonCode: "CHALLENGE_EXPIRED",
+        syncRecommended: false,
+        commandsQueued: []
+      });
+    }
+
+    const localSignals = req.body.localSignals || {};
+    const device = await Device.findOne({ userId: req.auth.id });
+    if (!device) {
+      return sendError(res, 400, "Registered device not found");
+    }
+
+    const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
+    const verifiedAt = new Date();
+    let verdict;
+
+    try {
+      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken });
+    } catch (error) {
+      console.error("Risk Play Integrity verification failed", {
+        challengeId: challenge._id,
+        userId: challenge.userId,
+        action: challenge.action,
+        status: error.status,
+        code: error.code,
+        message: error.message
+      });
+
+      const retryDecision = {
+        decision: "retry",
+        integrityStatus: "temporary_failure",
+        reasonCode: "PLAY_INTEGRITY_VERIFICATION_UNAVAILABLE"
+      };
+      const finalDecision = applyObserveModeDecision(retryDecision);
+
+      challenge.consumedAt = verifiedAt;
+      challenge.verifiedAt = verifiedAt;
+      challenge.decision = finalDecision.decision;
+      challenge.integrityStatus = finalDecision.integrityStatus;
+      challenge.reasonCode = finalDecision.reasonCode;
+      challenge.verificationSummary = {
+        mode: env.deviceIntegrityMode,
+        flow: "risk_check",
+        observedDecision: finalDecision.observedDecision,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        },
+        localSignals
+      };
+      await challenge.save();
+
+      const assessment = await recordIntegrityAssessment({
+        challenge,
+        device,
+        finalDecision,
+        localSignals,
+        providerError: {
+          status: error.status,
+          code: error.code,
+          message: error.message
+        }
+      });
+
+      return sendSuccess(res, 200, "Risk integrity result recorded", {
+        status: "recorded",
+        integrityCheckId: assessment.integrityCheck._id,
+        riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+        resolvedRiskIds: assessment.integrityCheck.resolvedRiskIds || [],
+        commandsQueued: [],
+        syncRecommended: true
+      });
+    }
+
+    const summary = getPlayIntegritySummary(verdict);
+    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals });
+    const finalDecision = applyObserveModeDecision(evaluatedDecision);
+
+    challenge.consumedAt = verifiedAt;
+    challenge.verifiedAt = verifiedAt;
+    challenge.decision = finalDecision.decision;
+    challenge.integrityStatus = finalDecision.integrityStatus;
+    challenge.reasonCode = finalDecision.reasonCode;
+    challenge.verificationSummary = {
+      mode: env.deviceIntegrityMode,
+      flow: "risk_check",
+      observedDecision: finalDecision.observedDecision,
+      requiredLevel: env.playIntegrityRequiredDeviceVerdict,
+      packageName: summary.packageName,
+      requestHashMatched: summary.requestHash === challenge.requestHash,
+      appIntegrity: summary.appIntegrity,
+      deviceIntegrity: summary.deviceIntegrity,
+      appLicensingVerdict: summary.appLicensingVerdict,
+      localSignals
+    };
+    await challenge.save();
+
+    const assessment = await recordIntegrityAssessment({
+      challenge,
+      device,
+      summary,
+      finalDecision,
+      localSignals,
+      rawVerdictSafeSnapshot: {
+        requestDetails: verdict.requestDetails,
+        appIntegrity: verdict.appIntegrity,
+        deviceIntegrity: verdict.deviceIntegrity,
+        accountDetails: verdict.accountDetails
+      }
+    });
+
+    const commandsQueued = [];
+
+    if (enforcementEnabled) {
+      for (const riskFlag of assessment.riskFlags) {
+        const autoLock = await enforceRiskAutoLock({
+          device,
+          riskFlag,
+          eventType: riskFlag.type,
+          severity: riskFlag.severity,
+          enforce: enforcementEnabled
+        });
+
+        if (autoLock.queued) {
+          commandsQueued.push({
+            commandType: "LOCK",
+            commandId: autoLock.commandId,
+            riskFlagId: riskFlag._id,
+            source: "risk_auto_lock",
+            policyKey: autoLock.policyKey,
+            policyVersion: autoLock.policyVersion
+          });
+        }
+      }
+    }
+
+    return sendSuccess(res, 200, "Risk integrity result recorded", {
+      status: "recorded",
+      integrityCheckId: assessment.integrityCheck._id,
+      riskFlagIds: assessment.riskFlags.map((flag) => flag._id),
+      resolvedRiskIds: assessment.integrityCheck.resolvedRiskIds || [],
+      commandsQueued,
+      syncRecommended: true
+    });
+  } catch (error) {
+    console.error("[verifyRiskIntegrity] Internal server error", { error });
     return sendError(res, 500, error.message || "Internal server error");
   }
 };
@@ -1347,7 +1609,7 @@ export const acceptConsent = async (req, res) => {
       });
     }
 
-    const [consentVersion, otpRecord, enrollmentToken] = await Promise.all([
+    const [consentVersion, otpRecord, enrollmentToken, tenant] = await Promise.all([
       ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
       OtpRecord.findOne({
         userId: user._id,
@@ -1357,10 +1619,12 @@ export const acceptConsent = async (req, res) => {
       }).sort({ updatedAt: -1 }),
       EnrollmentToken.findOne({
         userId: user._id,
+        tenantId: user.tenantId,
         consumedAt: null,
         cancelledAt: null,
         expiresAt: { $gt: new Date() }
-      }).sort({ createdAt: -1 })
+      }).sort({ createdAt: -1 }),
+      Tenant.findOne({ _id: user.tenantId, isActive: true }).lean()
     ]);
 
     if (!consentVersion) {
@@ -1373,6 +1637,20 @@ export const acceptConsent = async (req, res) => {
 
     if (!enrollmentToken || !otpRecord.enrollmentTokenId?.equals(enrollmentToken._id)) {
       return sendError(res, 400, "Valid enrollment token not found");
+    }
+
+    if (!tenant) {
+      return sendError(res, 400, "Active tenant not found");
+    }
+
+    const rendered = renderConsentTerms({
+      consent: consentVersion.toObject(),
+      user,
+      tenant
+    });
+    const requestedRenderedConsentHash = String(req.body.renderedConsentHash || "").trim();
+    if (requestedRenderedConsentHash && requestedRenderedConsentHash !== rendered.renderedConsentHash) {
+      return sendError(res, 409, "Consent terms changed. Fetch the consent terms again before accepting.");
     }
 
     const isAdhaarConsent = otpRecord.purpose === OTP_PURPOSES.AADHAAR_CONSENT;
@@ -1391,7 +1669,9 @@ export const acceptConsent = async (req, res) => {
       aadhaarVerificationRef,
       verificationSessionId: otpRecord.verificationSessionId,
       consentCheckboxAccepted: true,
-      verifiedProfile
+      verifiedProfile,
+      renderedConsent: rendered.snapshot,
+      renderedConsentHash: rendered.renderedConsentHash
     };
 
     session.startTransaction();
@@ -1437,6 +1717,7 @@ export const acceptConsent = async (req, res) => {
     return sendSuccess(res, 201, "Consent accepted successfully", {
       consentRecordId: consentRecord._id,
       consentAccepted: true,
+      renderedConsentHash: rendered.renderedConsentHash,
       accessToken: signUserAccessToken(user),
       tokenType: "user",
       nextStep: NEXT_STEPS.REGISTER_DEVICE,
@@ -1451,7 +1732,7 @@ export const acceptConsent = async (req, res) => {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   } finally {
     session.endSession();
   }
@@ -1481,12 +1762,6 @@ export const registerDevice = async (req, res) => {
 
     if (user.isDeviceLinked) {
       return sendError(res, 400, "User is already linked to a device");
-    }
-
-    const existingDevice = await Device.findOne({ imei: req.body.imei }).lean();
-
-    if (existingDevice) {
-      return sendError(res, 400, "IMEI is already registered");
     }
 
     const activePolicy = await DevicePolicy.findOne({
@@ -1755,7 +2030,7 @@ export const getInstallments = async (req, res) => {
     return sendSuccess(res, 200, "Installments fetched successfully", {
       loanDetails: buildLoanDetails(user, schedule),
       installments: [...schedule.installments]
-        .sort((a, b) => Number(a.installmentNumber || 0) - Number(b.installmentNumber || 0))
+        .sort((a, b) => Number(b.installmentNumber || 0) - Number(a.installmentNumber || 0))
         .map(buildInstallmentSummary)
     });
   } catch (error) {
@@ -1913,6 +2188,22 @@ export const submitPayment = async (req, res) => {
       metadata: { paymentId: payment._id, amount }
     });
 
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.TENANT,
+      tenantId: device.tenantId,
+      title: "New payment approval request",
+      text: "A borrower payment has been submitted for review.",
+      notificationType: "PAYMENT_SUBMITTED",
+      data: {
+        paymentId: payment._id,
+        tenantId: device.tenantId,
+        userId: req.auth.id,
+        deviceId: device._id,
+        amount,
+        reference: payment.metadata?.reference || null
+      }
+    });
+
     return sendSuccess(res, 201, "Payment submitted for tenant approval", {
       paymentId: payment._id,
       status: payment.status,
@@ -1930,7 +2221,7 @@ export const submitPayment = async (req, res) => {
  */
 export const getPaymentHistory = async (req, res) => {
   try {
-    const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1 }).lean();
+    const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1, _id: -1 }).lean();
     return sendSuccess(res, 200, "Payment history fetched successfully", payments);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2113,7 +2404,7 @@ export const listBorrowerUnlockRequests = async (req, res) => {
 
     const [items, total] = await Promise.all([
       UnlockRequest.find(filter)
-        .sort({ [sortField]: sortOrder, createdAt: -1 })
+        .sort({ [sortField]: sortOrder, createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -2140,15 +2431,21 @@ export const pingDevice = async (req, res) => {
       return sendError(res, 400, "Registered device not found");
     }
 
-    device.lastSeenAt = new Date();
+    const now = new Date();
+    device.lastSeenAt = now;
     device.isOnline = true;
     device.batteryLevel = req.body.batteryLevel ?? device.batteryLevel;
     device.networkType = req.body.networkType ?? device.networkType;
     device.appVersion = req.body.appVersion ?? device.appVersion;
     if (req.body.fcmToken && req.body.fcmToken !== device.fcmToken) {
       device.fcmToken = req.body.fcmToken;
-      device.fcmTokenUpdatedAt = new Date();
+      device.fcmTokenUpdatedAt = now;
     }
+    const { telemetryWarnings } = applyDevicePingTelemetry({
+      device,
+      body: req.body,
+      now
+    });
     await device.save();
 
     await DeviceEvent.create({
@@ -2156,14 +2453,16 @@ export const pingDevice = async (req, res) => {
       userId: req.auth.id,
       tenantId: device.tenantId,
       eventType: "ping",
-      payload: req.body
+      payload: sanitizePingEventPayload(req.body)
     });
 
+    const syncState = await getDeviceSyncState(device);
     return sendSuccess(res, 200, "Device ping received", {
       deviceId: device._id,
-      serverTime: new Date(),
-      desiredPolicyVersion: device.desiredPolicyVersion,
-      lastAppliedPolicyVersion: device.lastAppliedPolicyVersion
+      serverTime: now,
+      lastAppliedPolicyVersion: device.lastAppliedPolicyVersion,
+      telemetryWarnings,
+      ...syncState
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2194,7 +2493,7 @@ export const syncDevice = async (req, res) => {
       userId: req.auth.id,
       tenantId: device.tenantId,
       eventType: "sync",
-      payload: req.body
+      payload: sanitizePingEventPayload(req.body)
     });
 
     if (req.body.manualOverride?.active || req.body.manualOverride?.tokenId) {
@@ -2211,10 +2510,226 @@ export const syncDevice = async (req, res) => {
     return sendSuccess(res, 200, "Device sync completed", {
       serverTime: new Date(),
       scheduledLockAt,
+      telemetryWarnings:
+        req.body.location !== undefined
+          ? [
+              {
+                field: "location",
+                code: "LOCATION_COMMAND_REQUIRED",
+                message:
+                  "Routine sync location was ignored; location is accepted only for GET_LOCATION acknowledgement"
+              }
+            ]
+          : [],
       ...syncState
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+const securityAckError = (statusCode, code, message, details = {}) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  error.details = details;
+  return error;
+};
+
+const acknowledgeSecurityControlCommand = async ({ req, res, deviceId, commandId }) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const device = await Device.findById(deviceId).session(session);
+    const command = await DeviceCommand.findOne({
+      _id: commandId,
+      deviceId
+    }).session(session);
+    if (!device || !command) {
+      throw securityAckError(
+        404,
+        "COMMAND_NOT_FOUND",
+        "Security control command was not found"
+      );
+    }
+
+    const control = getDeviceSecurityControlByCommandType(command.commandType);
+    if (!control) {
+      throw securityAckError(409, "COMMAND_TYPE_MISMATCH", "Command is not a security control command");
+    }
+    if (req.body.commandType && req.body.commandType !== command.commandType) {
+      throw securityAckError(409, "COMMAND_TYPE_MISMATCH", "Command type does not match the referenced command", {
+        expected: { commandType: command.commandType },
+        received: { commandType: req.body.commandType }
+      });
+    }
+
+    const appliedControlVersion = Number(req.body.appliedControlVersion);
+    const commandVersion = Number(command.payload?.controlVersion);
+    if (
+      !Number.isInteger(appliedControlVersion) ||
+      appliedControlVersion < 0 ||
+      appliedControlVersion !== commandVersion
+    ) {
+      throw securityAckError(409, "COMMAND_VERSION_MISMATCH", "Applied control version does not match the referenced command", {
+        expected: { controlVersion: commandVersion },
+        received: { appliedControlVersion: req.body.appliedControlVersion }
+      });
+    }
+
+    const expectedBlocked = parseSecurityControlBlockedValue(command.payload?.blocked);
+    if (expectedBlocked === null) {
+      throw securityAckError(500, "INVALID_COMMAND_SNAPSHOT", "Security control command has an invalid stored value");
+    }
+
+    const expectedControlResult = getExpectedSecurityControlResult(
+      command.commandType,
+      expectedBlocked
+    );
+    if (req.body.status === "acknowledged") {
+      if (
+        typeof req.body.appliedBlocked !== "boolean" ||
+        req.body.appliedBlocked !== expectedBlocked
+      ) {
+        throw securityAckError(409, "COMMAND_VALUE_MISMATCH", "Applied blocked value does not match the referenced command", {
+          expected: { blocked: expectedBlocked },
+          received: { appliedBlocked: req.body.appliedBlocked }
+        });
+      }
+      if (req.body.controlResult !== expectedControlResult) {
+        throw securityAckError(409, "COMMAND_RESULT_MISMATCH", "Control result does not match the referenced command", {
+          expected: { controlResult: expectedControlResult },
+          received: { controlResult: req.body.controlResult }
+        });
+      }
+    } else if (!req.body.errorCode || !req.body.failureReason) {
+      throw securityAckError(
+        400,
+        "INVALID_FAILED_ACK",
+        "errorCode and failureReason are required for a failed security control acknowledgement"
+      );
+    }
+
+    const currentState = normalizeDeviceSecurityControlState(device.securityControlState);
+    const currentVersion = currentState[control.key].desiredVersion;
+    const stale = appliedControlVersion < currentVersion;
+    const terminalStatusAlreadyRecorded =
+      command.status === "acknowledged" ||
+      (command.status === "failed" &&
+        command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT);
+
+    if (terminalStatusAlreadyRecorded) {
+      const previousAck = command.ackPayload || {};
+      const comparableAckFields = [
+        "appliedBlocked",
+        "controlResult",
+        "errorCode",
+        "failureReason"
+      ];
+      const sameAcknowledgement =
+        command.status === req.body.status &&
+        Number(previousAck.appliedControlVersion) === appliedControlVersion &&
+        comparableAckFields.every(
+          (field) => (previousAck[field] ?? null) === (req.body[field] ?? null)
+        );
+
+      if (!sameAcknowledgement) {
+        throw securityAckError(409, "COMMAND_ACK_CONFLICT", "Security control command already has a conflicting acknowledgement");
+      }
+
+      await session.commitTransaction();
+      return sendSuccess(res, 200, "Device command acknowledgement already saved", {
+        accepted: true,
+        idempotent: true,
+        stale,
+        currentControlVersion: currentVersion,
+        commandId: command._id,
+        commandType: command.commandType,
+        status: command.status,
+        appliedControlVersion,
+        ...(command.status === "acknowledged"
+          ? {
+              appliedBlocked: req.body.appliedBlocked,
+              controlResult: req.body.controlResult
+            }
+          : {})
+      });
+    }
+
+    command.status = req.body.status;
+    command.ackPayload = req.body;
+    command.failureReason = req.body.failureReason;
+    command.failureSource =
+      req.body.status === "failed"
+        ? DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+        : undefined;
+    command.nextRetryAt = undefined;
+
+    if (req.body.status === "acknowledged") {
+      command.acknowledgedAt = new Date();
+      if (!stale && appliedControlVersion === currentVersion) {
+        device.set(
+          `securityControlState.${control.key}.appliedBlocked`,
+          req.body.appliedBlocked
+        );
+        device.set(
+          `securityControlState.${control.key}.appliedVersion`,
+          appliedControlVersion
+        );
+        device.set(`securityControlState.${control.key}.appliedAt`, new Date());
+        await device.save({ session });
+      }
+    }
+
+    await command.save({ session });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+        actorId: req.auth.id,
+        actorCollection: "users",
+        tenantId: device.tenantId,
+        userId: req.auth.id,
+        deviceId: device._id,
+        metadata: {
+          commandId: command._id,
+          commandType: command.commandType,
+          status: command.status,
+          stale,
+          appliedControlVersion
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device command acknowledgement saved", {
+      accepted: true,
+      idempotent: false,
+      stale,
+      currentControlVersion: currentVersion,
+      commandId: command._id,
+      commandType: command.commandType,
+      status: command.status,
+      appliedControlVersion,
+      ...(command.status === "acknowledged"
+        ? {
+            appliedBlocked: req.body.appliedBlocked,
+            controlResult: req.body.controlResult
+          }
+        : {})
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.code ? { code: error.code, ...error.details } : null
+    );
+  } finally {
+    session.endSession();
   }
 };
 
@@ -2235,45 +2750,224 @@ export const acknowledgeDeviceCommand = async (req, res) => {
 
     const command = await DeviceCommand.findOne({ _id: req.body.commandId, deviceId: device._id });
     if (!command) {
-      return sendError(res, 404, "Device command not found");
+      return sendError(res, 404, "Device command not found", {
+        code: "COMMAND_NOT_FOUND"
+      });
     }
 
     if (!["acknowledged", "failed"].includes(req.body.status)) {
       return sendError(res, 400, "Status must be acknowledged or failed");
     }
 
+    if (isExpiredLocationCommand(command)) {
+      return sendError(res, 409, "Location request is no longer active", {
+        code: "COMMAND_EXPIRED"
+      });
+    }
+
+    if (getDeviceSecurityControlByCommandType(command.commandType)) {
+      return acknowledgeSecurityControlCommand({
+        req,
+        res,
+        deviceId: device._id,
+        commandId: command._id
+      });
+    }
+
+    if (isDeviceReleaseState(device.state) && command.commandType !== "RELEASE_DEVICE") {
+      return sendError(res, 409, "Command was superseded by permanent device release");
+    }
+
+    if (
+      command.commandType === "RELEASE_DEVICE" &&
+      req.body.status === "acknowledged" &&
+      req.body.releaseCompleted !== true
+    ) {
+      return sendError(res, 400, "releaseCompleted must be true for a successful device release");
+    }
+
+    const terminalStatusAlreadyRecorded =
+      command.status === "acknowledged" ||
+      (
+        command.status === "failed" &&
+        command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+      );
+    if (terminalStatusAlreadyRecorded) {
+      if (command.status !== req.body.status) {
+        return sendError(res, 409, "Device command already has a different terminal status");
+      }
+
+      return sendSuccess(res, 200, "Device command acknowledgement saved", {
+        commandId: command._id,
+        status: command.status,
+        deviceState: device.state,
+        restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+        securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
+        lastLocation: device.lastLocation || null
+      });
+    }
+
+    let newlyLockedRestrictions = [];
+
     command.status = req.body.status;
     command.ackPayload = req.body;
     command.failureReason = req.body.failureReason;
+    command.failureSource =
+      req.body.status === "failed"
+        ? DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT
+        : undefined;
+    if (req.body.status === "failed") {
+      command.nextRetryAt = undefined;
+    }
     if (req.body.status === "acknowledged") {
       command.acknowledgedAt = new Date();
-      device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
-      if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
-      if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
-      if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
-      if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
-        device.state = command.payload.targetState;
+      if (command.commandType === "RELEASE_DEVICE") {
+        const releasedAt = new Date();
+        const clearedRestrictions = normalizeDeviceRestrictions();
+        const clearedSecurityControls = buildReleasedDeviceSecurityControlState(
+          device.securityControlState,
+          releasedAt,
+          command.triggeredByAccountId || null
+        );
+        device.state = DEVICE_STATES.RELEASED;
+        device.deviceOwnerStatus = "RELEASED";
+        device.releasedAt = releasedAt;
+        device.tempUnlockExpiresAt = undefined;
+        device.restrictionState.desired = clearedRestrictions;
+        device.restrictionState.applied = clearedRestrictions;
+        device.restrictionState.updatedAt = releasedAt;
+        device.restrictionState.appliedAt = releasedAt;
+        device.securityControlState = clearedSecurityControls;
+        device.lastPolicyAppliedAt = releasedAt;
+        device.stateUpdatedAt = releasedAt;
+      } else if (command.commandType === "RESTRICTIONS_UPDATE") {
+        const appliedRestrictionsVersion = Number(req.body.appliedRestrictionsVersion);
+        const commandVersion = Number(command.payload?.restrictionVersion);
+        if (
+          !Number.isInteger(appliedRestrictionsVersion) ||
+          appliedRestrictionsVersion < 0 ||
+          appliedRestrictionsVersion !== commandVersion
+        ) {
+          return sendError(
+            res,
+            400,
+            "appliedRestrictionsVersion must match the restriction command version"
+          );
+        }
+
+        const currentRestrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+        if (
+          shouldAdvanceAppliedRestrictionState({
+            currentAppliedVersion: currentRestrictionState.appliedVersion,
+            acknowledgedVersion: appliedRestrictionsVersion
+          })
+        ) {
+          const nextAppliedRestrictions = normalizeDeviceRestrictions(
+            req.body.appliedRestrictions || command.payload?.restrictions
+          );
+          newlyLockedRestrictions = findNewlyAppliedAppLocks({
+            previousRestrictions: currentRestrictionState.applied,
+            appliedRestrictions: nextAppliedRestrictions,
+            restrictionResults: req.body.restrictionResults
+          });
+          device.restrictionState.applied = nextAppliedRestrictions;
+          device.restrictionState.appliedVersion = appliedRestrictionsVersion;
+          device.restrictionState.appliedAt = new Date();
+        }
+      } else if (command.commandType === "GET_LOCATION") {
+        const locationResult = parseLocationTelemetry({
+          location: req.body.location,
+          currentLocation: device.lastLocation,
+          now: new Date()
+        });
+        if (!locationResult.value) {
+          return sendError(
+            res,
+            400,
+            locationResult.warnings[0]?.message ||
+              "A valid location is required to acknowledge GET_LOCATION"
+          );
+        }
+        device.lastLocation = locationResult.value;
+      } else if (command.commandType === "EMI_REMINDER") {
+        // Reminder acknowledgement is terminal for the command only. It does
+        // not represent a policy transition or change device enforcement state.
+      } else {
+        device.lastAppliedPolicyVersion = req.body.appliedPolicyVersion ?? device.desiredPolicyVersion;
+        if (command.commandType === "UNLOCK") device.state = DEVICE_STATES.ACTIVE;
+        if (command.commandType === "LOCK") device.state = DEVICE_STATES.LOCKED;
+        if (command.commandType === "TEMP_UNLOCK") device.state = DEVICE_STATES.TEMP_UNLOCK;
+        if (command.commandType === "WIPE_DEVICE") device.deviceSecurityState = "WIPED_PENDING_REPROVISION";
+        if (command.commandType === "INSTALL_UPDATE" && req.body.appVersion) device.appVersion = req.body.appVersion;
+        if (command.commandType === "POLICY_UPDATE" && command.payload?.targetState) {
+          device.state = command.payload.targetState;
+        }
+        device.lastPolicyAppliedAt = new Date();
+        device.stateUpdatedAt = new Date();
       }
-      device.lastPolicyAppliedAt = new Date();
-      device.stateUpdatedAt = new Date();
       await device.save();
     }
     await command.save();
+    if (command.commandType === "RELEASE_DEVICE" && command.status === "acknowledged") {
+      await DeviceCommand.updateMany(
+        {
+          _id: { $ne: command._id },
+          deviceId: device._id,
+          commandType: "RELEASE_DEVICE",
+          status: { $in: ["pending", "sent"] }
+        },
+        {
+          $set: {
+            status: "expired",
+            failureReason: "Superseded by acknowledged permanent device release"
+          },
+          $unset: { nextRetryAt: "" }
+        }
+      );
+    }
 
     await createAuditLog({
-      eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+      eventType:
+        command.commandType === "RELEASE_DEVICE"
+          ? req.body.status === "acknowledged"
+            ? AUDIT_EVENTS.DEVICE_RELEASED
+            : AUDIT_EVENTS.DEVICE_RELEASE_FAILED
+          : AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
       actorId: req.auth.id,
       actorCollection: "users",
       tenantId: device.tenantId,
       userId: req.auth.id,
       deviceId: device._id,
-      metadata: { commandId: command._id, status: command.status }
+      metadata: {
+        commandId: command._id,
+        commandType: command.commandType,
+        status: command.status,
+        releaseCompleted: req.body.releaseCompleted
+      }
     });
+
+    if (
+      command.commandType === "RESTRICTIONS_UPDATE" &&
+      command.triggeredBy === "manual_tenant" &&
+      command.status === "acknowledged" &&
+      newlyLockedRestrictions.length > 0
+    ) {
+      await safeQueueAppLockNotification({
+        deviceId: device._id,
+        tenantId: device.tenantId,
+        sourceCommandId: command._id,
+        triggeredBy: command.triggeredBy,
+        triggeredByAccountId: command.triggeredByAccountId
+      });
+    }
 
     return sendSuccess(res, 200, "Device command acknowledgement saved", {
       commandId: command._id,
       status: command.status,
-      deviceState: device.state
+      deviceState: device.state,
+      restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+      securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
+      lastLocation: device.lastLocation || null
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2317,7 +3011,9 @@ export const reportSecurityEvent = async (req, res) => {
 
     const riskFlag = await RiskFlag.create({
       type: req.body.type,
+      riskType: req.body.type,
       severity,
+      source: "app_reported_security_event",
       tenantId: device.tenantId,
       deviceId: device._id,
       userId: req.auth.id,

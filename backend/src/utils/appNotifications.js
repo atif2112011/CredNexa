@@ -14,6 +14,12 @@ export const NOTIFICATION_AUDIENCES = Object.freeze({
   PARTNER: "partner"
 });
 
+export const APP_LOCK_NOTIFICATION = Object.freeze({
+  title: "App access restricted",
+  text: "Access to this app has been temporarily blocked because your EMI payment is overdue. Please pay your pending EMI to avoid further app restrictions.",
+  notificationType: "APP_LOCKED_OVERDUE_EMI"
+});
+
 const normalizeNotificationText = ({ title, text }) => ({
   title: String(title || "").trim(),
   text: String(text || "").trim()
@@ -158,6 +164,61 @@ export const queueBorrowerNotification = async ({
       }
     }))
   );
+};
+
+export const queueAppLockNotification = async ({
+  deviceId,
+  tenantId,
+  sourceCommandId,
+  triggeredBy = "manual_tenant",
+  triggeredByAccountId
+}) => {
+  if (!deviceId || !tenantId || !sourceCommandId) {
+    throw new Error("App lock notification requires deviceId, tenantId, and sourceCommandId");
+  }
+
+  const normalizedSourceCommandId = String(sourceCommandId);
+  const existingCommand = await DeviceCommand.findOne({
+    deviceId,
+    tenantId,
+    commandType: "NOTIFICATION",
+    "payload.notificationType": APP_LOCK_NOTIFICATION.notificationType,
+    "payload.data.sourceCommandId": normalizedSourceCommandId
+  }).lean();
+
+  if (existingCommand) {
+    return { command: existingCommand, created: false };
+  }
+
+  const commands = await queueBorrowerNotification({
+    deviceId,
+    tenantId,
+    title: APP_LOCK_NOTIFICATION.title,
+    text: APP_LOCK_NOTIFICATION.text,
+    notificationType: APP_LOCK_NOTIFICATION.notificationType,
+    data: { sourceCommandId: normalizedSourceCommandId },
+    triggeredBy,
+    triggeredByAccountId
+  });
+
+  return {
+    command: commands[0] || null,
+    created: commands.length > 0
+  };
+};
+
+export const safeQueueAppLockNotification = async (payload) => {
+  try {
+    return await queueAppLockNotification(payload);
+  } catch (error) {
+    console.error("Failed to queue app lock notification", {
+      deviceId: payload?.deviceId,
+      tenantId: payload?.tenantId,
+      sourceCommandId: payload?.sourceCommandId,
+      message: error.message
+    });
+    return { command: null, created: false, error: error.message };
+  }
 };
 
 export const queueNotification = async ({

@@ -24,6 +24,14 @@ import { Tenant } from "../../models/Tenant.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
+import { sendPayoutMail } from "../../services/mail.service.js";
+import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
+import {
+  DEFAULT_TENANT_ONBOARDING_LIMIT,
+  enforcePartnerTenantOnboarding,
+  isValidPincode,
+  PartnerTenantOnboardingError
+} from "../../services/partnerTenantOnboarding.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
@@ -55,11 +63,7 @@ const isTruthyQueryParam = (value) => ["true", "1", "yes"].includes(String(value
 
 const createTemporaryPassword = () => `CNX-${crypto.randomBytes(6).toString("base64url")}Aa1!`;
 
-const PARTNER_SIGNUP_OTP = "123456";
-const PARTNER_SIGNUP_OTP_EXPIRY_SECONDS = 10 * 60;
 const PARTNER_SIGNUP_PURPOSE = "partner_signup";
-const TENANT_CREATION_OTP = "123456";
-const TENANT_CREATION_OTP_EXPIRY_SECONDS = 10 * 60;
 const TENANT_CREATION_PURPOSE = "tenant_creation";
 const TENANT_CREATION_VERIFICATION_MODES = ["mobile_otp", "aadhaar_otp"];
 const CHANNEL_PARTNER_TYPES = ["nbfc_group", "retail_chain_group", "independent"];
@@ -83,6 +87,7 @@ const normalizeAddressPayload = (payload = {}) => {
   return {
     street: String(addressInput.street || payload.street || payload.address || "").trim(),
     city: String(addressInput.city || payload.city || "").trim(),
+    district: String(addressInput.district || payload.district || "").trim(),
     state: String(addressInput.state || payload.state || "").trim(),
     pincode: String(addressInput.pincode || payload.pincode || "").trim()
   };
@@ -91,13 +96,19 @@ const normalizeAddressPayload = (payload = {}) => {
 const getAddressValidationError = (address) => {
   if (!address.street) return "address.street is required";
   if (!address.city) return "address.city is required";
+  if (!address.district) return "address.district is required";
   if (!address.state) return "address.state is required";
   if (!address.pincode) return "address.pincode is required";
+  if (!isValidPincode(address.pincode)) return "address.pincode must be a valid 6 digit pincode";
   return null;
 };
 
 const normalizeTenantPocPayload = (payload = {}) => ({
+<<<<<<< HEAD
   pocName: String(payload.pocName || payload.pocname ||"").trim(),
+=======
+  pocName: String(payload.pocName || payload.pocname || "").trim(),
+>>>>>>> b082da18f408804748c032769ee7b7ff414fad5f
   pocPhone: normalizeMobile(payload.pocPhone),
   pocDesignation: String(payload.pocDesignation || "").trim()
 });
@@ -112,9 +123,9 @@ const getTenantPocValidationError = ({ pocName, pocPhone, pocDesignation }) => {
 
 const ensurePartnerSignupUnique = async ({ mobile, email }) => {
   const [accountByMobile, partnerByMobile, accountByEmail] = await Promise.all([
-    Account.findOne({ mobile }).lean(),
+    Account.findOne({ mobile, role: ACCOUNT_ROLES.PARTNER_ADMIN }).lean(),
     ChannelPartner.findOne({ contactPhone: mobile }).lean(),
-    email ? Account.findOne({ email }).lean() : null
+    email ? Account.findOne({ email, role: ACCOUNT_ROLES.PARTNER_ADMIN }).lean() : null
   ]);
 
   if (accountByMobile || partnerByMobile) {
@@ -156,6 +167,22 @@ const validateTenantBelongsToPartner = async (tenantId, channelPartnerId) => {
   return Tenant.findOne({ _id: tenantId, channelPartnerId });
 };
 
+const findExistingTenantAdminAccount = async ({ mobile, email }) => {
+  const filters = [{ role: ACCOUNT_ROLES.TENANT_ADMIN }];
+
+  if (mobile) {
+    filters.push({ role: ACCOUNT_ROLES.TENANT_ADMIN, mobile });
+  }
+
+  if (email) {
+    filters.push({ role: ACCOUNT_ROLES.TENANT_ADMIN, email });
+  }
+
+  if (filters.length === 1) return null;
+
+  return Account.findOne({ $or: filters.slice(1) }).lean();
+};
+
 export const initiatePartnerSignupOtp = async (req, res) => {
   try {
     const mobile = normalizeMobile(req.body.mobile);
@@ -169,27 +196,62 @@ export const initiatePartnerSignupOtp = async (req, res) => {
       return sendError(res, 400, duplicateError);
     }
 
-    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-    const otpHash = await bcrypt.hash(PARTNER_SIGNUP_OTP, 12);
-
-    await OtpRecord.create({
+    const otp = await sendOtp({
       mobile,
-      otpHash,
       purpose: PARTNER_SIGNUP_PURPOSE,
-      verificationSessionId,
-      provider: "mock",
-      maxAttempts: 3,
-      expiresAt: new Date(Date.now() + PARTNER_SIGNUP_OTP_EXPIRY_SECONDS * 1000),
-      providerResponse: { mock: true }
+      flowType: "PARTNER_SIGNUP"
     });
 
     return sendSuccess(res, 200, "OTP sent successfully", {
-      verificationSessionId,
+      verificationSessionId: otp.verificationSessionId,
       otpSent: true,
-      expiresInSeconds: PARTNER_SIGNUP_OTP_EXPIRY_SECONDS
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const resendPartnerSignupOtp = async (req, res) => {
+  try {
+    const mobile = normalizeMobile(req.body.mobile);
+
+    if (!hasRequiredFields(req.body, ["mobile", "verificationSessionId"])) {
+      return sendError(res, 400, "Mobile and verificationSessionId are required");
+    }
+
+    if (!isValidIndianMobile(mobile)) {
+      return sendError(res, 400, "Valid 10 digit mobile number is required");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: PARTNER_SIGNUP_PURPOSE,
+      verified: false,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
+    });
+  } catch (error) {
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -225,9 +287,9 @@ export const verifyPartnerSignupOtp = async (req, res) => {
     //   return sendError(res, 429, "Maximum OTP attempts exceeded");
     // }
 
-    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    otpRecord.attempts += 1;
+    const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });
     if (!otpMatches) {
-      otpRecord.attempts += 1;
       await otpRecord.save();
       return sendError(res, 400, "Invalid OTP");
     }
@@ -329,6 +391,8 @@ export const completePartnerSignup = async (req, res) => {
           ...email && { contactEmail: email },
           // contactEmail: email,
           address,
+          pincodeRestrictionEnabled: true,
+          tenantOnboardingLimit: DEFAULT_TENANT_ONBOARDING_LIMIT,
           isActive: true
         }
       ],
@@ -730,6 +794,18 @@ export const requestPartnerPayout = async (req, res) => {
 
     await session.commitTransaction();
 
+    try {
+      await sendPayoutMail({ payoutRequest, channelPartner: partnerBeforeHold });
+    } catch (mailError) {
+      console.error("Failed to send partner payout request email", {
+        payoutRequestId: payoutRequest._id.toString(),
+        channelPartnerId: partnerBeforeHold._id.toString(),
+        errorCode: mailError.code || "MAIL_SEND_FAILED",
+        smtpCommand: mailError.command || null,
+        responseCode: mailError.responseCode || null
+      });
+    }
+
     return sendSuccess(res, 201, "Partner payout requested successfully", {
       payoutRequest,
       ledgerEntryId: ledgerEntries[0]._id,
@@ -767,7 +843,7 @@ export const listPartnerPayoutRequests = async (req, res) => {
 
     const [items, total] = await Promise.all([
       PartnerPayoutRequest.find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .select("-__v")
@@ -802,7 +878,7 @@ export const getPartnerTenants = async (req, res) => {
     if (req.query.search) filter.name = buildRegex(req.query.search);
 
     const [items, total] = await Promise.all([
-      Tenant.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Tenant.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
       Tenant.countDocuments(filter)
     ]);
 
@@ -843,6 +919,11 @@ export const initiateTenantCreationVerification = async (req, res) => {
     const supportPhone = normalizeMobile(req.body.supportPhone);
     const tenantName = String(req.body.name || "").trim();
     const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+    const tenantAdminInput = req.body.tenantAdmin || {};
+    const tenantAdminEmail = String(tenantAdminInput.email || req.body.adminEmail || "")
+      .trim()
+      .toLowerCase();
+    const tenantAdminMobile = normalizeMobile(tenantAdminInput.mobile || req.body.adminMobile || req.body.supportPhone);
 
     if (!tenantName) {
       return sendError(res, 400, "Tenant name is required");
@@ -860,22 +941,24 @@ export const initiateTenantCreationVerification = async (req, res) => {
       return sendError(res, 400, "Invalid tenant creation verification mode");
     }
 
-    const verificationSessionId = `otp_${crypto.randomBytes(12).toString("hex")}`;
-    const otpHash = await bcrypt.hash(TENANT_CREATION_OTP, 12);
-    const providerReferenceId = `tenant_creation_mock_${crypto.randomBytes(8).toString("hex")}`;
+    const existingTenantAdminAccount = await findExistingTenantAdminAccount({
+      mobile: tenantAdminMobile,
+      email: tenantAdminEmail
+    });
 
-    await OtpRecord.create({
+    if (existingTenantAdminAccount?.mobile === tenantAdminMobile) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+
+    if (tenantAdminEmail && existingTenantAdminAccount?.email === tenantAdminEmail) {
+      return sendError(res, 400, "Account with this email already exists");
+    }
+
+    const otp = await sendOtp({
       mobile: supportPhone,
-      otpHash,
       purpose: TENANT_CREATION_PURPOSE,
-      verificationSessionId,
-      provider: "mock",
-      providerReferenceId,
-      maxAttempts: 3,
-      expiresAt: new Date(Date.now() + TENANT_CREATION_OTP_EXPIRY_SECONDS * 1000),
-      providerResponse: {
-        mock: true,
-        status: "OTP_SENT",
+      flowType: "TENANT_CREATION",
+      metadata: {
         channelPartnerId: channelPartner._id,
         tenantName,
         normalizedTenantName: normalizeComparableName(tenantName),
@@ -889,13 +972,74 @@ export const initiateTenantCreationVerification = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Tenant creation OTP sent successfully", {
-      verificationSessionId,
+      verificationSessionId: otp.verificationSessionId,
       otpSent: true,
       tenantCreationVerificationMode,
-      expiresInSeconds: TENANT_CREATION_OTP_EXPIRY_SECONDS
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+export const resendTenantCreationVerification = async (req, res) => {
+  try {
+    const channelPartner = await ensurePartnerAccess(req, res);
+    if (!channelPartner) return null;
+
+    if (!hasRequiredFields(req.body, ["supportPhone", "tenantCreationVerificationMode", "verificationSessionId"])) {
+      return sendError(res, 400, "Support phone, verification mode, and verification session are required");
+    }
+
+    const supportPhone = normalizeMobile(req.body.supportPhone);
+    const tenantCreationVerificationMode = normalizeTenantCreationVerificationMode(req.body.tenantCreationVerificationMode);
+
+    if (!isValidIndianMobile(supportPhone)) {
+      return sendError(res, 400, "Valid 10 digit support phone is required");
+    }
+
+    if (!TENANT_CREATION_VERIFICATION_MODES.includes(tenantCreationVerificationMode)) {
+      return sendError(res, 400, "Invalid tenant creation verification mode");
+    }
+
+    const otpRecord = await OtpRecord.findOne({
+      mobile: supportPhone,
+      verificationSessionId: req.body.verificationSessionId,
+      purpose: TENANT_CREATION_PURPOSE,
+      verified: false,
+      consumedAt: null,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!otpRecord) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (String(otpRecord.providerResponse?.channelPartnerId) !== String(channelPartner._id)) {
+      return sendError(res, 400, "Invalid OTP session");
+    }
+
+    if (otpRecord.providerResponse?.tenantCreationVerificationMode !== tenantCreationVerificationMode) {
+      return sendError(res, 400, "Tenant creation verification mode mismatch");
+    }
+
+    const otp = await resendOtp({ otpRecord, retryType: req.body.retryType });
+
+    return sendSuccess(res, 200, "Tenant creation OTP resent successfully", {
+      verificationSessionId: otpRecord.verificationSessionId,
+      otpSent: true,
+      tenantCreationVerificationMode,
+      expiresInSeconds: otp.expiresInSeconds,
+      retryAfterSeconds: otp.retryAfterSeconds
+    });
+  } catch (error) {
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : null
+    );
   }
 };
 
@@ -947,14 +1091,13 @@ export const verifyTenantCreationVerification = async (req, res) => {
     //   return sendError(res, 429, "Maximum OTP attempts exceeded");
     // }
 
-    const otpMatches = await bcrypt.compare(String(req.body.otp), otpRecord.otpHash);
+    otpRecord.attempts += 1;
+    const otpMatches = await verifyOtpCode({ otpRecord, otp: req.body.otp });
     if (!otpMatches) {
-      otpRecord.attempts += 1;
       await otpRecord.save();
       return sendError(res, 400, "Invalid OTP");
     }
 
-    otpRecord.attempts += 1;
     otpRecord.verified = true;
     otpRecord.providerResponse = {
       ...(otpRecord.providerResponse || {}),
@@ -1102,12 +1245,10 @@ export const createPartnerTenant = async (req, res) => {
         return sendError(res, 400, "Valid 10 digit tenant admin mobile is required");
       }
 
-      const duplicateAccountFilters = [{ mobile: tenantAdminMobile }];
-      if (tenantAdminEmail) {
-        duplicateAccountFilters.push({ email: tenantAdminEmail });
-      }
-
-      const existingAccount = await Account.findOne({ $or: duplicateAccountFilters }).lean();
+      const existingAccount = await findExistingTenantAdminAccount({
+        mobile: tenantAdminMobile,
+        email: tenantAdminEmail
+      });
       if (existingAccount?.mobile === tenantAdminMobile) {
         return sendError(res, 400, "Account with this mobile already exists");
       }
@@ -1125,6 +1266,12 @@ export const createPartnerTenant = async (req, res) => {
     }
 
     session.startTransaction();
+
+    await enforcePartnerTenantOnboarding({
+      channelPartner,
+      tenantPincode: address.pincode,
+      session
+    });
 
     const tenants = await Tenant.create(
       [
@@ -1289,6 +1436,9 @@ export const createPartnerTenant = async (req, res) => {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
+    if (error instanceof PartnerTenantOnboardingError) {
+      return sendError(res, error.statusCode, error.message);
+    }
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
     session.endSession();
@@ -1324,7 +1474,7 @@ export const listPartnerAccounts = async (req, res) => {
       Account.find(filter)
         .select("-passwordHash")
         .populate("tenantId", "name type")
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -1358,16 +1508,25 @@ export const createTenantAdminAccount = async (req, res) => {
       return sendError(res, 400, "Active tenant not found under this partner");
     }
 
-    const existingAccount = await Account.findOne({ email: req.body.email.toLowerCase() });
-    if (existingAccount) {
+    const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
+    const normalizedMobile = normalizeMobile(req.body.mobile);
+    const existingAccount = await findExistingTenantAdminAccount({
+      mobile: normalizedMobile,
+      email: normalizedEmail
+    });
+    if (existingAccount?.mobile === normalizedMobile) {
+      return sendError(res, 400, "Account with this mobile already exists");
+    }
+
+    if (existingAccount?.email === normalizedEmail) {
       return sendError(res, 400, "Account with this email already exists");
     }
 
     const passwordHash = await bcrypt.hash(req.body.temporaryPassword, 12);
     const account = await Account.create({
       name: req.body.name,
-      email: req.body.email,
-      mobile: req.body.mobile,
+      email: normalizedEmail,
+      mobile: normalizedMobile,
       role: ACCOUNT_ROLES.TENANT_ADMIN,
       tenantId: tenant._id,
       passwordHash,
@@ -1526,7 +1685,7 @@ export const listPartnerEscalations = async (req, res) => {
         .populate("tenantId", "name type")
         .populate("userId", "name mobile loanId")
         .populate("deviceId", "imei deviceModel manufacturer state")
-        .sort({ updatedAt: -1 })
+        .sort({ updatedAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),

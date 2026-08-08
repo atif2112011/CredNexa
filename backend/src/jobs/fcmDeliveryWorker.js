@@ -2,16 +2,26 @@ import { connectDatabase } from "../config/database.js";
 import { AccountPushToken } from "../models/AccountPushToken.js";
 import { AppNotificationJob } from "../models/AppNotificationJob.js";
 import { Device } from "../models/Device.js";
-import { DeviceCommand } from "../models/DeviceCommand.js";
+import {
+  DEVICE_COMMAND_FAILURE_SOURCES,
+  DeviceCommand
+} from "../models/DeviceCommand.js";
 import { FcmDeliveryLog } from "../models/FcmDeliveryLog.js";
 import { isInvalidFcmTokenError } from "../utils/pushTokens.js";
 
 let firebaseApp;
 
 const buildServiceAccountFromEnv = () => {
-  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const projectId =
+    process.env.ADMIN_FIREBASE_PROJECT_ID ||
+    process.env.FIREBASE_ADMIN_PROJECT_ID ||
+    process.env.APP_FIREBASE_PROJECT_ID ||
+    process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.ADMIN_FIREBASE_CLIENT_EMAIL || process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKey = (process.env.ADMIN_FIREBASE_PRIVATE_KEY || process.env.FIREBASE_ADMIN_PRIVATE_KEY)?.replace(
+    /\\n/g,
+    "\n"
+  );
 
   if (!projectId || !clientEmail || !privateKey) {
     return null;
@@ -52,11 +62,37 @@ const loadFirebaseAdmin = async () => {
   return firebaseApp;
 };
 
-const buildPolicyUpdateMessage = ({ device, command }) => {
+export const buildPolicyUpdateMessage = ({ device, command }) => {
   const baseData = {
     commandId: command._id.toString(),
     commandType: command.commandType
   };
+  const securityCommandTypes = new Set([
+    "RUN_INTEGRITY_CHECK",
+    "SHOW_REMEDIATION",
+    "INSTALL_UPDATE",
+    "WIPE_DEVICE",
+    "REPROVISION_REQUIRED",
+    "RESTRICTIONS_UPDATE",
+    "SET_FACTORY_RESET_BLOCKED",
+    "SET_USB_DEBUGGING_BLOCKED",
+    "SET_UNKNOWN_APP_INSTALL_BLOCKED",
+    "GET_LOCATION",
+    "RELEASE_DEVICE"
+  ]);
+
+  if (command.commandType === "EMI_REMINDER") {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        type: "EMI_REMINDER"
+      },
+      android: {
+        priority: "high"
+      }
+    };
+  }
 
   if (command.commandType === "NOTIFICATION") {
     return {
@@ -99,10 +135,25 @@ const buildPolicyUpdateMessage = ({ device, command }) => {
     };
   }
 
+  if (securityCommandTypes.has(command.commandType)) {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        ...stringifyDataPayload(command.payload),
+        type: command.commandType
+      },
+      android: {
+        priority: "high"
+      }
+    };
+  }
+
   return {
     token: device.fcmToken,
     data: {
       ...baseData,
+      ...stringifyDataPayload(command.payload),
       type: "POLICY_UPDATE",
       policyKey: String(command.payload?.policyKey || device.currentPolicyKey),
       policyVersion: String(command.payload?.policyVersion || device.desiredPolicyVersion)
@@ -143,14 +194,32 @@ const buildAppNotificationMessage = ({ pushToken, job }) => ({
   }
 });
 
+export const buildDeviceCommandDeliveryFilter = ({ now = new Date() } = {}) => ({
+  retryCount: { $lt: 5 },
+  $and: [
+    {
+      $or: [
+        { status: "pending" },
+        {
+          status: "failed",
+          failureSource: { $ne: DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT }
+        }
+      ]
+    },
+    {
+      $or: [
+        { nextRetryAt: { $exists: false } },
+        { nextRetryAt: null },
+        { nextRetryAt: { $lte: now } }
+      ]
+    }
+  ]
+});
+
 export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   await connectDatabase();
 
-  const commandFilter = {
-    status: { $in: ["pending", "failed"] },
-    retryCount: { $lt: 5 },
-    $or: [{ nextRetryAt: { $exists: false } }, { nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }]
-  };
+  const commandFilter = buildDeviceCommandDeliveryFilter();
 
   if (commandIds?.length) {
     commandFilter._id = { $in: commandIds };
@@ -167,16 +236,22 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
     const device = await Device.findById(command.deviceId).lean();
 
     if (!device?.fcmToken) {
-      command.status = "failed";
+      command.status = command.commandType === "EMI_REMINDER" ? "pending" : "failed";
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000);
       command.failureReason = "Device FCM token not found";
+      command.failureSource = DEVICE_COMMAND_FAILURE_SOURCES.DELIVERY;
       await command.save();
       await FcmDeliveryLog.create({
         deviceId: command.deviceId,
         commandId: command._id,
         status: "skipped",
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         error: command.failureReason
       });
       results.push({ commandId: command._id, status: "skipped" });
@@ -195,30 +270,42 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
       command.sentAt = new Date();
       command.fcmMessageId = providerMessageId;
       command.failureReason = undefined;
+      command.failureSource = undefined;
       await command.save();
 
       await FcmDeliveryLog.create({
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         status: "sent",
         providerMessageId,
         metadata: { mockMode: !firebase }
       });
       results.push({ commandId: command._id, status: "sent", providerMessageId });
     } catch (error) {
-      command.status = "failed";
+      command.status = command.commandType === "EMI_REMINDER" ? "pending" : "failed";
       command.retryCount += 1;
       command.nextRetryAt = new Date(Date.now() + Math.min(command.retryCount + 1, 5) * 5 * 60 * 1000);
       command.failureReason = error.message;
+      command.failureSource = DEVICE_COMMAND_FAILURE_SOURCES.DELIVERY;
       await command.save();
 
       await FcmDeliveryLog.create({
         deviceId: command.deviceId,
         commandId: command._id,
         token: device.fcmToken,
-        messageType: command.commandType === "NOTIFICATION" ? "NOTIFICATION" : "POLICY_UPDATE",
+        messageType:
+          command.commandType === "EMI_REMINDER"
+            ? "EMI_REMINDER"
+            : command.commandType === "NOTIFICATION"
+              ? "NOTIFICATION"
+              : "POLICY_UPDATE",
         status: "failed",
         error: error.message
       });
@@ -227,6 +314,35 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
   }
 
   return results;
+};
+
+export const deliverDeviceCommandImmediately = async ({
+  commandId,
+  deliveryRunner = runFcmDeliveryBatch,
+  logger = console
+}) => {
+  try {
+    const results = await deliveryRunner({
+      limit: 1,
+      commandIds: [commandId]
+    });
+
+    return results[0] || {
+      commandId,
+      status: "deferred",
+      reason: "Command was not eligible for immediate delivery"
+    };
+  } catch (error) {
+    logger.error("Immediate device command delivery failed; scheduled delivery remains available", {
+      commandId: commandId?.toString?.() || commandId,
+      message: error.message
+    });
+    return {
+      commandId,
+      status: "deferred",
+      error: error.message
+    };
+  }
 };
 
 export const runAppNotificationDeliveryBatch = async ({ limit = 50, jobIds } = {}) => {

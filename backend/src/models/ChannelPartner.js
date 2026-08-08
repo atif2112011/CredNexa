@@ -32,6 +32,11 @@ const channelPartnerSchema = new mongoose.Schema(
         required: true,
         trim: true
       },
+      district: {
+        type: String,
+        required: true,
+        trim: true
+      },
       state: {
         type: String,
         required: true,
@@ -40,7 +45,8 @@ const channelPartnerSchema = new mongoose.Schema(
       pincode: {
         type: String,
         required: true,
-        trim: true
+        trim: true,
+        match: [/^\d{6}$/, "address.pincode must be a valid 6 digit pincode"]
       }
     },
     adminAccountId: {
@@ -52,6 +58,26 @@ const channelPartnerSchema = new mongoose.Schema(
       default: 15,
       min: 0,
       max: 100
+    },
+    pincodeRestrictionEnabled: {
+      type: Boolean,
+      default: function defaultPincodeRestrictionEnabled() {
+        return this.isNew;
+      }
+    },
+    tenantOnboardingLimit: {
+      type: Number,
+      default: 5,
+      min: 1,
+      validate: {
+        validator: Number.isInteger,
+        message: "tenantOnboardingLimit must be a positive integer"
+      }
+    },
+    tenantOnboardingVersion: {
+      type: Number,
+      default: 0,
+      select: false
     },
     availablePayoutBalance: {
       type: Number,

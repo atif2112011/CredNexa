@@ -87,6 +87,7 @@ POST /api/partner/signup/complete?createAccount=true
   "address": {
     "street": "Shop 12, Main Road",
     "city": "Pune",
+    "district": "Pune",
     "state": "Maharashtra",
     "pincode": "411001"
   }
@@ -101,7 +102,7 @@ retail_chain_group
 independent
 ```
 
-`email` and `address` are optional. The single `email` field is copied to both `ChannelPartner.contactEmail` and the created `partner_admin` `Account.email`. `address` uses the same object format as tenant address: `street`, `city`, `state`, and `pincode`. `password` and `confirmPassword` are required when `createAccount=true`. `confirmPassword` is validation only and is never stored.
+`email` is optional. The single `email` field is copied to both `ChannelPartner.contactEmail` and the created `partner_admin` `Account.email`. `address` is required and uses the same object format as tenant address: `street`, `city`, `district`, `state`, and `pincode`. `password` and `confirmPassword` are required when `createAccount=true`. `confirmPassword` is validation only and is never stored.
 
 ### Success Response
 
@@ -119,6 +120,7 @@ independent
       "address": {
         "street": "Shop 12, Main Road",
         "city": "Pune",
+        "district": "Pune",
         "state": "Maharashtra",
         "pincode": "411001"
       },
@@ -170,4 +172,4 @@ The Partner App can also log in with mobile:
 - Password must be at least 8 characters and include at least one letter and one number.
 - Confirm password is required when creating the partner admin account and must match password.
 - If email is provided, it must not already exist on an account.
-- Address is optional and stored on the partner record using the same object shape as tenant address.
+- Address is required and stored on the partner record using the same object shape as tenant address, including `district`.

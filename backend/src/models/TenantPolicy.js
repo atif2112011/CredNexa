@@ -39,13 +39,22 @@ const tenantPolicySchema = new mongoose.Schema(
     },
     riskRules: {
       autoLockOnCriticalSecurityRisk: { type: Boolean, default: true },
+      destructiveEnforcementEnabled: { type: Boolean, default: false },
+      wipeRequiresAdminAction: { type: Boolean, default: true },
       autoLockTypes: {
         type: [String],
         default: [
+          // Confirmed/permanent device compromise.
           "ROOT_DETECTED",
           "TAMPER_DETECTED",
+          "SYSTEM_TAMPER_DETECTED",
+          "CUSTOM_ROM_DETECTED",
+          "BOOTLOADER_UNLOCKED",
           "DEVICE_INTEGRITY_COMPROMISED",
-          "APP_INTEGRITY_COMPROMISED"
+          // Critical app compromise. Protocol/config mismatch and warning-only settings
+          // are intentionally excluded from default auto-lock.
+          "APP_INTEGRITY_COMPROMISED",
+          "APP_TAMPER_DETECTED"
         ]
       }
     },

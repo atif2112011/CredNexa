@@ -12,7 +12,10 @@ import {
   approveTenantCreditPurchaseRequest,
   archiveAppBuild,
   backfillManualOverrideTokensForDevices,
+  clearRiskFlag,
+  completeAppBuildUploadSession,
   createAppBuild,
+  createAppBuildUploadSession,
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
@@ -22,9 +25,11 @@ import {
   getAdminEscalationByCaseId,
   getAdminAccountById,
   getAdminRiskFlags,
+  getAdminRiskFlagById,
   getAppBuildById,
   getAuditLogs,
   getChannelPartnerById,
+  getCompanySupportContact,
   getConsentVersionById,
   getDeviceAuditLogs,
   getDeviceById,
@@ -32,6 +37,8 @@ import {
   getManualOverrideTokenById,
   listFcmDeliveryLogs,
   listDeviceManualOverrideTokens,
+  listPartnerCreditLedger,
+  listTenantCreditLedger,
   getPartnerPayoutRequestById,
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
@@ -53,6 +60,7 @@ import {
   rejectTenantCreditPurchaseRequest,
   rejectAdminEscalation,
   renewExpiringManualOverrideTokensForDevices,
+  releaseAdminDevice,
   revokeManualOverrideToken,
   sendCustomNotification,
   tempUnlockAdminEscalation,
@@ -64,6 +72,12 @@ import {
   updateAdminAccountStatus,
   updateChannelPartner,
   updateChannelPartnerStatus,
+  updateCompanySupportContact,
+  updateConsentVersion,
+  updateAdminDeviceRestrictions,
+  updateAdminFactoryResetControl,
+  updateAdminUsbDebuggingControl,
+  updateAdminUnknownAppInstallsControl,
   updatePayoutConstants,
   updateTenant,
   updateTenantStatus,
@@ -71,6 +85,10 @@ import {
   getProvisioningDetails,
   listAppBuilds,
   publishAppBuild,
+  requestAdminDeviceLocation,
+  queueRiskFlagAppUpdate,
+  queueRiskFlagWipe,
+  requestRiskFlagRecheck,
   updateAppBuild
 } from "./admin.controller.js";
 
@@ -81,7 +99,12 @@ adminRoutes.use(requireRole(ACCOUNT_ROLES.SUPER_ADMIN));
 
 adminRoutes.get("/dashboard", getAdminDashboard);
 
+adminRoutes.get("/support-contact", getCompanySupportContact);
+adminRoutes.patch("/support-contact", updateCompanySupportContact);
+
 adminRoutes.get("/app-builds", listAppBuilds);
+adminRoutes.post("/app-builds/upload-sessions", createAppBuildUploadSession);
+adminRoutes.post("/app-builds/upload-sessions/:sessionId/complete", completeAppBuildUploadSession);
 adminRoutes.post("/app-builds", parseApkUpload, createAppBuild);
 adminRoutes.get("/app-builds/:buildId", getAppBuildById);
 adminRoutes.patch("/app-builds/:buildId", parseApkUpload, updateAppBuild);
@@ -96,6 +119,8 @@ adminRoutes.patch("/channel-partners/:id/status", updateChannelPartnerStatus);
 
 adminRoutes.get("/payout/constants", getPayoutConstants);
 adminRoutes.patch("/payout/constants", parseAdminCreditPurchaseQrImageUpload, updatePayoutConstants);
+adminRoutes.get("/ledgers/partners", listPartnerCreditLedger);
+adminRoutes.get("/ledgers/tenants", listTenantCreditLedger);
 adminRoutes.get("/partner-payouts", listPartnerPayoutRequests);
 adminRoutes.get("/partner-payouts/:payoutId", getPartnerPayoutRequestById);
 adminRoutes.post("/partner-payouts/:payoutId/approve", parsePaymentProofUpload, approvePartnerPayoutRequest);
@@ -121,6 +146,7 @@ adminRoutes.patch("/accounts/:accountId/status", updateAdminAccountStatus);
 adminRoutes.get("/consent-versions", listConsentVersions);
 adminRoutes.post("/consent-versions", createConsentVersion);
 adminRoutes.get("/consent-versions/:id", getConsentVersionById);
+adminRoutes.patch("/consent-versions/:id", updateConsentVersion);
 adminRoutes.patch("/consent-versions/:id/publish", publishConsentVersion);
 
 adminRoutes.get("/escalations", listAdminEscalations);
@@ -144,11 +170,22 @@ adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
+adminRoutes.post("/devices/:deviceId/release", releaseAdminDevice);
+adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictions);
+adminRoutes.patch("/devices/:deviceId/controls/factory-reset", updateAdminFactoryResetControl);
+adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", updateAdminUsbDebuggingControl);
+adminRoutes.patch("/devices/:deviceId/controls/unknown-app-installs", updateAdminUnknownAppInstallsControl);
+adminRoutes.post("/devices/:deviceId/location-request", requestAdminDeviceLocation);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 
 adminRoutes.get("/risk-flags", getAdminRiskFlags);
+adminRoutes.get("/risk-flags/:flagId", getAdminRiskFlagById);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
+adminRoutes.post("/risk-flags/:flagId/recheck", requestRiskFlagRecheck);
+adminRoutes.post("/risk-flags/:flagId/clear", clearRiskFlag);
+adminRoutes.post("/risk-flags/:flagId/app-update", queueRiskFlagAppUpdate);
+adminRoutes.post("/risk-flags/:flagId/wipe", queueRiskFlagWipe);
 adminRoutes.get("/audit-logs", getAuditLogs);
 
 adminRoutes.get("/notifications/targets", listNotificationTargets);

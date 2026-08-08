@@ -234,13 +234,13 @@ Retry: exponential backoff for temporary failures
 4. App requests a Play Integrity token from Android native layer.
 5. App sends token to backend verification endpoint.
 6. Backend verifies token with Google.
-7. Backend returns integrity status to the app.
-8. If anomaly is detected, app sends a POST request to the risk flag API.
-9. Backend records the risk flag and updates device risk state.
+7. Backend records an `IntegrityCheck`.
+8. Backend creates or updates `RiskFlag` records when the verified verdict or local evidence indicates risk.
+9. Backend returns integrity status, risk IDs, and any queued enforcement metadata to the app.
 
 ### Security Event API Usage
 
-The server already supports a borrower/device-side API for recording security events and creating risk flags. The app should call this API when it detects or receives one of these anomalies:
+The server still supports a borrower/device-side API for recording compatibility security events. The app should use the Play Integrity verify endpoint for integrity-token based risks, and reserve the security event API for local observations that are not already represented by the verified token flow:
 
 - Play Integrity verdict missing.
 - Play Integrity verdict failed.

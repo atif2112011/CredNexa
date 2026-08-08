@@ -36,6 +36,8 @@
 | `UNLOCK_PENDING` | *(unchanged)* | Same as LOCKED until delivered | Event: Tenant approves payment, unlock command queued |
 | `OFFLINE_PENDING` | *(unchanged)* | Last applied policy enforced locally | Event: Any command when device offline |
 | `CONSENT_INVALID` | `CONSENT_INVALID` | Lock **blocked** — enforcement error | System: No valid `consentRecord` on lock attempt |
+| `RELEASE_PENDING` | *(last applied policy)* | No further EMI enforcement; permanent release pending | Final approved payment settles all installments |
+| `RELEASED` | *(none)* | No EMI Shield management | App acknowledges successful permanent release |
 
 ---
 
@@ -213,7 +215,27 @@
 
 ---
 
-### 2.6 OFFLINE_PENDING
+### 2.6 RELEASE_PENDING
+
+> Every EMI installment is `paid` or `waived`. The schedule is settled and permanent device release has been queued.
+
+- Show the dedicated **All EMIs completed** screen with `settlementTime` and release progress.
+- Hide payment, overdue, unlock-request, and temporary-unlock controls.
+- If offline, ask the borrower to connect to the internet to finish release.
+- The device must not return to `GRACE_PERIOD` or `LOCKED`.
+- Successful `RELEASE_DEVICE` acknowledgement transitions to `RELEASED`.
+
+### 2.7 RELEASED
+
+> Device Owner and all EMI Shield management restrictions have been removed.
+
+- Show the **Device released** confirmation screen with a single Continue action.
+- Persist released state locally across restarts.
+- Ignore later EMI or management commands.
+
+---
+
+### 2.8 OFFLINE_PENDING
 
 > A command (lock or unlock) was issued while the device was offline or unreachable. The command is queued in `deviceCommands`. The device will apply it when it reconnects.
 
@@ -424,6 +446,8 @@ Each state transition sends one or more FCM messages to the target device. The b
 | TEMP_UNLOCK → LOCKED (on expiry) | `NOTIFICATION` | `DEVICE_LOCKED` | Yes — lock screen |
 | *(any)* → CONSENT_INVALID | `SECURITY_ALERT` | alertCode: `CONSENT_MISSING` | Yes — error screen |
 | Payment validated → ACTIVE | `NOTIFICATION` | `PAYMENT_CONFIRMED` | Yes — success toast |
+| Final payment approved → RELEASE_PENDING | `RELEASE_DEVICE` | commandType: `RELEASE_DEVICE` | Yes — All EMIs completed screen |
+| RELEASE_PENDING → RELEASED | Command acknowledgement | `releaseCompleted: true` | Yes — Device released screen |
 
 ---
 

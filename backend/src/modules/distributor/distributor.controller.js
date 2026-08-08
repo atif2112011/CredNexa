@@ -3,6 +3,11 @@ import mongoose from "mongoose";
 import QRCode from "qrcode";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
+import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
+import {
+  DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
+  normalizeDeviceSecurityControlState
+} from "../../constants/deviceSecurityControls.js";
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { TENANT_CAPABILITIES } from "../../constants/tenant.js";
 import { AuditLog } from "../../models/AuditLog.js";
@@ -20,8 +25,41 @@ import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/Ten
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
-import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../../constants/deviceStates.js";
-import { NOTIFICATION_AUDIENCES, queueNotification } from "../../utils/appNotifications.js";
+import {
+  DEVICE_POLICY_KEYS,
+  DEVICE_STATES,
+  getDevicePolicyLabel,
+  getDeviceStateLabel
+} from "../../constants/deviceStates.js";
+import {
+  formatLatestRestrictionCommand,
+  queueDeviceRestrictionClear,
+  queueDeviceRestrictionUpdate,
+  validateDeviceRestrictionUpdate
+} from "../../services/deviceRestrictions.service.js";
+import {
+  buildSecurityControlConfirmations,
+  formatLatestSecurityControlCommands,
+  queueDeviceSecurityControlUpdate,
+  validateDeviceSecurityControlUpdate
+} from "../../services/deviceSecurityControls.service.js";
+import {
+  queueDeviceRelease,
+  settleCompletedSchedule
+} from "../../services/deviceRelease.service.js";
+import {
+  GET_LOCATION_COMMAND_TYPE,
+  queueGetLocationCommand
+} from "../../services/deviceLocation.service.js";
+import {
+  findUpcomingEmiInstallment,
+  EMI_REMINDER_COMMAND_TYPE,
+  EMI_REMINDER_TYPES,
+  normalizeUpcomingReminderWindowDays,
+  queueEmiReminder
+} from "../../services/emiReminder.service.js";
+import { sendApprovalMail } from "../../services/mail.service.js";
+import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
@@ -33,6 +71,7 @@ import {
   roundRupeeAmount
 } from "../../utils/payout.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
+import { deliverDeviceCommandImmediately } from "../../jobs/fcmDeliveryWorker.js";
 
 const addMonths = (date, months) => {
   const dueDate = new Date(date);
@@ -65,6 +104,13 @@ const buildPagination = (page, limit, total) => ({
 });
 
 const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+
+const formatTenantDevice = (device = {}) => ({
+  ...device,
+  stateLabel: getDeviceStateLabel(device.state),
+  currentPolicyLabel: getDevicePolicyLabel(device.currentPolicyKey),
+  releasedAt: device.releasedAt || null
+});
 
 const DEFAULT_PENDING_EMI_ALERT_DAYS = 10;
 
@@ -309,7 +355,14 @@ const queueTenantDeviceCommand = async ({ device, commandType, triggeredBy, acco
 
 const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
   const schedule = await EmiSchedule.findOne({ userId: payment.userId, tenantId: payment.tenantId }).session(session);
-  if (!schedule) return [];
+  if (!schedule) {
+    return {
+      matchedInstallments: [],
+      schedule: null,
+      completed: false,
+      newlySettled: false
+    };
+  }
 
   let remainingAmount = Number(payment.amount);
   const matchedInstallments = [];
@@ -344,6 +397,7 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
     const total = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
     return sum + Math.max(total - Number(installment.paidAmount || 0), 0);
   }, 0);
+  const settlement = settleCompletedSchedule(schedule);
 
   await schedule.save({ session });
   if (paidInstallmentIds.length) {
@@ -360,7 +414,11 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
     emiUpdatedBy: accountId
   };
 
-  return matchedInstallments;
+  return {
+    matchedInstallments,
+    schedule,
+    ...settlement
+  };
 };
 
 const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
@@ -756,6 +814,11 @@ export const getDashboard = async (req, res) => {
       })
     );
 
+    const deviceStateCounts = devicesByState.reduce((result, item) => {
+      result[item._id] = item.count;
+      return result;
+    }, {});
+
     return sendSuccess(res, 200, "Dashboard fetched successfully", {
       totalBorrowers,
       borrowersRegisteredToday,
@@ -771,10 +834,7 @@ export const getDashboard = async (req, res) => {
       devices: {
         activated: devicesActivated,
         pendingActivation: Math.max(totalBorrowers - devicesActivated, 0),
-        byState: devicesByState.reduce((result, item) => {
-          result[item._id] = item.count;
-          return result;
-        }, {})
+        byState: deviceStateCounts
       },
       alerts,
       recentEnrollments: recentEnrollmentRows
@@ -913,6 +973,18 @@ export const submitCreditPurchaseRequest = async (req, res) => {
       }
     });
 
+    try {
+      await sendApprovalMail({ creditPurchaseRequest, tenant });
+    } catch (mailError) {
+      console.error("Failed to send key purchase request email", {
+        creditPurchaseRequestId: creditPurchaseRequest._id.toString(),
+        tenantId: tenant._id.toString(),
+        errorCode: mailError.code || "MAIL_SEND_FAILED",
+        smtpCommand: mailError.command || null,
+        responseCode: mailError.responseCode || null
+      });
+    }
+
     return sendSuccess(res, 201, "Credit purchase request submitted successfully", {
       creditPurchaseRequest
     });
@@ -941,7 +1013,7 @@ export const listCreditPurchaseRequests = async (req, res) => {
     }
 
     const [items, total] = await Promise.all([
-      TenantCreditPurchaseRequest.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      TenantCreditPurchaseRequest.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
       TenantCreditPurchaseRequest.countDocuments(filter)
     ]);
 
@@ -1141,61 +1213,158 @@ const queueOverdueEmiReminderForUser = async ({ tenant, userId, accountId, note 
   }
 
   const device = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
-  if (!device?.fcmToken) {
+  if (!device) {
     return {
       status: "skippedNoDevice",
       userId: user._id,
-      deviceId: device?._id
+      deviceId: null
     };
   }
 
+  const primaryInstallment = [...overdueInstallments]
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
   const totalOutstandingAmount = overdueInstallments.reduce((sum, installment) => sum + getInstallmentOutstanding(installment), 0);
-  const reminderText = String(note || "").trim() || "Please clear your overdue EMI to avoid device restrictions.";
-  const commands = await queueNotification({
-    audience: NOTIFICATION_AUDIENCES.BORROWER,
+  const reminderText = String(note || "").trim() || "Your EMI payment is overdue.";
+  const { command, created } = await queueEmiReminder({
+    device,
     tenantId: tenant._id,
-    deviceId: device._id,
-    title: "EMI overdue",
-    text: reminderText,
-    notificationType: "OVERDUE_EMI_REMINDER",
     triggeredBy: "manual_tenant",
     triggeredByAccountId: accountId,
-    data: {
+    payload: {
+      reminderType: EMI_REMINDER_TYPES.OVERDUE,
+      message: reminderText,
+      amount: totalOutstandingAmount,
+      dueDate: primaryInstallment.dueDate,
+      installmentNumber: primaryInstallment.installmentNumber,
+      totalInstallments: schedule.installments.length
+    }
+  });
+
+  if (created) {
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: accountId,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
       userId: user._id,
       deviceId: device._id,
-      overdueInstallmentCount: overdueInstallments.length,
-      totalOutstandingAmount,
-      installmentIds: overdueInstallments.map((installment) => installment._id),
-      note: reminderText
-    }
-  });
-  const command = commands[0];
-
-  await createAuditLog({
-    eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
-    actorId: accountId,
-    tenantId: tenant._id,
-    channelPartnerId: tenant.channelPartnerId,
-    userId: user._id,
-    deviceId: device._id,
-    reason: reminderText,
-    metadata: {
-      commandId: command?._id,
-      commandType: "NOTIFICATION",
-      notificationType: "OVERDUE_EMI_REMINDER",
-      overdueInstallmentCount: overdueInstallments.length,
-      totalOutstandingAmount
-    }
-  });
+      reason: reminderText,
+      metadata: {
+        commandId: command?._id,
+        commandType: EMI_REMINDER_COMMAND_TYPE,
+        reminderType: EMI_REMINDER_TYPES.OVERDUE,
+        overdueInstallmentCount: overdueInstallments.length,
+        totalOutstandingAmount
+      }
+    });
+  }
 
   return {
     status: "queued",
     queued: true,
+    created,
     commandId: command?._id,
+    commandType: EMI_REMINDER_COMMAND_TYPE,
+    commandStatus: command?.status,
     userId: user._id,
     deviceId: device._id,
     overdueInstallmentCount: overdueInstallments.length,
     totalOutstandingAmount
+  };
+};
+
+const queueUpcomingEmiReminderForUser = async ({
+  tenant,
+  userId,
+  accountId,
+  note,
+  windowDays
+}) => {
+  if (!mongoose.isValidObjectId(userId)) {
+    return { status: "failed", reason: "INVALID_USER_ID", userId };
+  }
+
+  const user = await User.findOne({ _id: userId, tenantId: tenant._id }).lean();
+  if (!user) {
+    return { status: "failed", reason: "BORROWER_NOT_FOUND", userId };
+  }
+
+  const normalizedWindowDays = normalizeUpcomingReminderWindowDays(windowDays);
+  const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  const upcomingInstallment = findUpcomingEmiInstallment({
+    schedule,
+    windowDays: normalizedWindowDays
+  });
+
+  if (!upcomingInstallment) {
+    return {
+      status: "skippedNoUpcoming",
+      userId: user._id,
+      windowDays: normalizedWindowDays
+    };
+  }
+
+  const device = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
+  if (!device) {
+    return {
+      status: "skippedNoDevice",
+      userId: user._id,
+      deviceId: null,
+      windowDays: normalizedWindowDays
+    };
+  }
+
+  const outstandingAmount = getInstallmentOutstanding(upcomingInstallment);
+  const reminderText = String(note || "").trim() || "Your EMI payment is due soon.";
+  const { command, created } = await queueEmiReminder({
+    device,
+    tenantId: tenant._id,
+    triggeredBy: "manual_tenant",
+    triggeredByAccountId: accountId,
+    payload: {
+      reminderType: EMI_REMINDER_TYPES.UPCOMING,
+      message: reminderText,
+      amount: outstandingAmount,
+      dueDate: upcomingInstallment.dueDate,
+      installmentNumber: upcomingInstallment.installmentNumber,
+      totalInstallments: schedule.installments.length
+    }
+  });
+
+  if (created) {
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: accountId,
+      tenantId: tenant._id,
+      channelPartnerId: tenant.channelPartnerId,
+      userId: user._id,
+      deviceId: device._id,
+      reason: reminderText,
+      metadata: {
+        commandId: command?._id,
+        commandType: EMI_REMINDER_COMMAND_TYPE,
+        reminderType: EMI_REMINDER_TYPES.UPCOMING,
+        installmentId: upcomingInstallment._id,
+        outstandingAmount,
+        windowDays: normalizedWindowDays
+      }
+    });
+  }
+
+  return {
+    status: "queued",
+    queued: true,
+    created,
+    commandId: command?._id,
+    commandType: EMI_REMINDER_COMMAND_TYPE,
+    commandStatus: command?.status,
+    userId: user._id,
+    deviceId: device._id,
+    installmentId: upcomingInstallment._id,
+    installmentNumber: upcomingInstallment.installmentNumber,
+    dueDate: upcomingInstallment.dueDate,
+    outstandingAmount,
+    windowDays: normalizedWindowDays
   };
 };
 
@@ -1340,13 +1509,15 @@ export const sendOverdueEmiReminder = async (req, res) => {
     return sendSuccess(res, 201, "Overdue EMI reminder queued successfully", {
       queued: true,
       commandId: result.commandId,
+      commandType: result.commandType,
+      status: result.commandStatus,
       userId: result.userId,
       deviceId: result.deviceId,
       overdueInstallmentCount: result.overdueInstallmentCount,
       totalOutstandingAmount: result.totalOutstandingAmount
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -1452,7 +1623,9 @@ export const getUserEmiInstallments = async (req, res) => {
         loanId: user.loanId
       },
       emiScheduleId: schedule._id,
-      installments: schedule.installments,
+      installments: [...schedule.installments].sort(
+        (a, b) => new Date(b.dueDate || 0) - new Date(a.dueDate || 0)
+      ),
       overdueAmount: schedule.overdueAmount,
       overdueInstallments: schedule.overdueInstallments,
       dpd: schedule.dpd
@@ -1535,7 +1708,12 @@ export const getDistributorDevices = async (req, res) => {
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
 
-    if (req.query.state) filter.state = req.query.state;
+    if (req.query.state) {
+      if (!Object.values(DEVICE_STATES).includes(req.query.state)) {
+        return sendError(res, 400, "Invalid device state");
+      }
+      filter.state = req.query.state;
+    }
     if (req.query.policyKey) filter.currentPolicyKey = req.query.policyKey;
     if (req.query.imei) filter.imei = buildSearchRegex(req.query.imei);
 
@@ -1568,7 +1746,7 @@ export const getDistributorDevices = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Devices fetched successfully", {
-      items,
+      items: items.map(formatTenantDevice),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -1590,14 +1768,20 @@ export const getDistributorDeviceById = async (req, res) => {
     }
 
     const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id })
-      .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths consentRecordId aadhaarVerified")
+      .populate(
+        "userId",
+        "name mobile email loanId loanAmount emiAmount tenureMonths disbursementDate consentRecordId aadhaarVerified"
+      )
       .lean();
 
     if (!device) {
       return sendError(res, 404, "Device not found");
     }
+    device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
+    device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
+    Object.assign(device, formatTenantDevice(device));
 
-    const [policy, emiSchedule] = await Promise.all([
+    const [policy, emiSchedule, latestRestrictionCommand, latestSecurityControlCommands, latestLocationCommand] = await Promise.all([
       device.currentPolicyId
         ? DevicePolicy.findOne({
             _id: device.currentPolicyId,
@@ -1609,13 +1793,44 @@ export const getDistributorDeviceById = async (req, res) => {
             policyKey: device.currentPolicyKey,
             isActive: true
           }).lean(),
-      EmiSchedule.findOne({ userId: device.userId?._id || device.userId, tenantId: tenant._id }).lean()
+      EmiSchedule.findOne({ userId: device.userId?._id || device.userId, tenantId: tenant._id }).lean(),
+      DeviceCommand.findOne({
+        deviceId: device._id,
+        commandType: "RESTRICTIONS_UPDATE"
+      })
+        .sort({ createdAt: -1 })
+        .lean(),
+      Promise.all(
+        DEVICE_SECURITY_CONTROL_COMMAND_TYPES.map((commandType) =>
+          DeviceCommand.findOne({
+            deviceId: device._id,
+            commandType
+          }).sort({ createdAt: -1 }).lean()
+        )
+      ),
+      DeviceCommand.findOne({
+        deviceId: device._id,
+        commandType: GET_LOCATION_COMMAND_TYPE
+      }).sort({ createdAt: -1 }).lean()
     ]);
+
+    const borrower = device.userId
+      ? { ...device.userId, disbursementDate: device.userId.disbursementDate ?? null }
+      : null;
 
     return sendSuccess(res, 200, "Device detail fetched successfully", {
       device,
-      borrower: device.userId,
+      borrower,
       emiSchedule,
+      latestRestrictionCommand: formatLatestRestrictionCommand(latestRestrictionCommand),
+      latestSecurityControlCommands: formatLatestSecurityControlCommands(
+        latestSecurityControlCommands
+      ),
+      securityControlConfirmations: buildSecurityControlConfirmations({
+        state: device.securityControlState,
+        commands: latestSecurityControlCommands
+      }),
+      latestLocationCommand,
       currentPolicy: policy
         ? {
             id: policy._id,
@@ -1627,6 +1842,274 @@ export const getDistributorDeviceById = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Queue an upcoming EMI reminder notification for one borrower.
+ * Sample body: { "windowDays": 10, "note": "Your EMI is due soon." }
+ */
+export const sendUpcomingEmiReminder = async (req, res) => {
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    const result = await queueUpcomingEmiReminderForUser({
+      tenant,
+      userId: req.params.userId,
+      accountId: req.auth.id,
+      note: req.body.note,
+      windowDays: req.body.windowDays || req.query.windowDays
+    });
+
+    if (result.status === "failed") {
+      return sendError(res, result.reason === "INVALID_USER_ID" ? 400 : 404, result.reason);
+    }
+
+    if (result.status === "skippedNoUpcoming") {
+      return sendSuccess(res, 200, "No upcoming EMI found for borrower", {
+        queued: false,
+        reason: "NO_UPCOMING_EMI",
+        userId: result.userId,
+        windowDays: result.windowDays
+      });
+    }
+
+    if (result.status === "skippedNoDevice") {
+      return sendSuccess(res, 200, "Device is not reachable for reminder", {
+        queued: false,
+        reason: "DEVICE_NOT_REACHABLE",
+        userId: result.userId,
+        deviceId: result.deviceId,
+        windowDays: result.windowDays
+      });
+    }
+
+    return sendSuccess(res, 201, "Upcoming EMI reminder queued successfully", {
+      queued: true,
+      commandId: result.commandId,
+      commandType: result.commandType,
+      status: result.commandStatus,
+      userId: result.userId,
+      deviceId: result.deviceId,
+      installmentId: result.installmentId,
+      installmentNumber: result.installmentNumber,
+      dueDate: result.dueDate,
+      outstandingAmount: result.outstandingAmount,
+      windowDays: result.windowDays
+    });
+  } catch (error) {
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  }
+};
+
+/**
+ * Update one persistent restriction for a device owned by the authenticated
+ * tenant and queue the complete desired restriction snapshot.
+ * Sample body: { "restriction": "youtube", "locked": true }
+ */
+export const updateTenantDeviceRestrictions = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+
+    const validation = validateDeviceRestrictionUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findOne({
+      _id: req.params.id,
+      tenantId: tenant._id
+    }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceRestrictionUpdate({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          restriction: validation.value.restriction,
+          locked: validation.value.locked,
+          restrictionVersion: result.restrictionState.desiredVersion,
+          retry: validation.value.retry,
+          source: "tenant_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device restriction update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+const updateTenantDeviceSecurityControl = async (req, res, controlKey) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+    const validation = validateDeviceSecurityControlUpdate(req.body);
+    if (validation.error) {
+      return sendError(res, 400, validation.error);
+    }
+
+    const device = await Device.findOne({
+      _id: req.params.id,
+      tenantId: tenant._id
+    }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueDeviceSecurityControlUpdate({
+      device,
+      controlKey,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      ...validation.value,
+      session
+    });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: result.command.commandType,
+          control: controlKey,
+          blocked: validation.value.blocked,
+          controlVersion: result.controlState.desiredVersion,
+          retry: validation.value.retry,
+          source: "tenant_device_detail"
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+    return sendSuccess(res, 200, "Device security control update queued successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+export const updateTenantFactoryResetControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "factoryReset");
+
+export const updateTenantUsbDebuggingControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "usbDebugging");
+
+export const updateTenantUnknownAppInstallsControl = (req, res) =>
+  updateTenantDeviceSecurityControl(req, res, "unknownAppInstalls");
+
+export const requestTenantDeviceLocation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Valid device ID is required");
+    }
+    const device = await Device.findOne({
+      _id: req.params.id,
+      tenantId: tenant._id
+    }).session(session);
+    if (!device) {
+      return sendError(res, 404, "Device not found");
+    }
+
+    session.startTransaction();
+    const result = await queueGetLocationCommand({
+      device,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      session
+    });
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        userId: device.userId,
+        deviceId: device._id,
+        metadata: {
+          commandId: result.command._id,
+          commandType: GET_LOCATION_COMMAND_TYPE,
+          source: "tenant_device_detail"
+        }
+      },
+      { session }
+    );
+    await session.commitTransaction();
+
+    const immediateDelivery = await deliverDeviceCommandImmediately({
+      commandId: result.command._id
+    });
+
+    return sendSuccess(res, 201, "Location request sent successfully", {
+      ...result,
+      immediateDelivery
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 
@@ -1665,50 +2148,54 @@ export const sendUpcomingPaymentCommand = async (req, res) => {
       });
     }
 
-    const commands = await DeviceCommand.create([
-      {
-        deviceId: device._id,
-        tenantId: tenant._id,
-        commandType: "UPCOMING_PAYMENT",
-        triggeredBy: "manual_tenant",
-        triggeredByAccountId: req.auth.id,
-        payload: {
-          note: req.body.note,
-          windowDays,
-          emiScheduleId: schedule._id,
-          installmentId: upcomingInstallment._id,
-          installmentNumber: upcomingInstallment.installmentNumber,
-          dueDate: upcomingInstallment.dueDate,
-          emiAmount: upcomingInstallment.emiAmount,
-          penaltyAmount: upcomingInstallment.penaltyAmount || 0,
-          outstandingAmount: Math.max(
-            Number(upcomingInstallment.emiAmount || 0) +
-              Number(upcomingInstallment.penaltyAmount || 0) -
-              Number(upcomingInstallment.paidAmount || 0),
-            0
-          )
-        }
-      }
-    ]);
-
-    await createAuditLog({
-      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
-      actorId: req.auth.id,
+    const outstandingAmount = Math.max(
+      Number(upcomingInstallment.emiAmount || 0) +
+        Number(upcomingInstallment.penaltyAmount || 0) -
+        Number(upcomingInstallment.paidAmount || 0),
+      0
+    );
+    const { command, created } = await queueEmiReminder({
+      device,
       tenantId: tenant._id,
-      channelPartnerId: tenant.channelPartnerId,
-      userId: device.userId,
-      deviceId: device._id,
-      reason: req.body.note,
-      metadata: { commandId: commands[0]._id, commandType: "UPCOMING_PAYMENT", installmentId: upcomingInstallment._id }
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      payload: {
+        reminderType: EMI_REMINDER_TYPES.UPCOMING,
+        message: req.body.note,
+        amount: outstandingAmount,
+        dueDate: upcomingInstallment.dueDate,
+        installmentNumber: upcomingInstallment.installmentNumber,
+        totalInstallments: schedule.installments.length
+      }
     });
+
+    if (created) {
+      await createAuditLog({
+        eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: tenant.channelPartnerId,
+        userId: device.userId,
+        deviceId: device._id,
+        reason: req.body.note,
+        metadata: {
+          commandId: command._id,
+          commandType: EMI_REMINDER_COMMAND_TYPE,
+          installmentId: upcomingInstallment._id
+        }
+      });
+    }
 
     return sendSuccess(res, 201, "Upcoming payment reminder command queued successfully", {
       queued: true,
-      command: commands[0],
+      commandId: command._id,
+      commandType: EMI_REMINDER_COMMAND_TYPE,
+      status: command.status,
+      command,
       upcomingInstallment
     });
   } catch (error) {
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   }
 };
 
@@ -1860,7 +2347,11 @@ export const listQrCodes = async (req, res) => {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
-    return sendSuccess(res, 200, "QR codes fetched successfully", tenant.qrCodes || []);
+    const qrCodes = [...(tenant.qrCodes || [])].sort(
+      (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+    );
+
+    return sendSuccess(res, 200, "QR codes fetched successfully", qrCodes);
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -1989,7 +2480,7 @@ export const listPendingPayments = async (req, res) => {
     const payments = await Payment.find({ tenantId: tenant._id, approvalStatus: "pending_approval" })
       .populate("userId", "name mobile loanId")
       .populate("deviceId", "imei deviceModel manufacturer state")
-      .sort({ submittedAt: -1 })
+      .sort({ submittedAt: -1, _id: -1 })
       .lean();
 
     return sendSuccess(res, 200, "Pending payments fetched successfully", payments);
@@ -2030,7 +2521,7 @@ export const listPaymentApprovalRequests = async (req, res) => {
       Payment.find(filter)
         .populate("userId", "name mobile email loanId")
         .populate("deviceId", "imei deviceModel manufacturer state")
-        .sort({ submittedAt: -1 })
+        .sort({ submittedAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -2097,7 +2588,8 @@ export const approvePayment = async (req, res) => {
 
     session.startTransaction();
 
-    const matchedInstallments = await applyPaymentToEmiSchedule({ payment, accountId: req.auth.id, session });
+    const emiResult = await applyPaymentToEmiSchedule({ payment, accountId: req.auth.id, session });
+    const { matchedInstallments } = emiResult;
     payment.status = "success";
     payment.approvalStatus = "approved";
     payment.approvedBy = req.auth.id;
@@ -2106,14 +2598,38 @@ export const approvePayment = async (req, res) => {
     payment.metadata = { ...(payment.metadata || {}), approvalNote: req.body.note };
     await payment.save({ session });
 
-    const { command } = await queueTenantDeviceCommand({
-      device,
-      commandType: "UNLOCK",
-      triggeredBy: "payment_unlock",
-      accountId: req.auth.id,
-      payload: { paymentId: payment._id },
-      session
-    });
+    const releaseQueued = emiResult.newlySettled;
+    const { command } = releaseQueued
+      ? await queueDeviceRelease({
+          device,
+          schedule: emiResult.schedule,
+          accountId: req.auth.id,
+          triggeredBy: "payment_settlement",
+          reason: "All EMI installments paid or waived",
+          session
+        })
+      : await queueTenantDeviceCommand({
+          device,
+          commandType: "UNLOCK",
+          triggeredBy: "payment_unlock",
+          accountId: req.auth.id,
+          payload: { paymentId: payment._id },
+          session
+        });
+
+    const restrictionClearResult = releaseQueued
+      ? {
+          cleared: false,
+          command: null,
+          restrictionState: normalizeDeviceRestrictionState(device.restrictionState)
+        }
+      : await queueDeviceRestrictionClear({
+          device,
+          accountId: req.auth.id,
+          triggeredBy: "payment_unlock",
+          paymentId: payment._id,
+          session
+        });
 
     await createAuditLog(
       {
@@ -2123,31 +2639,126 @@ export const approvePayment = async (req, res) => {
         channelPartnerId: tenant.channelPartnerId,
         userId: payment.userId,
         deviceId: payment.deviceId,
-        metadata: { paymentId: payment._id, commandId: command._id, matchedInstallments }
+        metadata: {
+          paymentId: payment._id,
+          commandId: command._id,
+          restrictionCommandId: restrictionClearResult.command?._id || null,
+          restrictionsClearQueued: restrictionClearResult.cleared,
+          matchedInstallments,
+          emiScheduleStatus: emiResult.schedule?.status,
+          releaseQueued
+        }
       },
       { session }
     );
 
     await createAuditLog(
       {
-        eventType: AUDIT_EVENTS.UNLOCK_TRIGGERED,
+        eventType: releaseQueued ? AUDIT_EVENTS.DEVICE_RELEASE_QUEUED : AUDIT_EVENTS.UNLOCK_TRIGGERED,
         actorId: req.auth.id,
         tenantId: tenant._id,
         channelPartnerId: tenant.channelPartnerId,
         userId: payment.userId,
         deviceId: payment.deviceId,
-        metadata: { paymentId: payment._id, commandId: command._id, triggeredBy: "payment_unlock" }
+        metadata: {
+          paymentId: payment._id,
+          commandId: command._id,
+          triggeredBy: releaseQueued ? "payment_settlement" : "payment_unlock"
+        }
       },
       { session }
     );
 
+    if (restrictionClearResult.command) {
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+          actorId: req.auth.id,
+          tenantId: tenant._id,
+          channelPartnerId: tenant.channelPartnerId,
+          userId: payment.userId,
+          deviceId: payment.deviceId,
+          reason: "Payment approved",
+          metadata: {
+            paymentId: payment._id,
+            commandId: restrictionClearResult.command._id,
+            commandType: restrictionClearResult.command.commandType,
+            restrictionVersion: restrictionClearResult.restrictionState.desiredVersion,
+            restrictions: restrictionClearResult.restrictionState.desired,
+            source: "payment_approval"
+          }
+        },
+        { session }
+      );
+    }
+
+    if (releaseQueued) {
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.EMI_SCHEDULE_SETTLED,
+          actorId: req.auth.id,
+          tenantId: tenant._id,
+          channelPartnerId: tenant.channelPartnerId,
+          userId: payment.userId,
+          deviceId: payment.deviceId,
+          metadata: {
+            paymentId: payment._id,
+            emiScheduleId: emiResult.schedule._id,
+            settlementTime: emiResult.schedule.settlementTime
+          }
+        },
+        { session }
+      );
+    }
+
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Payment approved and unlock queued successfully", {
-      paymentId: payment._id,
-      unlockCommandId: command._id,
-      matchedInstallments
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.BORROWER,
+      tenantId: tenant._id,
+      deviceId: payment.deviceId,
+      userId: payment.userId,
+      title: releaseQueued ? "All EMIs completed" : "Payment approved",
+      text: releaseQueued
+        ? "All your EMIs are complete and your device release is being processed."
+        : "Your payment has been approved and your device unlock is being processed.",
+      notificationType: "PAYMENT_APPROVED",
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      data: {
+        paymentId: payment._id,
+        deviceId: payment.deviceId,
+        userId: payment.userId,
+        matchedInstallments,
+        commandId: command._id,
+        commandType: command.commandType,
+        restrictionCommandId: restrictionClearResult.command?._id || null,
+        restrictionsClearQueued: restrictionClearResult.cleared,
+        releaseQueued
+      }
     });
+
+    return sendSuccess(
+      res,
+      200,
+      releaseQueued
+        ? "Payment approved, EMI schedule settled, and device release queued successfully"
+        : "Payment approved and unlock queued successfully",
+      {
+        paymentId: payment._id,
+        commandId: command._id,
+        commandType: command.commandType,
+        restrictionCommandId: restrictionClearResult.command?._id || null,
+        restrictionCommandType: restrictionClearResult.command?.commandType || null,
+        restrictionsClearQueued: restrictionClearResult.cleared,
+        restrictionVersion: restrictionClearResult.cleared
+          ? restrictionClearResult.restrictionState.desiredVersion
+          : null,
+        emiScheduleStatus: emiResult.schedule?.status || null,
+        settlementTime: emiResult.schedule?.settlementTime || null,
+        matchedInstallments
+      }
+    );
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, 500, error.message || "Internal server error");
@@ -2194,6 +2805,24 @@ export const rejectPayment = async (req, res) => {
       deviceId: payment.deviceId,
       reason: req.body.reason,
       metadata: { paymentId: payment._id }
+    });
+
+    await safeQueueNotification({
+      audience: NOTIFICATION_AUDIENCES.BORROWER,
+      tenantId: tenant._id,
+      deviceId: payment.deviceId,
+      userId: payment.userId,
+      title: "Payment rejected",
+      text: "Your payment was rejected. Please review the reason and submit again if needed.",
+      notificationType: "PAYMENT_REJECTED",
+      triggeredBy: "manual_tenant",
+      triggeredByAccountId: req.auth.id,
+      data: {
+        paymentId: payment._id,
+        deviceId: payment.deviceId,
+        userId: payment.userId,
+        rejectionReason: req.body.reason
+      }
     });
 
     return sendSuccess(res, 200, "Payment rejected successfully", payment);

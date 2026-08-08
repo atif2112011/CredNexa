@@ -138,9 +138,16 @@ Body:
 
 **Step 1 — Fetch consent document to display to user:**
 ```
-GET /app/consent/terms
+POST /app/consent/terms
 (No auth token required)
+
+Body:
+{
+  "enrollmentToken": "<token-from-enrollment-qr>"
+}
 ```
+
+Use `GET /app/consent/terms` when raw, unpopulated consent is required. A tokenless POST also returns raw consent.
 
 **Response:**
 ```json
@@ -150,9 +157,12 @@ GET /app/consent/terms
   "borrowerAgreementText": "...",
   "deviceControlConsentText": "...",
   "privacyPolicyText": "...",
-  "tripartiteAckText": "..."
+  "tripartiteAckText": "...",
+  "renderedConsentHash": "<sha256>"
 }
 ```
+
+The personalized response replaces `[USER NAME]`, `[SELLER NAME]`, `[SELLER SUPPORT]`, and `[DE-ENROLMENT TIME]`. Send `renderedConsentHash` with the consent-accept request.
 
 **App action:** Display the full agreement text. User must scroll to bottom and check a checkbox. Do not allow proceeding until checkbox is ticked.
 
@@ -187,7 +197,8 @@ Body:
 {
   "otp": "482910",
   "consentCheckboxAccepted": true,
-  "consentVersion": "1.1"
+  "consentVersion": "1.1",
+  "renderedConsentHash": "<hash-from-consent-terms>"
 }
 ```
 
@@ -392,6 +403,32 @@ When `tempUnlockExpiresAt` is reached locally → show lock screen again. The se
 Payment was received. Unlock command is queued but not yet delivered to device.  
 Show: "Your payment was received. Your device is being unlocked..."  
 Poll `GET /app/device/state` every 10 seconds until state changes to `ACTIVE`.
+
+---
+
+### UC-11A — Device is RELEASE_PENDING
+
+`state: "RELEASE_PENDING"` means every EMI installment is `paid` or `waived`, the schedule is settled, and permanent release is queued.
+
+Show a dedicated full-screen experience:
+
+- **All EMIs completed**
+- “Your EMI plan is fully settled. We are permanently releasing this device from EMI Shield management.”
+- Settlement date/time when available
+- Release progress indicator
+- Offline prompt when connectivity is required
+
+Hide Pay EMI, Request Unlock, temporary-unlock, overdue, and countdown controls. The app must process only the verified `RELEASE_DEVICE` command and must not return to an EMI lock screen.
+
+### UC-11B — Device is RELEASED
+
+`state: "RELEASED"` → Show:
+
+- **Device released**
+- “All EMIs are settled and this device is no longer managed by EMI Shield.”
+- A single Continue action
+
+Persist this state locally and ignore later EMI-management commands.
 
 ---
 
@@ -780,7 +817,7 @@ Authorization: Bearer <accessToken>
 ```
 
 **App action:**
-- For each command in `pendingCommands` → execute it locally (apply lock/unlock via Device Admin API)
+- For each command in `pendingCommands` → execute it locally. `RELEASE_DEVICE` uses the permanent-release flow and settled screen; it is not a normal unlock.
 - After executing each → acknowledge it (UC-26)
 - Update local device state to match `deviceState`
 - Cache `serverTime` and `scheduledLockAt`; `scheduledLockAt` is the backend-authoritative EMI lock deadline.
@@ -806,7 +843,7 @@ On boot:
 
 ### UC-26 — Acknowledge Executed Command
 
-**Trigger:** After successfully applying a lock or unlock command from FCM or sync.
+**Trigger:** After successfully applying a lock, unlock, restriction, or permanent release command from FCM or sync.
 
 ```
 POST /device/command/:commandId/ack
@@ -822,6 +859,18 @@ Body:
 **Response:** `{ "acknowledged": true }`
 
 **App action:** Update local command queue — remove the acknowledged command.
+
+For `RELEASE_DEVICE`, use the current acknowledgement route and body:
+
+```json
+{
+  "commandId": "<deviceCommandId>",
+  "status": "acknowledged",
+  "releaseCompleted": true
+}
+```
+
+Do not acknowledge release success until Device Owner/management removal and local restriction cleanup have completed.
 
 ---
 

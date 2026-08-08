@@ -2,6 +2,15 @@
 
 This document is for the borrower Android app developer.
 
+## 2026-07-04 MVP Update
+
+Risk flags are now created in two ways:
+
+- Server-verified Play Integrity flow: the app calls `/api/app/integrity/challenge`, requests the Play Integrity token, then calls `/api/app/integrity/verify`. The backend stores an `IntegrityCheck`, maps failed verdicts or local evidence into `RiskFlag` records, and may queue security commands.
+- Compatibility security event flow: `/api/app/security/event` still exists for app-observed local events, but enforcement-grade Play Integrity risks should come from `/api/app/integrity/verify`, not from the app deciding final compromise status.
+
+The app should treat local signals as evidence. The server decides final risk type, status, remediation, and enforcement.
+
 The app does not create `RiskFlag` documents directly. It reports a security event to the backend, and the backend creates:
 
 - `DeviceEvent`
@@ -157,7 +166,7 @@ Use `high` for repeated temporary failures. Use `critical` only if the app has s
 
 ## Auto-Lock Rule
 
-The backend has tenant policy defaults:
+The backend has tenant policy defaults. Server-verified integrity risks and compatibility app-reported events both use the same `risk_auto_lock` command path when enforcement is enabled and tenant policy allows it:
 
 ```json
 {
@@ -178,6 +187,7 @@ If all are true:
 - `severity` is `critical`
 - `type` is in tenant policy `riskRules.autoLockTypes`
 - device is not already `LOCKED`
+- `DEVICE_INTEGRITY_MODE` is enforcement/enforce for server-verified Play Integrity auto-locks
 
 then backend:
 
@@ -257,6 +267,6 @@ No registered device:
 
 - Do not send raw Play Integrity token in `metadata`.
 - Do not send Google service credentials.
-- Use `critical` only for confirmed compromise.
-- Use `DEVICE_INTEGRITY_COMPROMISED` and `APP_INTEGRITY_COMPROMISED` only for Google integrity verdict failures after backend/app integrity flow.
+- Use `critical` only for confirmed local evidence. Play Integrity compromise status is created by the backend after `/api/app/integrity/verify`.
+- Use `/api/app/integrity/verify` for Play Integrity tokens; do not mirror the raw verdict into `/api/app/security/event`.
 - App should continue to obey backend sync/command state. The app should not locally lock itself only because it sent this event.

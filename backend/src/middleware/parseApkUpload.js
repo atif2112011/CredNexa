@@ -1,5 +1,6 @@
 import multer from "multer";
 
+import { runMultipartParser } from "./multipartFirebaseAdapter.js";
 import { sendError } from "../utils/apiResponse.js";
 
 export const APK_FILE_FIELD_NAME = "apkFile";
@@ -42,18 +43,24 @@ export const parseApkUpload = (req, res, next) => {
     return next();
   }
 
-  return apkUpload(req, res, (error) => {
-    if (error) {
-      const message = error.code === "LIMIT_FILE_SIZE" ? "APK file must be 150 MB or smaller" : error.message;
-      return sendError(res, 400, message || "Invalid APK upload");
-    }
+  return runMultipartParser({
+    req,
+    res,
+    upload: apkUpload,
+    next,
+    onAfterParse: ({ error, req: parsedReq, next: parsedNext }) => {
+      if (error) {
+        const message = error.code === "LIMIT_FILE_SIZE" ? "APK file must be 150 MB or smaller" : error.message;
+        return sendError(res, 400, message || "Invalid APK upload");
+      }
 
-    // APK files are ZIP containers. This lightweight check rejects obvious
-    // non-APK content before it is uploaded and trusted by borrower devices.
-    if (req.file && !hasZipSignature(req.file.buffer)) {
-      return sendError(res, 400, "APK file content is not a valid ZIP/APK package");
-    }
+      // APK files are ZIP containers. This lightweight check rejects obvious
+      // non-APK content before it is uploaded and trusted by borrower devices.
+      if (parsedReq.file && !hasZipSignature(parsedReq.file.buffer)) {
+        return sendError(res, 400, "APK file content is not a valid ZIP/APK package");
+      }
 
-    return next();
+      return parsedNext();
+    }
   });
 };

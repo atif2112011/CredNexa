@@ -23,6 +23,8 @@ All admin APIs are protected by the existing Super Admin middleware:
 
 ```text
 GET   /api/admin/app-builds
+POST  /api/admin/app-builds/upload-sessions
+POST  /api/admin/app-builds/upload-sessions/:sessionId/complete
 POST  /api/admin/app-builds
 GET   /api/admin/app-builds/:buildId
 PATCH /api/admin/app-builds/:buildId
@@ -36,6 +38,7 @@ Collection/model:
 
 ```text
 appbuilds / AppBuild
+appbuilduploadsessions / AppBuildUploadSession
 ```
 
 Main fields:
@@ -83,65 +86,120 @@ platform + packageName + channel + status supports active build lookup
 
 ## Admin Build Lifecycle
 
-1. Super Admin uploads an APK with build metadata.
-2. Backend validates the metadata and APK file.
-3. Backend uploads the APK to Firebase Storage.
-4. Backend computes and stores `apkSha256`.
-5. Build is saved as `draft`.
-6. Super Admin publishes the draft build.
-7. Backend archives any previously published build for the same `platform + packageName + channel`.
-8. Borrower app update check starts using the newly published build.
+1. The portal sends build metadata and the selected file descriptor to the backend.
+2. The backend authenticates the Super Admin, validates the metadata, rejects an existing version code, and creates a two-hour upload session.
+3. The browser uploads the APK directly to the returned Firebase Storage resumable URL in 8 MiB chunks. APK bytes never pass through the Vercel API proxy.
+4. The portal asks the backend to complete the upload session.
+5. The backend verifies the Firebase object, exact size, MIME type, and ZIP/APK signature, then streams the object to calculate `apkSha256`.
+6. The backend copies the verified object from staging to its permanent server-generated path and creates the build as `draft`.
+7. Super Admin publishes the draft build separately.
+8. The backend archives any previously published build for the same `platform + packageName + channel`.
+9. Borrower app update checks start using the newly published build.
 
 Publishing is separate from upload so the admin can review the uploaded build before it reaches borrower devices.
 
-## Upload Build API
+## Direct Upload APIs
+
+### Create Upload Session
 
 Endpoint:
 
 ```text
-POST /api/admin/app-builds
+POST /api/admin/app-builds/upload-sessions
 ```
 
 Content type:
 
 ```text
-multipart/form-data
+application/json
 ```
 
-File field:
+Request:
 
-```text
-apkFile
+```json
+{
+  "fileName": "app-release.apk",
+  "fileSize": 187432960,
+  "mimeType": "application/vnd.android.package-archive",
+  "platform": "android",
+  "packageName": "com.crednexa.app",
+  "channel": "production",
+  "versionName": "1.0.15",
+  "versionCode": 15,
+  "minimumSupportedVersionCode": 10,
+  "buildType": "release",
+  "checksumRequired": true,
+  "releaseNotes": "Bug fixes and security improvements"
+}
 ```
 
-Form fields:
+Response data:
 
-```text
-platform=android
-packageName=com.crednexa.app
-channel=production
-versionName=1.0.15
-versionCode=15
-minimumSupportedVersionCode=10
-buildType=release
-checksumRequired=true
-releaseNotes=Bug fixes and security improvements
+```json
+{
+  "uploadSessionId": "68872f9ad3538e5cc41a1090",
+  "uploadUrl": "https://storage.googleapis.com/upload/storage/v1/...",
+  "expiresAt": "2026-07-27T15:30:00.000Z",
+  "chunkSize": 8388608
+}
 ```
 
 Important validation:
 
 ```text
+Super Admin authentication is required
 platform must be android
 packageName must be com.crednexa.app
 channel must be production or qa
 versionCode must be a positive integer
 minimumSupportedVersionCode must be a positive integer
 versionCode must be >= minimumSupportedVersionCode
-apkFile is required on create
-apkFile must look like a ZIP/APK file
+fileName must end in .apk
+fileSize must be between 1 byte and 500 MiB inclusive
+mimeType must be an accepted Android package or ZIP type
+the platform/package/channel/versionCode combination must not already exist
+the portal origin must be listed in DIRECT_UPLOAD_ALLOWED_ORIGINS
 ```
 
-Example cURL:
+The `uploadUrl` is a temporary credential and must not be logged or stored in browser persistence. The portal sends chunks directly to this URL using `PUT` and `Content-Range`.
+
+### Complete Upload Session
+
+Endpoint:
+
+```text
+POST /api/admin/app-builds/upload-sessions/:sessionId/complete
+```
+
+The request body is empty. The backend uses only the authenticated user and the stored upload session; the client cannot supply or replace the Storage path, APK URL, checksum, size, or MIME type.
+
+Completion behavior:
+
+```text
+Requires the same Super Admin who created the session
+Rejects expired, failed, missing, or incomplete uploads
+Validates stored object size, MIME type, and ZIP/APK signature
+Streams the APK from Firebase Storage to calculate SHA-256
+Moves the verified APK from staging to a permanent path
+Creates and returns the draft AppBuild
+Returns the same AppBuild when an already-completed session is retried
+```
+
+Upload sessions expire after two hours. Incomplete staging objects are deleted by the bucket lifecycle rule after one day.
+
+## Legacy Multipart Upload API
+
+The original API remains available for existing integrations:
+
+```text
+POST /api/admin/app-builds
+Content-Type: multipart/form-data
+File field: apkFile
+```
+
+It still passes the entire APK through the application server and retains its 150 MB limit. The Super Admin portal no longer calls this endpoint.
+
+Legacy example:
 
 ```bash
 curl -X POST "https://cred-nexa-t1o7.vercel.app/api/admin/app-builds" \
@@ -156,6 +214,40 @@ curl -X POST "https://cred-nexa-t1o7.vercel.app/api/admin/app-builds" \
   -F "buildType=release" \
   -F "checksumRequired=true" \
   -F "releaseNotes=Bug fixes and security improvements"
+```
+
+## Firebase Storage Deployment
+
+Required backend environment:
+
+```text
+APP_FIREBASE_STORAGE_BUCKET=<project-bucket>
+ADMIN_FIREBASE_PROJECT_ID=<service-account-project>
+ADMIN_FIREBASE_CLIENT_EMAIL=<service-account-email>
+ADMIN_FIREBASE_PRIVATE_KEY=<service-account-private-key>
+DIRECT_UPLOAD_ALLOWED_ORIGINS=http://localhost:3000,https://<super-admin-domain>
+```
+
+`FIREBASE_SERVICE_ACCOUNT_JSON` or application-default credentials can be used instead of the three `ADMIN_FIREBASE_*` values. Credentials remain backend-only and are never exposed to the portal.
+
+Before applying the included Storage configuration, replace the production origin in `backend/storage.cors.json` if the Super Admin domain differs:
+
+```bash
+gcloud storage buckets update gs://<project-bucket> --cors-file=backend/storage.cors.json
+gcloud storage buckets update gs://<project-bucket> --lifecycle-file=backend/storage.lifecycle.json
+```
+
+The CORS policy must allow `PUT` and expose `Range` so chunk status can be resumed. The lifecycle configuration deletes only objects under `app-builds/staging/` that are at least one day old.
+
+Troubleshooting:
+
+```text
+403 when creating a session: confirm the browser origin is in DIRECT_UPLOAD_ALLOWED_ORIGINS.
+CORS failure during PUT: apply storage.cors.json to the correct bucket and verify the deployed portal origin.
+Firebase credential/signing error: verify the service account or application-default credentials can create resumable uploads and manage Storage objects.
+409 during completion: confirm the upload finished and the same Super Admin/session ID is being used.
+410 during completion: the two-hour session expired; start a new upload.
+Invalid ZIP/APK: rebuild the APK and confirm the selected file is an Android package.
 ```
 
 ## Publish Build API
@@ -325,7 +417,11 @@ Force-update response:
 
 ```text
 backend/src/models/AppBuild.js
+backend/src/models/AppBuildUploadSession.js
+backend/src/services/appBuildDirectUpload.service.js
+backend/src/services/appBuildUploadValidation.js
 backend/src/services/appUpdate.service.js
+backend/src/config/firebaseAdminStorage.js
 backend/src/middleware/parseApkUpload.js
 backend/src/utils/firebaseFileUpload.js
 backend/src/modules/app/app.controller.js
@@ -333,6 +429,10 @@ backend/src/modules/app/app.routes.js
 backend/src/modules/admin/admin.controller.js
 backend/src/modules/admin/admin.routes.js
 backend/src/app.js
+backend/storage.cors.json
+backend/storage.lifecycle.json
+super-admin-portal/src/lib/firebase-resumable-upload.ts
+super-admin-portal/src/app/(dashboard)/builds/builds-table.tsx
 ```
 
 ## Security Notes
@@ -355,6 +455,18 @@ OTP
 
 Backend request logging redacts sensitive request body fields before printing logs.
 
+Direct-upload security properties:
+
+```text
+The Super Admin JWT authorizes session creation and completion.
+Firebase service-account credentials remain on the backend.
+The backend generates every staging and permanent object path.
+The temporary resumable URL is bound to the allowed portal origin.
+The backend verifies the stored object rather than trusting client metadata.
+Upload sessions are owned by one Super Admin, expire after two hours, and are single-use.
+Abandoned staging objects are removed by a one-day Storage lifecycle rule.
+```
+
 Safe operational fields:
 
 ```text
@@ -372,16 +484,29 @@ failureReason
 
 ## Verification
 
-Syntax checks were run on the changed backend files with `node --check`.
+Automated checks:
 
-Recommended functional checks:
+```bash
+cd backend
+npm test
+npx eslint src/services/appBuildDirectUpload.service.js src/services/appBuildUploadValidation.js src/config/firebaseAdminStorage.js src/models/AppBuildUploadSession.js
+
+cd ../super-admin-portal
+npm run typecheck
+npm run build
+```
+
+Deployment checks:
 
 ```text
-1. Upload a QA draft build.
-2. Publish the QA build.
-3. Confirm GET /api/app/update/check with channel=qa returns QA metadata.
-4. Upload and publish a production build.
-5. Confirm production and QA return different APK URLs.
-6. Test no-update, optional-update, and force-update versionCode cases.
-7. Confirm invalid packageName and invalid platform return 400.
+1. Apply the Storage CORS and lifecycle files to the Firebase bucket.
+2. Upload a large QA APK and confirm browser network traffic sends APK chunks directly to storage.googleapis.com.
+3. Confirm the page shows upload percentage, supports cancellation, and transitions to final verification.
+4. Confirm the new draft has the correct byte size, Firebase path, HTTPS URL, and SHA-256.
+5. Retry the completion request and confirm it returns the same build without creating a duplicate.
+6. Publish the QA build and confirm /api/app/update/check with channel=qa returns its metadata.
+7. Upload and publish a production build and confirm production and QA use different APK URLs.
+8. Test no-update, optional-update, and force-update versionCode cases.
+9. Confirm invalid packageName, platform, extension, MIME type, origin, and files above 500 MiB are rejected.
+10. Confirm objects abandoned under app-builds/staging/ are removed after the configured lifecycle age.
 ```

@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { BACKEND_API_URL, SUPER_ADMIN_COOKIE } from "@/lib/constants";
+import { getBackendProxyHeaders } from "@/lib/backend-proxy-headers";
 import { refreshAccessToken } from "@/lib/session";
 
 type Params = {
@@ -14,7 +15,7 @@ async function proxy(request: Request, { params }: Params) {
   let token = cookieStore.get(SUPER_ADMIN_COOKIE)?.value;
   let refreshedAccessToken: string | null = null;
   if (!token) {
-    const refreshedToken = await refreshAccessToken(request.headers.get("cookie"));
+    const refreshedToken = await refreshAccessToken(request.headers.get("cookie"), request.headers);
     token = refreshedToken || undefined;
     refreshedAccessToken = refreshedToken;
   }
@@ -32,14 +33,17 @@ async function proxy(request: Request, { params }: Params) {
     method: request.method,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": contentType || "application/json" }),
+      "X-Upload-Origin": incomingUrl.origin,
+      ...getBackendProxyHeaders(request.headers),
       Authorization: `Bearer ${accessToken}`
     },
-    body
+    body,
+    cache: "no-store" as RequestCache
   });
   let response = await fetch(backendUrl.toString(), requestInit(token));
 
   if (response.status === 401) {
-    const refreshedToken = await refreshAccessToken(request.headers.get("cookie"));
+    const refreshedToken = await refreshAccessToken(request.headers.get("cookie"), request.headers);
 
     if (!refreshedToken) {
       return NextResponse.json({ error: "Session expired" }, { status: 401 });

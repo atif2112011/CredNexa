@@ -94,6 +94,7 @@ Request:
   "address": {
     "street": "Shop 12, Main Road",
     "city": "Pune",
+    "district": "Pune",
     "state": "Maharashtra",
     "pincode": "411001"
   }
@@ -108,7 +109,7 @@ retail_chain_group
 independent
 ```
 
-`email` and `address` are optional. The app can omit them.
+`email` is optional. `address` is required.
 
 `address` uses the same shape as tenant address:
 
@@ -116,6 +117,7 @@ independent
 {
   "street": "Shop 12, Main Road",
   "city": "Pune",
+  "district": "Pune",
   "state": "Maharashtra",
   "pincode": "411001"
 }
@@ -139,6 +141,7 @@ Success response:
       "address": {
         "street": "Shop 12, Main Road",
         "city": "Pune",
+        "district": "Pune",
         "state": "Maharashtra",
         "pincode": "411001"
       },
@@ -194,7 +197,7 @@ Email login also works if email was provided:
 - Confirm password is required and must match password.
 - Email is optional.
 - If email is provided, it must be unique.
-- Address is optional and uses the same `street`, `city`, `state`, `pincode` shape as tenant address.
+- Address is required and uses the same `street`, `city`, `district`, `state`, `pincode` shape as tenant address.
 - OTP expires in 10 minutes.
 - Wrong OTP is rejected after maximum attempts.
 

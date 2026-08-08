@@ -19,6 +19,4 @@ const startServer = async () => {
   }
 };
 
-if (env.vercelDeploy === false) {
-  startServer();
-}
+startServer();
