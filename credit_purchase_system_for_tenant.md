@@ -353,7 +353,7 @@ do not allow manual edit
 - Backend allows only one pending credit purchase request per tenant.
 - Backend does not add credits on submit.
 - Backend adds credits only after Admin approval.
-- Backend updates partner payout credit on approval if the tenant belongs to a partner.
+- Backend updates partner payout credit on approval if the tenant belongs to a partner. Partner credit is calculated from this request's snapshotted discounted net `purchaseAmount`, not its gross amount.
 
 ## Empty States
 

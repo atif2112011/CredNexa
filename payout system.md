@@ -25,11 +25,15 @@ Partner earnings use a credit balance system.
 
 When a tenant under a partner purchases keys, the backend awards partner credit based on the verified purchase amount.
 
-The backend must not trust frontend-supplied payment totals. The approved purchase amount is calculated on the backend as:
+The backend must not trust frontend-supplied payment totals. For the normal tenant purchase-request flow, the approved purchase amount is calculated on the backend as:
 
 ```text
-keysPurchased * perKeyPrice
+grossPurchaseAmount = keysPurchased * basePerKeyPrice
+discountAmount = grossPurchaseAmount * tenantSlabDiscountPercentage / 100
+purchaseAmount = grossPurchaseAmount - discountAmount
 ```
+
+`purchaseAmount` is the discounted net amount actually paid by the tenant. Partner commission is calculated from this net amount, not the gross amount.
 
 All payout and credit amounts are stored as rupee numbers, not paisa.
 
@@ -83,14 +87,14 @@ If constants are not present, backend falls back to:
 
 Partner credit is awarded only after tenant key purchase/credit approval succeeds.
 
-Current backend hook:
+Current normal purchase hook:
 
 ```text
-Admin adjusts tenant credits positively
--> Backend treats delta as keysPurchased
--> Backend requires perKeyPrice
--> Backend calculates purchaseAmount = delta * perKeyPrice
--> Backend calculates partner credit
+Tenant submits a key-purchase request
+-> Backend snapshots base price, gross amount, matched discount slab, discount amount, and net purchaseAmount
+-> Admin verifies payment and approves the request
+-> Backend adds the purchased keys to the tenant
+-> Backend calculates partner credit from the snapshotted net purchaseAmount
 -> Partner available payout balance increases
 -> Partner credit ledger entry is written
 ```
@@ -98,18 +102,23 @@ Admin adjusts tenant credits positively
 Formula:
 
 ```text
-purchaseAmount = keysPurchased * perKeyPrice
+grossPurchaseAmount = keysPurchased * basePerKeyPrice
+discountAmount = grossPurchaseAmount * tenantSlabDiscountPercentage / 100
+purchaseAmount = grossPurchaseAmount - discountAmount
 partnerCredit = purchaseAmount * creditPercentage / 100
 ```
 
 Example:
 
 ```text
-keysPurchased = 10
-perKeyPrice = 100
-purchaseAmount = 1000
+keysPurchased = 100
+basePerKeyPrice = 100
+tenantSlabDiscountPercentage = 15
+grossPurchaseAmount = 10000
+discountAmount = 1500
+purchaseAmount = 8500
 creditPercentage = 15
-partnerCredit = 150
+partnerCredit = 1275
 ```
 
 ### Backend Verification Rule
@@ -128,13 +137,32 @@ or:
 amount
 ```
 
-the backend verifies:
+the normal purchase-request backend verifies:
 
 ```text
-purchaseAmount == delta * perKeyPrice
+submitted purchaseAmount == backend-calculated discounted purchaseAmount
 ```
 
 If it does not match, the request fails.
+
+The submitted `discountConfigVersion`, when provided, must match the tenant's latest configuration. A stale version fails with HTTP 409 and the tenant app must refresh purchase options.
+
+### Legacy Manual Credit Adjustment
+
+The following endpoint remains unchanged for backwards compatibility:
+
+```http
+POST /api/admin/tenants/:tenantId/credits/adjust
+```
+
+For a positive legacy adjustment only:
+
+```text
+purchaseAmount = delta * perKeyPrice
+partnerCredit = purchaseAmount * creditPercentage / 100
+```
+
+This legacy path does not apply tenant discount slabs. New paid key purchases must use the tenant credit purchase-request flow.
 
 ### Partner Credit Ledger
 
@@ -166,6 +194,9 @@ balanceBefore
 balanceAfter
 keysPurchased
 perKeyPrice
+grossPurchaseAmount
+purchaseDiscountPercentage
+purchaseDiscountAmount
 purchaseAmount
 creditPercentage
 actorId
@@ -174,7 +205,7 @@ reason
 metadata
 ```
 
-The ledger is required because partner percentage can change later. Old earning records must keep the original `creditPercentage` used for that credit.
+The ledger is required because tenant slab discounts and partner percentages can change later. Old earning records keep the gross amount, discount snapshot, net `purchaseAmount`, and original `creditPercentage` used for that credit.
 
 ### Partner Payout Request
 

@@ -23,7 +23,8 @@ super_admin account
 partner_admin account
 channelPartner linked to partner_admin
 tenant under channelPartner
-tenant credit adjustment endpoint available
+tenant credit purchase-request flow available
+legacy tenant credit adjustment endpoint available only for compatibility tests
 ```
 
 Recommended starting values:
@@ -35,6 +36,8 @@ ChannelPartner.payoutHoldBalance = 0
 PayoutConstants.minPartnerPayoutAmount = 0
 PayoutConstants.maxPartnerPayoutAmount = 0
 ```
+
+Tests that call `POST /api/admin/tenants/:tenantId/credits/adjust` cover legacy compatibility only. New purchase and payout behavior must be tested through tenant purchase submission followed by Admin approval.
 
 ### Payout Constants
 
@@ -716,19 +719,20 @@ status and approvalStatus are returned
 
 These cases apply to the tenant credit purchase request flow.
 
-### Proposed Flow To Test Later
+### Current Slab-Based Flow To Test
 
 ```text
 Tenant opens credit purchase screen
-Tenant sees admin QR
+Tenant receives base per-key price, discount slabs, config version, limits, and admin QR
 Tenant selects keys/credits
-Backend calculates amount using perKeyPrice
+Tenant App displays gross amount, matching slab discount, and net amount
 Tenant uploads payment proof image
 Tenant optionally enters reference number
 Tenant submits credit purchase request
+Backend recalculates and snapshots gross amount, slab, discount, net amount, and config version
 Admin approves or rejects request
 Approved request adds tenant credits
-Approved request awards partner credit if tenant belongs to partner
+Approved request awards partner credit from discounted net purchaseAmount if tenant belongs to partner
 ```
 
 Default values:
@@ -742,9 +746,9 @@ adminCreditPurchaseUpiName = Test Admin
 adminCreditPurchaseQrImageUrl = https://placehold.co/600x400
 ```
 
-### Future Test Cases To Keep
+### Tenant Purchase Test Cases
 
-#### TC-TENANT-CREDIT-PURCHASE-001: Tenant Fetches Admin QR And Price
+#### TC-TENANT-CREDIT-PURCHASE-001: Tenant Fetches Admin QR, Base Price, And Slabs
 
 API:
 
@@ -756,7 +760,9 @@ Expected areas:
 
 ```text
 active admin QR returned
-perKeyPrice returned
+perKeyPrice and basePerKeyPrice returned
+tenant-specific discountSlabs returned
+discountConfigVersion returned
 min/max credits returned if configured
 ```
 
@@ -775,7 +781,8 @@ Expected areas:
 requested credits required
 payment proof image required
 reference number optional
-backend calculates amount
+backend selects matching slab and calculates gross, discount, and net amount
+pricing and discount values are snapshotted
 request status = PENDING
 ```
 
@@ -784,9 +791,9 @@ request status = PENDING
 Expected areas:
 
 ```text
-frontend amount does not match keys * perKeyPrice
-request fails or backend ignores frontend amount
-verified amount is server-calculated
+frontend amount does not match backend-calculated discounted net amount
+request fails
+no request is created
 ```
 
 #### TC-TENANT-CREDIT-PURCHASE-004: Admin Approves Credit Purchase
@@ -805,6 +812,7 @@ tenant creditBalance increases
 TenantCreditLedger entry is written
 PartnerCreditLedger entry is written if tenant has partner
 partner available payout balance increases
+partner credit equals discounted net purchaseAmount * partner creditPercentage / 100
 ```
 
 #### TC-TENANT-CREDIT-PURCHASE-005: Admin Rejects Credit Purchase
@@ -841,4 +849,47 @@ Expected areas:
 ```text
 tenant scoping prevents access
 request is not created
+```
+
+#### TC-TENANT-CREDIT-PURCHASE-008: Every Slab Boundary Uses The Correct Discount
+
+Expected boundaries:
+
+```text
+25 -> 0%
+26 -> configured 26-75 percentage
+75 -> configured 26-75 percentage
+76 -> configured 76-150 percentage
+150 -> configured 76-150 percentage
+151 -> configured 151-250 percentage
+250 -> configured 151-250 percentage
+251 -> configured 251-450 percentage
+450 -> configured 251-450 percentage
+451 -> configured 451-750 percentage
+750 -> configured 451-750 percentage
+751 -> configured 751+ percentage
+2000 -> configured 751+ percentage
+```
+
+#### TC-TENANT-CREDIT-PURCHASE-009: Stale Discount Version Is Rejected
+
+Expected areas:
+
+```text
+submitted discountConfigVersion differs from current tenant version
+HTTP 409 returned
+request is not created
+app must refresh purchase options
+```
+
+#### TC-TENANT-CREDIT-PURCHASE-010: Slab Changes Do Not Change Existing Requests
+
+Expected areas:
+
+```text
+create PENDING request with pricing snapshot
+partner or Admin changes tenant discount percentages
+approve original request
+original request purchaseAmount remains unchanged
+partner credit uses original snapshotted net purchaseAmount
 ```

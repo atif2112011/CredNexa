@@ -290,6 +290,33 @@ The backend snapshots the base price, gross amount, matched slab, percentage, di
 
 Existing pending and historical requests do not change when a partner later edits the tenant's percentages.
 
+## Effect on Partner Earnings and Payout Balance
+
+Changing a tenant's slab percentage affects the amount the tenant pays and therefore affects the partner commission earned from future approved purchases.
+
+When Admin approves a tenant key-purchase request, the backend calculates:
+
+```text
+partnerCredit = discountedNetPurchaseAmount * partnerCreditPercentage / 100
+```
+
+For the example above, with a partner credit percentage of 15%:
+
+```text
+Tenant gross amount = ₹10,000
+Tenant slab discount = ₹1,500
+Tenant net purchase amount = ₹8,500
+Partner credit = ₹8,500 * 15 / 100 = ₹1,275
+```
+
+The partner commission is not calculated from the ₹10,000 gross amount.
+
+The backend adds the ₹1,275 partner credit only after Admin approval. Submitting a tenant purchase request does not immediately change the partner's payout balance.
+
+The Partner App must not calculate or add earnings locally. Continue using the partner payout summary API to display the authoritative available, on-hold, lifetime-earned, and lifetime-paid balances.
+
+Pending and historical purchase requests use their stored net purchase amount even if the partner later changes the tenant's slabs. The legacy direct Admin credit-adjustment route remains outside the slab system.
+
 ## Important Integration Boundary
 
 The Partner App endpoint in this document manages discount percentages. The dealer/tenant key-purchase screen must separately use slab-aware purchase APIs and must not continue estimating the payable amount using only:

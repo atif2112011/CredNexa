@@ -107,4 +107,6 @@ HTTP 402 Payment Required
 - The tenant app can request credit purchases through the credit purchase APIs documented separately.
 - Super admin can still manage direct credit additions/deductions outside the tenant app.
 - Borrower creation request body remains unchanged, so only response/error handling and dashboard display need app changes.
-- When credits are added through admin approval or direct positive adjustment, backend verifies/calculates `purchaseAmount = credits * perKeyPrice`. This value is also used to calculate partner payout credit when the tenant belongs to a partner.
+- For normal paid key purchases, use the tenant credit purchase-request flow. The backend calculates gross amount, applies the matching tenant discount slab, stores net `purchaseAmount`, and calculates partner payout credit from that discounted net amount.
+- The direct positive admin adjustment endpoint is a legacy compatibility path. It continues using `purchaseAmount = credits * perKeyPrice`, does not apply discount slabs, and must not be used for new paid purchase integrations.
+- See `slab_based_key_purchase_tenant.md` for the current Tenant App purchase contract.

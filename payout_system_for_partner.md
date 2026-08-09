@@ -4,7 +4,28 @@ This document is for the Partner App developer.
 
 ## Feature Summary
 
-Partner earns payout credit when tenants under that partner purchase keys.
+Partner earns payout credit when tenants under that partner purchase keys and Admin approves the verified purchase request.
+
+Tenant key purchases now use tenant-specific discount slabs. The backend calculates partner earnings from the discounted net amount actually paid by the tenant:
+
+```text
+grossPurchaseAmount = keysPurchased * basePerKeyPrice
+discountAmount = grossPurchaseAmount * tenantSlabDiscountPercentage / 100
+netPurchaseAmount = grossPurchaseAmount - discountAmount
+partnerCredit = netPurchaseAmount * partnerCreditPercentage / 100
+```
+
+Example:
+
+```text
+100 keys * Rs 100 = Rs 10,000 gross
+Tenant slab discount = 15% = Rs 1,500
+Tenant net purchase amount = Rs 8,500
+Partner credit percentage = 15%
+Partner earning = Rs 1,275
+```
+
+Slab changes affect only future purchase requests. Purchase and partner-credit ledgers retain the original pricing, discount, net amount, and partner percentage snapshots.
 
 Partner can:
 
@@ -309,4 +330,6 @@ Invalid payout status
 - If user changes UPI in modal, submit the new UPI details with payout request.
 - After request success, refresh summary because available and hold balances change.
 - Payout amounts are rupees, not paisa.
-- Do not calculate partner earnings in the app. Backend calculates earnings from approved tenant key purchases.
+- Do not calculate partner earnings in the Partner App. Backend calculates earnings from the approved tenant purchase request's snapshotted discounted net amount.
+- Do not infer earnings from the current tenant slabs; historical purchases retain the slabs used when their requests were created.
+- The legacy direct admin credit-adjustment route does not use discount slabs and is not part of the Partner App purchase flow.
