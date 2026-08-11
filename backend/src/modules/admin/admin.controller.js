@@ -85,6 +85,12 @@ import {
 } from "../../services/riskManagement.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import {
+  getBorrowerAppConfig,
+  getTenantDeviceControlMode,
+  isAutomaticEmiLockEnabled,
+  isValidDeviceControlMode
+} from "../../services/tenantDeviceControl.service.js";
+import {
   DEFAULT_TENANT_ONBOARDING_LIMIT,
   enforcePartnerTenantOnboarding,
   isValidPincode,
@@ -426,6 +432,13 @@ const getTenantDetailData = async (tenantId) => {
   return {
     tenant,
     tenantPolicy,
+    deviceControl: tenantPolicy
+      ? {
+          mode: getTenantDeviceControlMode(tenantPolicy),
+          isAutomaticEmiLockEnabled: isAutomaticEmiLockEnabled(tenantPolicy),
+          borrowerAppFeatures: getBorrowerAppConfig(tenantPolicy)
+        }
+      : null,
     devicePolicies,
     accounts,
     deviceSummary,
@@ -1298,16 +1311,16 @@ export const listTenants = async (req, res) => {
 
 /**
  * Create tenant and copy centralized default policies.
- * Sample body: { "name": "Bharat Finance - Pune", "type": "nbfc", "capabilities": ["lend","distribute"], "channelPartnerId": "...", "supportPhone": "9800000002", "supportEmail": "support@tenant.in" }
+ * Sample body: { "name": "Bharat Finance - Pune", "type": "nbfc", "deviceControlMode": "EMI_AUTOMATED", "channelPartnerId": "...", "supportPhone": "9800000002", "supportEmail": "support@tenant.in" }
  */
 export const createTenant = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
-    const requiredFields = ["name", "type", "channelPartnerId", "supportPhone"];
+    const requiredFields = ["name", "type", "deviceControlMode", "channelPartnerId", "supportPhone"];
 
     if (!hasRequiredFields(req.body, requiredFields)) {
-      return sendError(res, 400, "Name, type, channelPartnerId, and supportPhone are required");
+      return sendError(res, 400, "Name, type, deviceControlMode, channelPartnerId, and supportPhone are required");
     }
 
     if (req.body.tenantPolicy || req.body.devicePolicies) {
@@ -1316,6 +1329,10 @@ export const createTenant = async (req, res) => {
 
     if (!Object.values(TENANT_TYPES).includes(req.body.type)) {
       return sendError(res, 400, "Invalid tenant type");
+    }
+
+    if (!isValidDeviceControlMode(req.body.deviceControlMode)) {
+      return sendError(res, 400, "deviceControlMode must be EMI_AUTOMATED or MANUAL");
     }
 
     if (!isValidObjectId(req.body.channelPartnerId)) {
@@ -1417,6 +1434,7 @@ export const createTenant = async (req, res) => {
         {
           tenantId: createdTenant._id,
           ...DEFAULT_TENANT_POLICY,
+          deviceControlRules: { mode: req.body.deviceControlMode },
           updatedBy: req.auth.id
         }
       ],
@@ -1476,7 +1494,12 @@ export const createTenant = async (req, res) => {
         actorId: req.auth.id,
         tenantId: createdTenant._id,
         channelPartnerId: createdTenant.channelPartnerId,
-        metadata: { name: createdTenant.name, type: createdTenant.type, capabilities }
+        metadata: {
+          name: createdTenant.name,
+          type: createdTenant.type,
+          capabilities,
+          deviceControlMode: req.body.deviceControlMode
+        }
       },
       { session }
     );
@@ -1568,6 +1591,12 @@ export const updateTenant = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) {
       return sendError(res, 400, "Invalid tenant ID");
+    }
+
+    if (req.body.deviceControlMode !== undefined || req.body.deviceControlRules !== undefined) {
+      return sendError(res, 400, "Device control mode cannot be changed after tenant creation", {
+        code: "DEVICE_CONTROL_MODE_IMMUTABLE"
+      });
     }
 
     if (req.body.creditPurchasePerKeyPrice !== undefined) {

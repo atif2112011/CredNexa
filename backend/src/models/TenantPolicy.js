@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+import { DEVICE_CONTROL_MODES } from "../constants/tenant.js";
+
 const tenantPolicySchema = new mongoose.Schema(
   {
     tenantId: {
@@ -11,6 +13,14 @@ const tenantPolicySchema = new mongoose.Schema(
     version: {
       type: Number,
       default: 1
+    },
+    deviceControlRules: {
+      mode: {
+        type: String,
+        enum: Object.values(DEVICE_CONTROL_MODES),
+        default: DEVICE_CONTROL_MODES.EMI_AUTOMATED,
+        immutable: true
+      }
     },
     lockRules: {
       dpd: { type: Number, default: 30 },

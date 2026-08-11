@@ -1,6 +1,10 @@
 import { DEVICE_POLICY_KEYS } from "./deviceStates.js";
+import { DEVICE_CONTROL_MODES } from "./tenant.js";
 
 export const DEFAULT_TENANT_POLICY = Object.freeze({
+  deviceControlRules: {
+    mode: DEVICE_CONTROL_MODES.EMI_AUTOMATED
+  },
   lockRules: {
     dpd: 0,
     gracePeriodDays: 7,

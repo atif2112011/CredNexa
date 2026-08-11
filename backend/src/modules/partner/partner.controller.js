@@ -33,6 +33,7 @@ import {
   PartnerTenantOnboardingError
 } from "../../services/partnerTenantOnboarding.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import { isValidDeviceControlMode } from "../../services/tenantDeviceControl.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
   getOrCreatePayoutConstants,
@@ -1192,7 +1193,7 @@ export const verifyTenantCreationVerification = async (req, res) => {
 
 /**
  * Create a tenant under the authenticated partner.
- * Sample body: { "name": "Bharat Finance - Jaipur", "type": "nbfc", "capabilities": ["lend","distribute"], "supportPhone": "9800000002", "supportEmail": "support@tenant.in" }
+ * Sample body: { "name": "Bharat Finance - Jaipur", "deviceControlMode": "EMI_AUTOMATED", "capabilities": ["lend","distribute"], "supportPhone": "9800000002", "supportEmail": "support@tenant.in" }
  */
 export const createPartnerTenant = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1202,8 +1203,12 @@ export const createPartnerTenant = async (req, res) => {
     const channelPartner = await ensurePartnerAccess(req, res);
     if (!channelPartner) return null;
 
-    if (!hasRequiredFields(req.body, ["name", "capabilities", "supportPhone"])) {
-      return sendError(res, 400, "Name, capabilities, and supportPhone are required");
+    if (!hasRequiredFields(req.body, ["name", "deviceControlMode", "capabilities", "supportPhone"])) {
+      return sendError(res, 400, "Name, deviceControlMode, capabilities, and supportPhone are required");
+    }
+
+    if (!isValidDeviceControlMode(req.body.deviceControlMode)) {
+      return sendError(res, 400, "deviceControlMode must be EMI_AUTOMATED or MANUAL");
     }
 
     const supportPhone = normalizeMobile(req.body.supportPhone);
@@ -1374,6 +1379,7 @@ export const createPartnerTenant = async (req, res) => {
         {
           tenantId: tenant._id,
           ...DEFAULT_TENANT_POLICY,
+          deviceControlRules: { mode: req.body.deviceControlMode },
           updatedBy: req.auth.id
         }
       ],
@@ -1435,7 +1441,12 @@ export const createPartnerTenant = async (req, res) => {
         actorId: req.auth.id,
         tenantId: tenant._id,
         channelPartnerId: channelPartner._id,
-        metadata: { name: tenant.name, type: tenant.type, capabilities: tenant.capabilities }
+        metadata: {
+          name: tenant.name,
+          type: tenant.type,
+          capabilities: tenant.capabilities,
+          deviceControlMode: req.body.deviceControlMode
+        }
       },
       { session }
     );

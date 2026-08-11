@@ -94,7 +94,7 @@ export const parseUnlockRequestImageUpload = createImageUploadParser({
 
 export const parseTenantQrImageUpload = createImageUploadParser({
   fieldName: TENANT_QR_IMAGE_FIELD_NAME,
-  label: "Tenant QR image"
+  label: "Dealer QR image"
 });
 
 export const parseAdminCreditPurchaseQrImageUpload = createImageUploadParser({

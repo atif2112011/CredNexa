@@ -27,6 +27,7 @@ import {
   refreshAllTenantMetrics,
   safeRefreshTenantMetrics
 } from "../services/tenantMetrics.service.js";
+import { isManualDeviceControl } from "../services/tenantDeviceControl.service.js";
 import { NOTIFICATION_AUDIENCES, safeQueueNotification } from "../utils/appNotifications.js";
 import { runAllFcmDeliveryBatches } from "./fcmDeliveryWorker.js";
 
@@ -360,6 +361,7 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
     gracePolicyCommandsQueued: [],
     graceRemindersQueued: [],
     devicesLocked: [],
+    skippedManualTenants: [],
     skippedTempUnlock: [],
     skippedAlreadyLocked: []
   };
@@ -373,6 +375,7 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
     if (!device) continue;
 
     const lockRules = tenantPolicy?.lockRules || {};
+    const manualDeviceControl = isManualDeviceControl(tenantPolicy);
     const dpd = Number(lockRules.dpd ?? 30);
     const gracePeriodDays = Number(lockRules.gracePeriodDays ?? 7);
     const lockOnGraceExpiry = lockRules.lockOnGraceExpiry !== false;
@@ -387,7 +390,7 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
       const daysUntilDue = getDaysUntilDue(installment.dueDate, now);
       const notificationConfig = EMI_CRON_CONFIG.upcomingPaymentNotifications[daysUntilDue];
 
-      if (notificationConfig && !isDeviceReleaseState(device.state)) {
+      if (!manualDeviceControl && notificationConfig && !isDeviceReleaseState(device.state)) {
         const existingReminder = await DeviceCommand.findOne({
           deviceId: device._id,
           commandType: EMI_REMINDER_COMMAND_TYPE,
@@ -442,6 +445,15 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
 
     if (scheduleChanged || schedule.isModified()) {
       await schedule.save();
+    }
+
+    if (manualDeviceControl) {
+      result.skippedManualTenants.push({
+        tenantId: schedule.tenantId,
+        deviceId: device._id,
+        scheduleId: schedule._id
+      });
+      continue;
     }
 
     const isLocked = device.state === DEVICE_STATES.LOCKED;

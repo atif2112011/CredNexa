@@ -72,6 +72,17 @@ export const tenantFields: FieldConfig[] = [
       { label: "POS outlet", value: "pos_outlet" }
     ]
   },
+  {
+    name: "deviceControlMode",
+    label: "Device control mode",
+    type: "select",
+    required: true,
+    options: [
+      { label: "EMI automated", value: "EMI_AUTOMATED" },
+      { label: "Manual", value: "MANUAL" }
+    ],
+    helpText: "This choice is permanent. Manual tenants control device locks directly and borrower EMI/payment features are disabled."
+  },
   { name: "channelPartnerId", label: "Channel partner ID", required: true },
   { name: "supportPhone", label: "Support phone", required: true },
   { name: "supportEmail", label: "Support email", type: "email" },

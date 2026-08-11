@@ -21,6 +21,7 @@ export type FieldConfig = {
   required?: boolean;
   options?: { label: string; value: string; parentValue?: string }[];
   placeholder?: string;
+  helpText?: string;
 };
 
 type FormDialogProps = {
@@ -296,6 +297,7 @@ export function FormDialog({
                 {form.formState.errors[field.name] ? (
                   <p className="text-sm text-destructive">{String(form.formState.errors[field.name]?.message)}</p>
                 ) : null}
+                {field.helpText ? <p className="text-xs text-muted-foreground">{field.helpText}</p> : null}
               </div>
             ))}
           </div>

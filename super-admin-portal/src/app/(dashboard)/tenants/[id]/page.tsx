@@ -46,6 +46,16 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
       />
       <div className="space-y-6">
         <DetailGrid title="Tenant Detail" data={tenant} fields={[{ label: "Name", key: "name" }, { label: "Type", key: "type" }, { label: "Partner", key: "channelPartnerId.name" }, { label: "Active", key: "isActive", type: "boolean" }, { label: "Support email", key: "supportEmail" }, { label: "Support phone", key: "supportPhone" }, { label: "Per key price", key: "creditPurchasePerKeyPrice" }, { label: "POC name", key: "pocName" }, { label: "POC phone", key: "pocPhone" }, { label: "POC designation", key: "pocDesignation" }, { label: "Address", key: "address.street" }, { label: "City", key: "address.city" }, { label: "District", key: "address.district" }, { label: "State", key: "address.state" }, { label: "Pincode", key: "address.pincode" }]} />
+        <DetailGrid
+          title="Device Control"
+          data={data.deviceControl as RecordItem}
+          fields={[
+            { label: "Mode", key: "mode" },
+            { label: "Automatic EMI lock", key: "isAutomaticEmiLockEnabled", type: "boolean" },
+            { label: "Borrower EMI details", key: "borrowerAppFeatures.showEmiDetails", type: "boolean" },
+            { label: "Borrower payments", key: "borrowerAppFeatures.paymentSubmissionEnabled", type: "boolean" }
+          ]}
+        />
         <DiscountSlabsForm
           tenantId={id}
           initialSlabs={discountSlabs}

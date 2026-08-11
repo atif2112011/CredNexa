@@ -35,6 +35,12 @@ const installmentSchema = new mongoose.Schema(
       default: 0
     },
     paidAt: Date,
+    markedPaidBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Account"
+    },
+    markPaidReason: String,
+    markPaidReference: String,
     paymentId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Payment"

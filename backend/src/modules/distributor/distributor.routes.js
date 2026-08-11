@@ -29,6 +29,7 @@ import {
   listQrCodes,
   listTenantUnlockRequests,
   lockTenantDevice,
+  markUserEmiInstallmentPaid,
   regenerateEnrollmentQr,
   registerBorrower,
   rejectPayment,
@@ -70,6 +71,10 @@ distributorRoutes.post("/users/:userId/overdue-emi-reminder", sendOverdueEmiRemi
 distributorRoutes.post("/users/:userId/upcoming-emi-reminder", sendUpcomingEmiReminder);
 distributorRoutes.post("/users/:userId/enrollment/qr", regenerateEnrollmentQr);
 distributorRoutes.get("/users/:id/emi-installments", getUserEmiInstallments);
+distributorRoutes.post(
+  "/users/:userId/emi-installments/:installmentId/mark-paid",
+  markUserEmiInstallmentPaid
+);
 distributorRoutes.get("/users/:id", getDistributorUserById);
 distributorRoutes.get("/devices", getDistributorDevices);
 distributorRoutes.get("/devices/:id", getDistributorDeviceById);

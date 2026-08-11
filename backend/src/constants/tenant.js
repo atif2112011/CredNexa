@@ -9,3 +9,8 @@ export const TENANT_CAPABILITIES = Object.freeze({
   LEND: "lend",
   DISTRIBUTE: "distribute"
 });
+
+export const DEVICE_CONTROL_MODES = Object.freeze({
+  EMI_AUTOMATED: "EMI_AUTOMATED",
+  MANUAL: "MANUAL"
+});

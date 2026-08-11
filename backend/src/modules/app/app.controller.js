@@ -71,6 +71,10 @@ import {
   recordIntegrityAssessment
 } from "../../services/riskManagement.service.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
+import {
+  getBorrowerAppConfig,
+  isManualDeviceControl
+} from "../../services/tenantDeviceControl.service.js";
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
@@ -242,6 +246,26 @@ const isInstallmentUnpaid = (installment) => ["pending", "partial", "overdue"].i
 
 const addDays = (date, days) => new Date(new Date(date).getTime() + Number(days || 0) * DAY_IN_MS);
 
+const getTenantAppConfig = async (tenantId) => {
+  const tenantPolicy = await TenantPolicy.findOne({ tenantId }).lean();
+  return {
+    tenantPolicy,
+    appConfig: getBorrowerAppConfig(tenantPolicy)
+  };
+};
+
+const sendBorrowerFeatureDisabled = (res, feature) => {
+  const paymentFeature = feature === "payment";
+  return sendError(
+    res,
+    403,
+    paymentFeature
+      ? "Borrower payments are not enabled for this tenant"
+      : "Borrower EMI details are not enabled for this tenant",
+    { code: paymentFeature ? "BORROWER_PAYMENT_FEATURE_DISABLED" : "BORROWER_EMI_FEATURE_DISABLED" }
+  );
+};
+
 const getScheduledLockAt = async (device) => {
   const [schedule, tenantPolicy] = await Promise.all([
     EmiSchedule.findOne({ userId: device.userId, tenantId: device.tenantId }).lean(),
@@ -249,7 +273,7 @@ const getScheduledLockAt = async (device) => {
   ]);
 
   const lockRules = tenantPolicy?.lockRules || {};
-  if (lockRules.lockOnGraceExpiry === false) return null;
+  if (isManualDeviceControl(tenantPolicy) || lockRules.lockOnGraceExpiry === false) return null;
 
   const unpaidInstallment = schedule?.installments
     ?.filter((installment) => isInstallmentUnpaid(installment) && installment.dueDate)
@@ -495,9 +519,10 @@ const RISK_INTEGRITY_ACTIONS = new Set([
 const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
 
 const getDeviceSyncState = async (device) => {
-  const [policy, pendingCommands] = await Promise.all([
+  const [policy, pendingCommands, tenantPolicy] = await Promise.all([
     DevicePolicy.findOne({ tenantId: device.tenantId, policyKey: device.currentPolicyKey, isActive: true }).lean(),
-    DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean()
+    DeviceCommand.find({ deviceId: device._id, status: { $in: ["pending", "sent"] } }).sort({ createdAt: 1 }).lean(),
+    TenantPolicy.findOne({ tenantId: device.tenantId }).lean()
   ]);
 
   const latestSecurityCommands = selectLatestActiveSecurityControlCommands(
@@ -522,6 +547,7 @@ const getDeviceSyncState = async (device) => {
 
   return {
     deviceState: device.state,
+    appConfig: getBorrowerAppConfig(tenantPolicy),
     currentPolicyKey: device.currentPolicyKey,
     desiredPolicyVersion: device.desiredPolicyVersion,
     restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
@@ -1764,11 +1790,14 @@ export const registerDevice = async (req, res) => {
       return sendError(res, 400, "User is already linked to a device");
     }
 
-    const activePolicy = await DevicePolicy.findOne({
-      tenantId: user.tenantId,
-      policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
-      isActive: true
-    }).lean();
+    const [activePolicy, tenantPolicy] = await Promise.all([
+      DevicePolicy.findOne({
+        tenantId: user.tenantId,
+        policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
+        isActive: true
+      }).lean(),
+      TenantPolicy.findOne({ tenantId: user.tenantId }).lean()
+    ]);
 
     if (!activePolicy) {
       return sendError(res, 400, "Active EMI_PAID policy not found for tenant");
@@ -1884,6 +1913,7 @@ export const registerDevice = async (req, res) => {
       tenantId: device.tenantId,
       state: device.state,
       currentPolicyKey: device.currentPolicyKey,
+      appConfig: getBorrowerAppConfig(tenantPolicy),
       policy: activePolicy
     });
   } catch (error) {
@@ -1908,11 +1938,14 @@ export const getDevicePolicy = async (req, res) => {
       return sendError(res, 400, "Registered device not found");
     }
 
-    const policy = await DevicePolicy.findOne({
-      tenantId: device.tenantId,
-      policyKey: device.currentPolicyKey,
-      isActive: true
-    }).lean();
+    const [policy, tenantPolicy] = await Promise.all([
+      DevicePolicy.findOne({
+        tenantId: device.tenantId,
+        policyKey: device.currentPolicyKey,
+        isActive: true
+      }).lean(),
+      TenantPolicy.findOne({ tenantId: device.tenantId }).lean()
+    ]);
 
     if (!policy) {
       return sendError(res, 400, "Active device policy not found");
@@ -1920,6 +1953,7 @@ export const getDevicePolicy = async (req, res) => {
 
     return sendSuccess(res, 200, "Device policy fetched successfully", {
       deviceState: device.state,
+      appConfig: getBorrowerAppConfig(tenantPolicy),
       policyKey: policy.policyKey,
       policyVersion: policy.version,
       restrictions: policy.restrictions,
@@ -1942,10 +1976,12 @@ export const getAppDashboard = async (req, res) => {
       return sendError(res, 400, "Active user not found");
     }
 
-    const [schedule, device] = await Promise.all([
+    const [schedule, device, tenantPolicy] = await Promise.all([
       EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean(),
-      Device.findOne({ userId: user._id }).lean()
+      Device.findOne({ userId: user._id }).lean(),
+      TenantPolicy.findOne({ tenantId: user.tenantId }).lean()
     ]);
+    const appConfig = getBorrowerAppConfig(tenantPolicy);
 
     const installments = schedule?.installments || [];
     const currentDueInstallment = getCurrentDueInstallment(installments);
@@ -1957,7 +1993,7 @@ export const getAppDashboard = async (req, res) => {
 
     const response = {
       userDetails: buildUserDetails(user),
-      loanDetails: buildLoanDetails(user, schedule),
+      appConfig,
       device: device
         ? {
             deviceId: device._id,
@@ -1967,12 +2003,15 @@ export const getAppDashboard = async (req, res) => {
             lastSeenAt: device.lastSeenAt
           }
         : null,
-      recentActivity: {
-        paidInstallments: recentPaidInstallments
-      }
+      ...(appConfig.showEmiDetails
+        ? {
+            loanDetails: buildLoanDetails(user, schedule),
+            recentActivity: { paidInstallments: recentPaidInstallments }
+          }
+        : {})
     };
 
-    if (currentDueInstallment) {
+    if (appConfig.showEmiDetails && currentDueInstallment) {
       response.currentEmiDue = buildInstallmentSummary(currentDueInstallment);
     }
 
@@ -1994,7 +2033,10 @@ export const getTenantUtility = async (req, res) => {
       return sendError(res, 400, "Active user not found");
     }
 
-    const tenant = await Tenant.findById(user.tenantId).lean();
+    const [tenant, tenantPolicy] = await Promise.all([
+      Tenant.findById(user.tenantId).lean(),
+      TenantPolicy.findOne({ tenantId: user.tenantId }).lean()
+    ]);
 
     if (!tenant || !tenant.isActive) {
       return sendError(res, 404, "Active tenant not found");
@@ -2002,7 +2044,8 @@ export const getTenantUtility = async (req, res) => {
 
     return sendSuccess(res, 200, "Tenant fetched successfully", {
       tenantId: tenant._id,
-      tenantName: tenant.name
+      tenantName: tenant.name,
+      appConfig: getBorrowerAppConfig(tenantPolicy)
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2019,6 +2062,11 @@ export const getInstallments = async (req, res) => {
 
     if (!user || !user.isActive) {
       return sendError(res, 400, "Active user not found");
+    }
+
+    const { appConfig } = await getTenantAppConfig(user.tenantId);
+    if (!appConfig.showEmiDetails) {
+      return sendBorrowerFeatureDisabled(res, "emi");
     }
 
     const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
@@ -2048,6 +2096,11 @@ export const getInstallmentDetail = async (req, res) => {
 
     if (!user || !user.isActive) {
       return sendError(res, 400, "Active user not found");
+    }
+
+    const { appConfig } = await getTenantAppConfig(user.tenantId);
+    if (!appConfig.showEmiDetails) {
+      return sendBorrowerFeatureDisabled(res, "emi");
     }
 
     const schedule = await EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
@@ -2088,6 +2141,11 @@ export const getPaymentQr = async (req, res) => {
 
     if (!device) {
       return sendError(res, 400, "Registered device not found");
+    }
+
+    const { appConfig } = await getTenantAppConfig(device.tenantId);
+    if (!appConfig.paymentSubmissionEnabled) {
+      return sendBorrowerFeatureDisabled(res, "payment");
     }
 
     const tenant = await Tenant.findById(device.tenantId).lean();
@@ -2136,6 +2194,11 @@ export const submitPayment = async (req, res) => {
     const device = await Device.findOne({ userId: req.auth.id });
     if (!device) {
       return sendError(res, 400, "Registered device not found");
+    }
+
+    const { appConfig } = await getTenantAppConfig(device.tenantId);
+    if (!appConfig.paymentSubmissionEnabled) {
+      return sendBorrowerFeatureDisabled(res, "payment");
     }
 
     const tenant = await Tenant.findById(device.tenantId).lean();
@@ -2221,6 +2284,15 @@ export const submitPayment = async (req, res) => {
  */
 export const getPaymentHistory = async (req, res) => {
   try {
+    const user = await User.findById(req.auth.id).select("tenantId isActive").lean();
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+    const { appConfig } = await getTenantAppConfig(user.tenantId);
+    if (!appConfig.showPaymentHistory) {
+      return sendBorrowerFeatureDisabled(res, "payment");
+    }
+
     const payments = await Payment.find({ userId: req.auth.id }).sort({ createdAt: -1, _id: -1 }).lean();
     return sendSuccess(res, 200, "Payment history fetched successfully", payments);
   } catch (error) {
@@ -2234,6 +2306,15 @@ export const getPaymentHistory = async (req, res) => {
  */
 export const getPaymentDetail = async (req, res) => {
   try {
+    const user = await User.findById(req.auth.id).select("tenantId isActive").lean();
+    if (!user || !user.isActive) {
+      return sendError(res, 400, "Active user not found");
+    }
+    const { appConfig } = await getTenantAppConfig(user.tenantId);
+    if (!appConfig.showPaymentHistory) {
+      return sendBorrowerFeatureDisabled(res, "payment");
+    }
+
     const payment = await Payment.findOne({ _id: req.params.paymentId, userId: req.auth.id }).lean();
 
     if (!payment) {
