@@ -9,6 +9,7 @@ import {
   acknowledgeRiskFlag,
   adjustTenantCredits,
   approvePartnerPayoutRequest,
+  approveTenantCreditDiscountChangeRequest,
   approveTenantCreditPurchaseRequest,
   archiveAppBuild,
   backfillManualOverrideTokensForDevices,
@@ -42,6 +43,7 @@ import {
   getPartnerPayoutRequestById,
   getPayoutConstants,
   getTenantCreditPurchaseRequestById,
+  getTenantCreditDiscountChangeRequestById,
   listDeviceCommands,
   listManualOverrideTokens,
   listNotificationTargets,
@@ -54,9 +56,11 @@ import {
   listDevices,
   listPartnerPayoutRequests,
   listTenantCreditPurchaseRequests,
+  listTenantCreditDiscountChangeRequests,
   listTenants,
   publishConsentVersion,
   rejectPartnerPayoutRequest,
+  rejectTenantCreditDiscountChangeRequest,
   rejectTenantCreditPurchaseRequest,
   rejectAdminEscalation,
   renewExpiringManualOverrideTokensForDevices,
@@ -130,6 +134,10 @@ adminRoutes.get("/tenant-credit-purchases", listTenantCreditPurchaseRequests);
 adminRoutes.get("/tenant-credit-purchases/:requestId", getTenantCreditPurchaseRequestById);
 adminRoutes.post("/tenant-credit-purchases/:requestId/approve", approveTenantCreditPurchaseRequest);
 adminRoutes.post("/tenant-credit-purchases/:requestId/reject", rejectTenantCreditPurchaseRequest);
+adminRoutes.get("/tenant-credit-discount-changes", listTenantCreditDiscountChangeRequests);
+adminRoutes.get("/tenant-credit-discount-changes/:requestId", getTenantCreditDiscountChangeRequestById);
+adminRoutes.post("/tenant-credit-discount-changes/:requestId/approve", approveTenantCreditDiscountChangeRequest);
+adminRoutes.post("/tenant-credit-discount-changes/:requestId/reject", rejectTenantCreditDiscountChangeRequest);
 
 adminRoutes.get("/tenants", listTenants);
 adminRoutes.post("/tenants", createTenant);

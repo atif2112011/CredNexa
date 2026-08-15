@@ -5,6 +5,7 @@ import { env } from "../config/env.js";
 const ADMIN_EMAIL = "atif251171@gmail.com";
 const APPROVAL_MAIL_SUBJECT = "New key purchase request requires approval";
 const PAYOUT_MAIL_SUBJECT = "New partner payout request requires approval";
+const DISCOUNT_CHANGE_MAIL_SUBJECT = "New tenant key discount change requires approval";
 const TEST_MAIL_SUBJECT = "EMI Shield email configuration test";
 
 let transporter;
@@ -110,6 +111,25 @@ const buildPayoutMailBody = ({ payoutRequest, channelPartner }) =>
     ]
   });
 
+const formatSlabs = (slabs) =>
+  (slabs || [])
+    .map((slab) => `${slab.minKeys}-${slab.maxKeys ?? "unlimited"}: ${slab.discountPercentage}%`)
+    .join(", ");
+
+const buildDiscountChangeMailBody = ({ discountChangeRequest, tenant, channelPartner }) =>
+  buildEmailLayout({
+    heading: "New tenant key discount change request",
+    rows: [
+      ["Partner", channelPartner?.name || "Not available"],
+      ["Tenant", tenant?.name || "Not available"],
+      ["Request ID", discountChangeRequest?._id?.toString() || "Not available"],
+      ["Configuration version", discountChangeRequest?.baseConfigVersion ?? "Not available"],
+      ["Current discounts", formatSlabs(discountChangeRequest?.currentSlabs)],
+      ["Requested discounts", formatSlabs(discountChangeRequest?.requestedSlabs)],
+      ["Requested at", formatDate(discountChangeRequest?.requestedAt || discountChangeRequest?.createdAt)]
+    ]
+  });
+
 export const SendMail = async ({ to, body, subject }) => {
   if (!to || !subject || !body) {
     throw new Error("Mail recipient, subject, and body are required");
@@ -135,6 +155,13 @@ export const sendPayoutMail = ({ payoutRequest, channelPartner }) =>
     to: ADMIN_EMAIL,
     subject: PAYOUT_MAIL_SUBJECT,
     body: buildPayoutMailBody({ payoutRequest, channelPartner })
+  });
+
+export const sendDiscountChangeApprovalMail = ({ discountChangeRequest, tenant, channelPartner }) =>
+  SendMail({
+    to: ADMIN_EMAIL,
+    subject: DISCOUNT_CHANGE_MAIL_SUBJECT,
+    body: buildDiscountChangeMailBody({ discountChangeRequest, tenant, channelPartner })
   });
 
 export const sendTestMail = () =>

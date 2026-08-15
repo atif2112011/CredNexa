@@ -33,6 +33,10 @@ import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/Part
 import { PayoutConstants } from "../../models/PayoutConstants.js";
 import { INACTIVE_RISK_FLAG_STATUSES, RISK_FLAG_STATUSES, RiskFlag } from "../../models/RiskFlag.js";
 import { Tenant } from "../../models/Tenant.js";
+import {
+  TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES,
+  TenantCreditDiscountChangeRequest
+} from "../../models/TenantCreditDiscountChangeRequest.js";
 import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
@@ -2031,6 +2035,256 @@ export const listTenantCreditLedger = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/** List partner-submitted tenant discount change requests. */
+export const listTenantCreditDiscountChangeRequests = async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query);
+    const filter = {};
+
+    if (req.query.status) {
+      if (!Object.values(TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES).includes(req.query.status)) {
+        return sendError(res, 400, "Invalid discount change request status");
+      }
+      filter.status = req.query.status;
+    }
+
+    if (req.query.tenantId) {
+      if (!isValidObjectId(req.query.tenantId)) return sendError(res, 400, "Invalid tenant ID");
+      filter.tenantId = req.query.tenantId;
+    }
+
+    if (req.query.channelPartnerId) {
+      if (!isValidObjectId(req.query.channelPartnerId)) {
+        return sendError(res, 400, "Invalid channel partner ID");
+      }
+      filter.channelPartnerId = req.query.channelPartnerId;
+    }
+
+    if (req.query.search) {
+      const search = new RegExp(escapeRegex(req.query.search), "i");
+      const [tenants, partners] = await Promise.all([
+        Tenant.find({ name: search }).select("_id").lean(),
+        ChannelPartner.find({ name: search }).select("_id").lean()
+      ]);
+      filter.$or = [
+        { tenantId: { $in: tenants.map((item) => item._id) } },
+        { channelPartnerId: { $in: partners.map((item) => item._id) } }
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      TenantCreditDiscountChangeRequest.find(filter)
+        .populate("tenantId", "name type creditPurchaseDiscountVersion creditPurchaseDiscountSlabs")
+        .populate("channelPartnerId", "name type")
+        .populate("requestedBy", "name email mobile role")
+        .populate("approvedBy", "name email mobile role")
+        .populate("rejectedBy", "name email mobile role")
+        .sort({ requestedAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      TenantCreditDiscountChangeRequest.countDocuments(filter)
+    ]);
+
+    return sendSuccess(res, 200, "Discount change requests fetched successfully", {
+      items,
+      pagination: buildPagination(page, limit, total)
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/** Fetch one partner-submitted tenant discount change request. */
+export const getTenantCreditDiscountChangeRequestById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid discount change request ID");
+    }
+
+    const discountChangeRequest = await TenantCreditDiscountChangeRequest.findById(req.params.requestId)
+      .populate("tenantId", "name type creditPurchaseDiscountVersion creditPurchaseDiscountSlabs")
+      .populate("channelPartnerId", "name type")
+      .populate("requestedBy", "name email mobile role")
+      .populate("approvedBy", "name email mobile role")
+      .populate("rejectedBy", "name email mobile role")
+      .lean();
+
+    if (!discountChangeRequest) {
+      return sendError(res, 404, "Discount change request not found");
+    }
+
+    return sendSuccess(res, 200, "Discount change request fetched successfully", {
+      discountChangeRequest
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/** Approve a pending discount change request and atomically apply its slabs. */
+export const approveTenantCreditDiscountChangeRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid discount change request ID");
+    }
+
+    session.startTransaction();
+    const discountChangeRequest = await TenantCreditDiscountChangeRequest.findOne({
+      _id: req.params.requestId,
+      status: TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.PENDING
+    }).session(session);
+
+    if (!discountChangeRequest) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Pending discount change request not found");
+    }
+
+    const appliedAt = new Date();
+    const tenant = await Tenant.findOneAndUpdate(
+      {
+        _id: discountChangeRequest.tenantId,
+        creditPurchaseDiscountVersion: discountChangeRequest.baseConfigVersion
+      },
+      {
+        $set: {
+          creditPurchaseDiscountSlabs: discountChangeRequest.requestedSlabs,
+          creditPurchaseDiscountUpdatedAt: appliedAt,
+          creditPurchaseDiscountUpdatedBy: req.auth.id
+        },
+        $inc: { creditPurchaseDiscountVersion: 1 }
+      },
+      { new: true, runValidators: true, session }
+    );
+
+    if (!tenant) {
+      const tenantExists = await Tenant.exists({ _id: discountChangeRequest.tenantId }).session(session);
+      await session.abortTransaction();
+      return sendError(
+        res,
+        tenantExists ? 409 : 404,
+        tenantExists
+          ? "Discount configuration changed after this request was submitted"
+          : "Tenant not found"
+      );
+    }
+
+    discountChangeRequest.status = TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.APPROVED;
+    discountChangeRequest.approvedBy = req.auth.id;
+    discountChangeRequest.approvedAt = appliedAt;
+    discountChangeRequest.appliedConfigVersion = tenant.creditPurchaseDiscountVersion;
+    discountChangeRequest.metadata = {
+      ...(discountChangeRequest.metadata || {}),
+      approvalNote: String(req.body.note || "").trim() || undefined
+    };
+    await discountChangeRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNT_CHANGE_APPROVED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: discountChangeRequest.channelPartnerId,
+        metadata: {
+          discountChangeRequestId: discountChangeRequest._id,
+          baseConfigVersion: discountChangeRequest.baseConfigVersion,
+          appliedConfigVersion: tenant.creditPurchaseDiscountVersion,
+          slabs: discountChangeRequest.requestedSlabs
+        }
+      },
+      { session }
+    );
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNTS_UPDATED,
+        actorId: req.auth.id,
+        tenantId: tenant._id,
+        channelPartnerId: discountChangeRequest.channelPartnerId,
+        metadata: {
+          source: "approved_partner_request",
+          discountChangeRequestId: discountChangeRequest._id,
+          creditPurchaseDiscountVersion: tenant.creditPurchaseDiscountVersion,
+          slabs: discountChangeRequest.requestedSlabs
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Discount change request approved successfully", {
+      discountChangeRequest,
+      tenant: {
+        tenantId: tenant._id,
+        discountConfigVersion: tenant.creditPurchaseDiscountVersion,
+        slabs: tenant.creditPurchaseDiscountSlabs
+      }
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
+  }
+};
+
+/** Reject a pending discount change request without changing the tenant. */
+export const rejectTenantCreditDiscountChangeRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    if (!isValidObjectId(req.params.requestId)) {
+      return sendError(res, 400, "Invalid discount change request ID");
+    }
+
+    const reason = String(req.body.reason || "").trim();
+    if (!reason) return sendError(res, 400, "Rejection reason is required");
+
+    session.startTransaction();
+    const discountChangeRequest = await TenantCreditDiscountChangeRequest.findOne({
+      _id: req.params.requestId,
+      status: TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.PENDING
+    }).session(session);
+
+    if (!discountChangeRequest) {
+      await session.abortTransaction();
+      return sendError(res, 404, "Pending discount change request not found");
+    }
+
+    discountChangeRequest.status = TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.REJECTED;
+    discountChangeRequest.rejectedBy = req.auth.id;
+    discountChangeRequest.rejectedAt = new Date();
+    discountChangeRequest.rejectionReason = reason;
+    await discountChangeRequest.save({ session });
+
+    await createAuditLog(
+      {
+        eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNT_CHANGE_REJECTED,
+        actorId: req.auth.id,
+        tenantId: discountChangeRequest.tenantId,
+        channelPartnerId: discountChangeRequest.channelPartnerId,
+        reason,
+        metadata: { discountChangeRequestId: discountChangeRequest._id }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return sendSuccess(res, 200, "Discount change request rejected successfully", {
+      discountChangeRequest
+    });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, 500, error.message || "Internal server error");
+  } finally {
+    session.endSession();
   }
 };
 

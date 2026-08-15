@@ -21,10 +21,14 @@ import {
 } from "../../models/PartnerCreditLedger.js";
 import { PARTNER_PAYOUT_STATUSES, PartnerPayoutRequest } from "../../models/PartnerPayoutRequest.js";
 import { Tenant } from "../../models/Tenant.js";
+import {
+  TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES,
+  TenantCreditDiscountChangeRequest
+} from "../../models/TenantCreditDiscountChangeRequest.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import { User } from "../../models/User.js";
-import { sendPayoutMail } from "../../services/mail.service.js";
+import { sendDiscountChangeApprovalMail, sendPayoutMail } from "../../services/mail.service.js";
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
 import {
   DEFAULT_TENANT_ONBOARDING_LIMIT,
@@ -909,7 +913,7 @@ export const getPartnerTenantById = async (req, res) => {
   }
 };
 
-/** Replace discount percentages for a tenant owned by the authenticated partner. */
+/** Submit tenant discount percentage changes for super-admin approval. */
 export const updatePartnerTenantCreditPurchaseDiscounts = async (req, res) => {
   try {
     const channelPartner = await ensurePartnerAccess(req, res);
@@ -932,55 +936,75 @@ export const updatePartnerTenantCreditPurchaseDiscounts = async (req, res) => {
       return sendError(res, 400, "discountConfigVersion must be a positive integer");
     }
 
-    const filter = {
-      _id: req.params.tenantId,
-      channelPartnerId: channelPartner._id
-    };
-    if (expectedVersion !== null) filter.creditPurchaseDiscountVersion = expectedVersion;
-
-    const tenant = await Tenant.findOneAndUpdate(
-      filter,
-      {
-        $set: {
-          creditPurchaseDiscountSlabs: slabs,
-          creditPurchaseDiscountUpdatedAt: new Date(),
-          creditPurchaseDiscountUpdatedBy: req.auth.id
-        },
-        $inc: { creditPurchaseDiscountVersion: 1 }
-      },
-      { new: true, runValidators: true }
-    );
-
+    const tenant = await validateTenantBelongsToPartner(req.params.tenantId, channelPartner._id);
     if (!tenant) {
-      const ownedTenant = await Tenant.exists({
-        _id: req.params.tenantId,
-        channelPartnerId: channelPartner._id
-      });
-      return sendError(
-        res,
-        ownedTenant ? 409 : 404,
-        ownedTenant ? "Discount configuration changed. Refresh before saving" : "Tenant not found"
-      );
+      return sendError(res, 404, "Tenant not found");
     }
 
+    const existingPendingRequest = await TenantCreditDiscountChangeRequest.findOne({
+      tenantId: tenant._id,
+      status: TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.PENDING
+    }).lean();
+    if (existingPendingRequest) {
+      return sendError(res, 409, "A discount change request is already pending approval", {
+        requestId: existingPendingRequest._id
+      });
+    }
+
+    const currentVersion = Number(tenant.creditPurchaseDiscountVersion || 1);
+    if (expectedVersion !== null && expectedVersion !== currentVersion) {
+      return sendError(res, 409, "Discount configuration changed. Refresh before submitting the request");
+    }
+
+    const discountChangeRequest = await TenantCreditDiscountChangeRequest.create({
+      tenantId: tenant._id,
+      channelPartnerId: channelPartner._id,
+      baseConfigVersion: currentVersion,
+      currentSlabs: normalizeTenantCreditDiscountSlabs(tenant.creditPurchaseDiscountSlabs),
+      requestedSlabs: slabs,
+      requestedBy: req.auth.id
+    });
+
     await createAuditLog({
-      eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNTS_UPDATED,
+      eventType: AUDIT_EVENTS.TENANT_CREDIT_DISCOUNT_CHANGE_REQUESTED,
       actorId: req.auth.id,
       tenantId: tenant._id,
       channelPartnerId: channelPartner._id,
       metadata: {
-        source: "partner_app",
-        creditPurchaseDiscountVersion: tenant.creditPurchaseDiscountVersion,
-        slabs
+        discountChangeRequestId: discountChangeRequest._id,
+        baseConfigVersion: currentVersion,
+        requestedSlabs: slabs
       }
     });
 
-    return sendSuccess(res, 200, "Tenant credit purchase discounts updated successfully", {
-      tenantId: tenant._id,
-      discountConfigVersion: tenant.creditPurchaseDiscountVersion,
-      slabs: tenant.creditPurchaseDiscountSlabs
+    try {
+      await sendDiscountChangeApprovalMail({ discountChangeRequest, tenant, channelPartner });
+    } catch (mailError) {
+      console.error("Failed to send tenant discount change request email", {
+        discountChangeRequestId: discountChangeRequest._id.toString(),
+        tenantId: tenant._id.toString(),
+        errorCode: mailError.code || "MAIL_SEND_FAILED",
+        smtpCommand: mailError.command || null,
+        responseCode: mailError.responseCode || null
+      });
+    }
+
+    return sendSuccess(res, 201, "Discount change request created successfully", {
+      discountChangeRequest
     });
   } catch (error) {
+    if (error?.code === 11000) {
+      const pendingRequest = await TenantCreditDiscountChangeRequest.findOne({
+        tenantId: req.params.tenantId,
+        status: TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.PENDING
+      }).select("_id").lean();
+      return sendError(
+        res,
+        409,
+        "A discount change request is already pending approval",
+        pendingRequest ? { requestId: pendingRequest._id } : null
+      );
+    }
     return sendError(res, 500, error.message || "Internal server error");
   }
 };

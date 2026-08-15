@@ -6,6 +6,8 @@ This document is for the Partner App developer.
 
 Every dealer/tenant has its own key-purchase discount configuration. The discount applied to a key purchase depends on the number of keys in that individual purchase.
 
+Partner edits require Admin approval. Submitting the form creates a pending change request; it does not immediately modify the tenant's live discount configuration. Only Admin approval applies the requested slabs and increments the configuration version.
+
 The initial configuration is:
 
 | Key quantity | Default discount | Editable |
@@ -113,7 +115,7 @@ The authenticated partner can fetch only a tenant belonging to that partner.
 
 Use `creditPurchaseDiscountSlabs` to render the rows. Keep `creditPurchaseDiscountVersion` in the page state because it is required for safe updates.
 
-## Update Dealer/Tenant Discount Slabs
+## Request Dealer/Tenant Discount Slab Changes
 
 ```http
 PUT /api/partner/tenants/:tenantId/credit-purchase-discounts
@@ -121,7 +123,7 @@ Authorization: Bearer <partnerAdminAccessToken>
 Content-Type: application/json
 ```
 
-The Partner App must send the complete slab array, including the locked first slab. Do not send only the changed row.
+The Partner App must send the complete slab array, including the locked first slab. Do not send only the changed row. This endpoint creates an approval request rather than updating the tenant directly.
 
 ### Sample Request
 
@@ -142,32 +144,50 @@ The Partner App must send the complete slab array, including the locked first sl
 
 ### Sample Success Response
 
+Status: `201 Created`
+
 ```json
 {
   "success": true,
-  "message": "Tenant credit purchase discounts updated successfully",
+  "message": "Discount change request created successfully",
   "data": {
-    "tenantId": "tenantId",
-    "discountConfigVersion": 2,
-    "slabs": [
-      { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
-      { "minKeys": 26, "maxKeys": 75, "discountPercentage": 12 },
-      { "minKeys": 76, "maxKeys": 150, "discountPercentage": 17.5 },
-      { "minKeys": 151, "maxKeys": 250, "discountPercentage": 20 },
-      { "minKeys": 251, "maxKeys": 450, "discountPercentage": 25 },
-      { "minKeys": 451, "maxKeys": 750, "discountPercentage": 30 },
-      { "minKeys": 751, "maxKeys": null, "discountPercentage": 35 }
-    ]
+    "discountChangeRequest": {
+      "_id": "requestId",
+      "tenantId": "tenantId",
+      "channelPartnerId": "channelPartnerId",
+      "baseConfigVersion": 1,
+      "currentSlabs": [
+        { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
+        { "minKeys": 26, "maxKeys": 75, "discountPercentage": 10 },
+        { "minKeys": 76, "maxKeys": 150, "discountPercentage": 15 },
+        { "minKeys": 151, "maxKeys": 250, "discountPercentage": 20 },
+        { "minKeys": 251, "maxKeys": 450, "discountPercentage": 25 },
+        { "minKeys": 451, "maxKeys": 750, "discountPercentage": 30 },
+        { "minKeys": 751, "maxKeys": null, "discountPercentage": 35 }
+      ],
+      "requestedSlabs": [
+        { "minKeys": 0, "maxKeys": 25, "discountPercentage": 0 },
+        { "minKeys": 26, "maxKeys": 75, "discountPercentage": 12 },
+        { "minKeys": 76, "maxKeys": 150, "discountPercentage": 17.5 },
+        { "minKeys": 151, "maxKeys": 250, "discountPercentage": 20 },
+        { "minKeys": 251, "maxKeys": 450, "discountPercentage": 25 },
+        { "minKeys": 451, "maxKeys": 750, "discountPercentage": 30 },
+        { "minKeys": 751, "maxKeys": null, "discountPercentage": 35 }
+      ],
+      "status": "PENDING",
+      "requestedAt": "2026-08-15T10:30:00.000Z"
+    }
   }
 }
 ```
 
 After success:
 
-- Replace the displayed current values with `data.slabs`.
-- Replace the locally stored version with `data.discountConfigVersion`.
+- Keep displaying the existing live slab values and version.
+- Show that the requested changes are pending Admin approval.
+- Prevent another submission for this tenant while the request is pending.
 - Clear any field errors.
-- Show a success message such as `Discount slabs updated successfully`.
+- Show a success message such as `Discount change request submitted for approval`.
 
 ## Validation Rules
 
@@ -238,7 +258,7 @@ Status: `409 Conflict`
 ```json
 {
   "success": false,
-  "error": "Discount configuration changed. Refresh before saving"
+  "error": "Discount configuration changed. Refresh before submitting the request"
 }
 ```
 
@@ -248,6 +268,22 @@ When this happens:
 2. Fetch the dealer details again.
 3. Show the latest current values.
 4. Inform the user that the configuration was updated elsewhere.
+
+### Another Request Is Pending
+
+Status: `409 Conflict`
+
+```json
+{
+  "success": false,
+  "error": "A discount change request is already pending approval",
+  "data": {
+    "requestId": "pendingRequestId"
+  }
+}
+```
+
+Do not resubmit. Show that the previous request is awaiting Admin review.
 
 ### Tenant Not Found or Not Owned by Partner
 

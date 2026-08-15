@@ -8,6 +8,10 @@ import {
 } from "../src/utils/tenantCreditDiscount.js";
 import { PayoutConstants } from "../src/models/PayoutConstants.js";
 import { Tenant } from "../src/models/Tenant.js";
+import {
+  TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES,
+  TenantCreditDiscountChangeRequest
+} from "../src/models/TenantCreditDiscountChangeRequest.js";
 import { DEFAULT_MAX_TENANT_CREDIT_PURCHASE } from "../src/utils/payout.js";
 
 test("default discount slab boundaries select the expected percentage", () => {
@@ -69,4 +73,33 @@ test("new tenants receive slabs and the default maximum purchase is 2000", () =>
   assert.equal(tenant.creditPurchaseDiscountVersion, 1);
   assert.equal(DEFAULT_MAX_TENANT_CREDIT_PURCHASE, 2000);
   assert.equal(payoutConstants.maxTenantCreditPurchase, 2000);
+});
+
+test("discount change requests preserve current and requested slab snapshots", () => {
+  const currentSlabs = cloneDefaultTenantCreditDiscountSlabs();
+  const requestedSlabs = cloneDefaultTenantCreditDiscountSlabs();
+  requestedSlabs[1].discountPercentage = 12;
+
+  const request = new TenantCreditDiscountChangeRequest({
+    tenantId: "64b000000000000000000001",
+    channelPartnerId: "64b000000000000000000002",
+    baseConfigVersion: 3,
+    currentSlabs,
+    requestedSlabs,
+    requestedBy: "64b000000000000000000003"
+  });
+
+  assert.equal(request.status, TENANT_CREDIT_DISCOUNT_CHANGE_STATUSES.PENDING);
+  assert.equal(request.baseConfigVersion, 3);
+  assert.equal(request.currentSlabs[1].discountPercentage, 10);
+  assert.equal(request.requestedSlabs[1].discountPercentage, 12);
+});
+
+test("discount change requests enforce one pending request per tenant at the index level", () => {
+  const pendingIndex = TenantCreditDiscountChangeRequest.schema.indexes().find(
+    ([fields, options]) => fields.tenantId === 1 && options?.partialFilterExpression?.status === "PENDING"
+  );
+
+  assert.ok(pendingIndex);
+  assert.equal(pendingIndex[1].unique, true);
 });

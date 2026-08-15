@@ -22,6 +22,8 @@ const restrictionOptions = [
 type RestrictionKey = (typeof restrictionOptions)[number]["key"];
 type RestrictionValues = Record<RestrictionKey, boolean>;
 
+const disabledRestrictionKeys = new Set<RestrictionKey>(["camera", "playStore"]);
+
 type RestrictionState = {
   desired: RestrictionValues;
   applied: RestrictionValues;
@@ -90,7 +92,12 @@ export function DeviceRestrictionsPanel({
   const [updatingKey, setUpdatingKey] = useState<RestrictionKey | null>(null);
   const hasPendingApplication = restrictionState.desiredVersion > restrictionState.appliedVersion;
   const latestStatus = String(latestCommand?.status || (hasPendingApplication ? "pending" : "acknowledged"));
-  const canRetry = hasPendingApplication && ["failed", "expired"].includes(latestStatus.toLowerCase());
+  const retryableMismatch = restrictionOptions.find(
+    ({ key }) =>
+      !disabledRestrictionKeys.has(key) &&
+      restrictionState.desired[key] !== restrictionState.applied[key]
+  );
+  const canRetry = Boolean(retryableMismatch) && ["failed", "expired"].includes(latestStatus.toLowerCase());
 
   useEffect(() => {
     setRestrictionState(incomingState);
@@ -128,11 +135,12 @@ export function DeviceRestrictionsPanel({
   }
 
   function retryLatest() {
-    const mismatch = restrictionOptions.find(
-      ({ key }) => restrictionState.desired[key] !== restrictionState.applied[key]
+    if (!retryableMismatch) return;
+    updateRestriction(
+      retryableMismatch.key,
+      restrictionState.desired[retryableMismatch.key],
+      true
     );
-    if (!mismatch) return;
-    updateRestriction(mismatch.key, restrictionState.desired[mismatch.key], true);
   }
 
   return (
@@ -171,16 +179,25 @@ export function DeviceRestrictionsPanel({
             const appliedLocked = restrictionState.applied[key];
             const isUpdating = updatingKey === key;
             const isWaiting = desiredLocked !== appliedLocked;
+            const isDisabled = disabledRestrictionKeys.has(key);
 
             return (
-              <div key={key} className="flex items-center justify-between gap-4 rounded-xl border bg-muted/20 p-4">
+              <div
+                key={key}
+                aria-disabled={isDisabled}
+                className={cn(
+                  "flex items-center justify-between gap-4 rounded-xl border bg-muted/20 p-4",
+                  isDisabled && "cursor-not-allowed bg-muted/50 text-muted-foreground opacity-60 grayscale"
+                )}
+              >
                 <div className="flex min-w-0 items-start gap-3">
-                  <div className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", desiredLocked ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary")}>
+                  <div className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", isDisabled ? "bg-muted text-muted-foreground" : desiredLocked ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary")}>
                     <Icon className="size-4" aria-hidden="true" />
                   </div>
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-semibold">{label}</p>
+                      {isDisabled ? <span className="text-xs font-medium text-muted-foreground">Unavailable</span> : null}
                       {isWaiting ? <span className="text-xs font-medium text-amber-700">Awaiting device</span> : null}
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">{description}</p>
@@ -194,7 +211,7 @@ export function DeviceRestrictionsPanel({
                   role="switch"
                   aria-checked={desiredLocked}
                   aria-label={`${desiredLocked ? "Allow" : "Lock"} ${label}`}
-                  disabled={Boolean(updatingKey)}
+                  disabled={isDisabled || Boolean(updatingKey)}
                   onClick={() => updateRestriction(key, !desiredLocked)}
                   className={cn(
                     "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
