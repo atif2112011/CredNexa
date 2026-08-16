@@ -1,5 +1,6 @@
 import { isDeviceReleaseState } from "../constants/deviceStates.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
+import { safeQueueUpcomingEmiNotification } from "../utils/appNotifications.js";
 
 export const EMI_REMINDER_COMMAND_TYPE = "EMI_REMINDER";
 
@@ -80,6 +81,30 @@ export const queueEmiReminder = async ({
   }
 
   const normalizedPayload = buildEmiReminderPayload(payload);
+  const queueVisibleUpcomingNotification = (command) => {
+    if (normalizedPayload.reminderType !== EMI_REMINDER_TYPES.UPCOMING) return null;
+
+    return safeQueueUpcomingEmiNotification({
+      deviceId: device._id,
+      tenantId: tenantId || device.tenantId,
+      userId: device.userId,
+      sourceCommandId: command._id,
+      text: normalizedPayload.message,
+      data: {
+        ...(normalizedPayload.amount === undefined ? {} : { amount: normalizedPayload.amount }),
+        ...(normalizedPayload.dueDate ? { dueDate: normalizedPayload.dueDate } : {}),
+        ...(normalizedPayload.installmentNumber === undefined
+          ? {}
+          : { installmentNumber: normalizedPayload.installmentNumber }),
+        ...(normalizedPayload.totalInstallments === undefined
+          ? {}
+          : { totalInstallments: normalizedPayload.totalInstallments })
+      },
+      triggeredBy,
+      triggeredByAccountId
+    });
+  };
+
   if (deduplicateActive) {
     const existingCommand = await DeviceCommand.findOne({
       deviceId: device._id,
@@ -93,7 +118,10 @@ export const queueEmiReminder = async ({
       .sort({ createdAt: -1 })
       .lean();
 
-    if (existingCommand) return { command: existingCommand, created: false };
+    if (existingCommand) {
+      const notificationResult = await queueVisibleUpcomingNotification(existingCommand);
+      return { command: existingCommand, created: false, notificationResult };
+    }
   }
 
   const command = await DeviceCommand.create({
@@ -105,5 +133,6 @@ export const queueEmiReminder = async ({
     payload: normalizedPayload
   });
 
-  return { command, created: true };
+  const notificationResult = await queueVisibleUpcomingNotification(command);
+  return { command, created: true, notificationResult };
 };

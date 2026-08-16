@@ -82,6 +82,8 @@ export const buildPolicyUpdateMessage = ({ device, command }) => {
   ]);
 
   if (command.commandType === "EMI_REMINDER") {
+    // Kept for command compatibility. The borrower app was not handling this
+    // data-only EMI reminder push as a visible notification.
     return {
       token: device.fcmToken,
       data: {

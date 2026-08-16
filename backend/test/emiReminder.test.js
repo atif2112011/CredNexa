@@ -8,6 +8,7 @@ import {
   normalizeUpcomingReminderWindowDays
 } from "../src/services/emiReminder.service.js";
 import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
+import { UPCOMING_EMI_NOTIFICATION } from "../src/utils/appNotifications.js";
 
 test("builds the exact borrower EMI reminder payload", () => {
   assert.deepEqual(
@@ -63,6 +64,31 @@ test("builds EMI reminder FCM as a data-only wake-up", () => {
   });
   assert.equal(message.notification, undefined);
   assert.equal(message.android.priority, "high");
+});
+
+test("delivers an upcoming EMI reminder through the normal notification format", () => {
+  const message = buildPolicyUpdateMessage({
+    device: { fcmToken: "fcm-token" },
+    command: {
+      _id: { toString: () => "notification-command-id" },
+      commandType: "NOTIFICATION",
+      payload: {
+        title: UPCOMING_EMI_NOTIFICATION.title,
+        text: "Your EMI payment is due soon.",
+        notificationType: UPCOMING_EMI_NOTIFICATION.notificationType,
+        data: { sourceCommandId: "emi-reminder-command-id" }
+      }
+    }
+  });
+
+  assert.deepEqual(message.notification, {
+    title: "EMI payment due soon",
+    body: "Your EMI payment is due soon."
+  });
+  assert.equal(message.data.type, "NOTIFICATION");
+  assert.equal(message.data.notificationType, "UPCOMING_EMI_REMINDER");
+  assert.equal(message.data.sourceCommandId, "emi-reminder-command-id");
+  assert.equal(message.android.notification.channelId, "custom_notifications");
 });
 
 test("selects the earliest unpaid upcoming EMI inside the reminder window", () => {

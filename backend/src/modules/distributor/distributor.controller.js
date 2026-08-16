@@ -60,7 +60,11 @@ import {
 } from "../../services/emiReminder.service.js";
 import { markEmiInstallmentPaid } from "../../services/emiInstallment.service.js";
 import { sendApprovalMail } from "../../services/mail.service.js";
-import { NOTIFICATION_AUDIENCES, queueNotification, safeQueueNotification } from "../../utils/appNotifications.js";
+import {
+  NOTIFICATION_AUDIENCES,
+  queueNotification,
+  safeQueueNotification
+} from "../../utils/appNotifications.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import { safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
@@ -1390,7 +1394,7 @@ const queueUpcomingEmiReminderForUser = async ({
 
   const outstandingAmount = getInstallmentOutstanding(upcomingInstallment);
   const reminderText = String(note || "").trim() || "Your EMI payment is due soon.";
-  const { command, created } = await queueEmiReminder({
+  const { command, created, notificationResult } = await queueEmiReminder({
     device,
     tenantId: tenant._id,
     triggeredBy: "manual_tenant",
@@ -1416,6 +1420,7 @@ const queueUpcomingEmiReminderForUser = async ({
       reason: reminderText,
       metadata: {
         commandId: command?._id,
+        notificationCommandId: notificationResult.command?._id || null,
         commandType: EMI_REMINDER_COMMAND_TYPE,
         reminderType: EMI_REMINDER_TYPES.UPCOMING,
         installmentId: upcomingInstallment._id,
@@ -1432,6 +1437,9 @@ const queueUpcomingEmiReminderForUser = async ({
     commandId: command?._id,
     commandType: EMI_REMINDER_COMMAND_TYPE,
     commandStatus: command?.status,
+    notificationCommandId: notificationResult.command?._id || null,
+    notificationCommandStatus: notificationResult.command?.status || null,
+    notificationCreated: notificationResult.created,
     userId: user._id,
     deviceId: device._id,
     installmentId: upcomingInstallment._id,
@@ -2156,6 +2164,9 @@ export const sendUpcomingEmiReminder = async (req, res) => {
       commandId: result.commandId,
       commandType: result.commandType,
       status: result.commandStatus,
+      notificationCommandId: result.notificationCommandId,
+      notificationCommandStatus: result.notificationCommandStatus,
+      notificationCreated: result.notificationCreated,
       userId: result.userId,
       deviceId: result.deviceId,
       installmentId: result.installmentId,

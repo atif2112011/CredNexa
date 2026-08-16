@@ -20,6 +20,11 @@ export const APP_LOCK_NOTIFICATION = Object.freeze({
   notificationType: "APP_LOCKED_OVERDUE_EMI"
 });
 
+export const UPCOMING_EMI_NOTIFICATION = Object.freeze({
+  title: "EMI payment due soon",
+  notificationType: "UPCOMING_EMI_REMINDER"
+});
+
 const normalizeNotificationText = ({ title, text }) => ({
   title: String(title || "").trim(),
   text: String(text || "").trim()
@@ -212,6 +217,68 @@ export const safeQueueAppLockNotification = async (payload) => {
     return await queueAppLockNotification(payload);
   } catch (error) {
     console.error("Failed to queue app lock notification", {
+      deviceId: payload?.deviceId,
+      tenantId: payload?.tenantId,
+      sourceCommandId: payload?.sourceCommandId,
+      message: error.message
+    });
+    return { command: null, created: false, error: error.message };
+  }
+};
+
+export const queueUpcomingEmiNotification = async ({
+  deviceId,
+  tenantId,
+  userId,
+  sourceCommandId,
+  text,
+  data = {},
+  triggeredBy = "manual_tenant",
+  triggeredByAccountId
+}) => {
+  if (!deviceId || !tenantId || !sourceCommandId) {
+    throw new Error("Upcoming EMI notification requires deviceId, tenantId, and sourceCommandId");
+  }
+
+  const normalizedSourceCommandId = String(sourceCommandId);
+  const existingCommand = await DeviceCommand.findOne({
+    deviceId,
+    tenantId,
+    commandType: "NOTIFICATION",
+    "payload.notificationType": UPCOMING_EMI_NOTIFICATION.notificationType,
+    "payload.data.sourceCommandId": normalizedSourceCommandId
+  }).lean();
+
+  if (existingCommand) {
+    return { command: existingCommand, created: false };
+  }
+
+  const commands = await queueBorrowerNotification({
+    deviceId,
+    tenantId,
+    userId,
+    title: UPCOMING_EMI_NOTIFICATION.title,
+    text,
+    notificationType: UPCOMING_EMI_NOTIFICATION.notificationType,
+    data: {
+      ...data,
+      sourceCommandId: normalizedSourceCommandId
+    },
+    triggeredBy,
+    triggeredByAccountId
+  });
+
+  return {
+    command: commands[0] || null,
+    created: commands.length > 0
+  };
+};
+
+export const safeQueueUpcomingEmiNotification = async (payload) => {
+  try {
+    return await queueUpcomingEmiNotification(payload);
+  } catch (error) {
+    console.error("Failed to queue upcoming EMI notification", {
       deviceId: payload?.deviceId,
       tenantId: payload?.tenantId,
       sourceCommandId: payload?.sourceCommandId,
