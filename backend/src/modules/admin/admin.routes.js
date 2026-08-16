@@ -91,6 +91,7 @@ import {
   listAppBuilds,
   publishAppBuild,
   requestAdminDeviceLocation,
+  runAdminDeviceTestingAction,
   queueRiskFlagAppUpdate,
   queueRiskFlagWipe,
   requestRiskFlagRecheck,
@@ -182,6 +183,7 @@ adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
 adminRoutes.post("/devices/:deviceId/release", releaseAdminDevice);
+adminRoutes.post("/devices/:deviceId/testing/:action", runAdminDeviceTestingAction);
 adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictions);
 adminRoutes.patch("/devices/:deviceId/controls/factory-reset", updateAdminFactoryResetControl);
 adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", updateAdminUsbDebuggingControl);

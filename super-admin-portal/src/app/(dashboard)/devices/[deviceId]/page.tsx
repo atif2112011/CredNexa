@@ -6,6 +6,7 @@ import { DeviceReleasePanel } from "@/components/devices/device-release-panel";
 import { DeviceRestrictionsPanel } from "@/components/devices/device-restrictions-panel";
 import { DeviceSecurityControlsPanel } from "@/components/devices/device-security-controls-panel";
 import { DeviceTelemetryPanel } from "@/components/devices/device-telemetry-panel";
+import { DeviceTestingPanel } from "@/components/devices/device-testing-panel";
 import { ManualOverrideTokenPanel } from "@/components/devices/manual-override-token-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +31,7 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
       <div className="space-y-6">
         <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
         <DeviceReleasePanel deviceId={deviceId} schedule={emiSchedule} release={release} />
+        <DeviceTestingPanel deviceId={deviceId} />
         <DeviceTelemetryPanel device={device} commands={(commands as RecordItem[]) || []} />
         {!releaseInProgressOrComplete ? (
           <>

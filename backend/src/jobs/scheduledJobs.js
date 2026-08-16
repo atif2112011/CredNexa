@@ -339,13 +339,18 @@ export const runManualOverrideTokenRenewalJob = async ({
   };
 };
 
-export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy } = {}) => {
+export const runEmiPolicyJob = async ({
+  limit = SCHEDULED_JOB_LIMITS.emiPolicy,
+  scheduleId,
+  forceReminders = false
+} = {}) => {
   await connectDatabase();
   const now = new Date();
   const reminderDays = Object.keys(EMI_CRON_CONFIG.upcomingPaymentNotifications).map(Number);
   const maxReminderDays = Math.max(...reminderDays);
   const queryDueDate = addDays(now, maxReminderDays);
   const schedules = await EmiSchedule.find({
+    ...(scheduleId ? { _id: scheduleId } : {}),
     status: { $ne: "settled" },
     installments: {
       $elemMatch: {
@@ -399,7 +404,7 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
           createdAt: { $gte: startOfUtcDay(now) }
         }).lean();
 
-        if (!existingReminder) {
+        if (forceReminders || !existingReminder) {
           const { command } = await queueEmiReminder({
             device,
             tenantId: device.tenantId,
@@ -411,7 +416,8 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
               dueDate: installment.dueDate,
               installmentNumber: installment.installmentNumber,
               totalInstallments: schedule.installments.length
-            }
+            },
+            deduplicateActive: !forceReminders
           });
 
           result.remindersQueued.push({
@@ -562,7 +568,8 @@ export const runEmiPolicyJob = async ({ limit = SCHEDULED_JOB_LIMITS.emiPolicy }
               dueDate: graceInstallment.dueDate,
               installmentNumber: graceInstallment.installmentNumber,
               totalInstallments: schedule.installments.length
-            }
+            },
+            deduplicateActive: !forceReminders
           });
 
           if (created) {

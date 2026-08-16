@@ -74,6 +74,7 @@ import {
   queueDeviceRelease,
   RELEASE_COMMAND_TYPE
 } from "../../services/deviceRelease.service.js";
+import { runAdminDeviceTestAction } from "../../services/adminDeviceTesting.service.js";
 import {
   GET_LOCATION_COMMAND_TYPE,
   queueGetLocationCommand
@@ -4077,6 +4078,51 @@ export const releaseAdminDevice = async (req, res) => {
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   } finally {
     session.endSession();
+  }
+};
+
+/**
+ * Run a destructive, super-admin-only EMI/device simulation from the device testing panel.
+ * Sample params: POST /admin/devices/665f.../testing/simulate-device-grace
+ */
+export const runAdminDeviceTestingAction = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.deviceId)) {
+      return sendError(res, 400, "Invalid device ID");
+    }
+
+    const result = await runAdminDeviceTestAction({
+      deviceId: req.params.deviceId,
+      action: req.params.action,
+      actorId: req.auth.id
+    });
+    const auditDevice = await Device.findById(req.params.deviceId)
+      .select("tenantId userId")
+      .lean();
+
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.ADMIN_DEVICE_TEST_ACTION,
+      actorId: req.auth.id,
+      actorCollection: "accounts",
+      tenantId: auditDevice?.tenantId,
+      userId: auditDevice?.userId,
+      deviceId: req.params.deviceId,
+      reason: `Admin testing action: ${req.params.action}`,
+      metadata: {
+        action: req.params.action,
+        commandId: result.command?._id || null,
+        installmentId: result.installment?._id || result.installment?.installmentId || null
+      }
+    });
+
+    return sendSuccess(res, 200, "Device testing action completed successfully", result);
+  } catch (error) {
+    return sendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Internal server error",
+      error.code ? { code: error.code } : null
+    );
   }
 };
 
