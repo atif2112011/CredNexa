@@ -21,7 +21,7 @@ const actions = [
   {
     action: "send-overdue-reminder",
     label: "Send Overdue Reminder",
-    description: "Queues an overdue reminder for the most recent overdue installment.",
+    description: "Makes the next unpaid EMI overdue when needed, then queues its overdue reminder.",
     icon: BellRing
   },
   {

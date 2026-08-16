@@ -232,10 +232,9 @@ const queueManualReminder = async ({ context, actorId, reminderType }) => {
   const { device, schedule } = context;
   assertCommandAllowed(device);
 
-  const installment =
-    reminderType === EMI_REMINDER_TYPES.OVERDUE
-      ? findMostRecentOverdueInstallment(schedule)
-      : [...(schedule.installments || [])]
+  const installment = reminderType === EMI_REMINDER_TYPES.OVERDUE
+    ? findNextUnpaidInstallment(schedule)
+    : [...(schedule.installments || [])]
           .filter(
             (item) =>
               ["pending", "partial"].includes(item.status) && new Date(item.dueDate) >= new Date()
@@ -249,6 +248,38 @@ const queueManualReminder = async ({ context, actorId, reminderType }) => {
         : "No upcoming unpaid EMI installment is available",
       409
     );
+  }
+
+  if (reminderType === EMI_REMINDER_TYPES.OVERDUE) {
+    const now = new Date();
+    if (
+      !["overdue", "partial"].includes(installment.status) ||
+      new Date(installment.dueDate) >= startOfUtcDay(now)
+    ) {
+      installment.status = "overdue";
+      installment.dueDate = addDays(now, -1);
+    }
+
+    const overdueInstallments = schedule.installments.filter((item) =>
+      ["overdue", "partial"].includes(item.status)
+    );
+    schedule.status = "active";
+    schedule.settlementTime = undefined;
+    schedule.overdueInstallments = overdueInstallments.length;
+    schedule.overdueAmount = overdueInstallments.reduce(
+      (total, item) => total + getOutstandingAmount(item),
+      0
+    );
+    schedule.dpd = overdueInstallments.reduce((maximumDpd, item) => {
+      const installmentDpd = Math.max(
+        Math.floor(
+          (startOfUtcDay(now).getTime() - startOfUtcDay(item.dueDate).getTime()) / DAY_IN_MS
+        ),
+        0
+      );
+      return Math.max(maximumDpd, installmentDpd);
+    }, 0);
+    await schedule.save();
   }
 
   const result = await queueEmiReminder({
