@@ -128,16 +128,6 @@ const formatTenantDevice = (device = {}) => ({
 
 const DEFAULT_PENDING_EMI_ALERT_DAYS = 10;
 
-const ensureBorrowerEmiNotificationsEnabled = async (tenantId, res) => {
-  const tenantPolicy = await TenantPolicy.findOne({ tenantId }).lean();
-  if (!isManualDeviceControl(tenantPolicy)) return true;
-
-  sendError(res, 403, "Borrower EMI notifications are not enabled for manual-control dealers", {
-    code: "BORROWER_EMI_NOTIFICATIONS_DISABLED"
-  });
-  return false;
-};
-
 const buildSeenFilter = (seenAt) => (seenAt ? { updatedAt: { $gt: seenAt } } : {});
 
 const formatDashboardAlert = (alert = {}) => ({
@@ -1559,7 +1549,6 @@ export const sendOverdueEmiReminder = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-    if (!(await ensureBorrowerEmiNotificationsEnabled(tenant._id, res))) return null;
 
     const result = await queueOverdueEmiReminderForUser({
       tenant,
@@ -1612,7 +1601,6 @@ export const sendBulkOverdueEmiReminders = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-    if (!(await ensureBorrowerEmiNotificationsEnabled(tenant._id, res))) return null;
 
     const limit = Math.min(Math.max(Number(req.body.limit || 100), 1), 500);
     let userIds = Array.isArray(req.body.userIds) ? req.body.userIds.filter(Boolean) : [];
@@ -2130,7 +2118,6 @@ export const sendUpcomingEmiReminder = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-    if (!(await ensureBorrowerEmiNotificationsEnabled(tenant._id, res))) return null;
 
     const result = await queueUpcomingEmiReminderForUser({
       tenant,
@@ -2402,7 +2389,6 @@ export const sendUpcomingPaymentCommand = async (req, res) => {
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-    if (!(await ensureBorrowerEmiNotificationsEnabled(tenant._id, res))) return null;
 
     if (!mongoose.isValidObjectId(req.params.id)) {
       return sendError(res, 400, "Valid device ID is required");

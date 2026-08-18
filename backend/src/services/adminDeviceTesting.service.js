@@ -26,7 +26,10 @@ export const ADMIN_DEVICE_TEST_ACTIONS = Object.freeze({
   SIMULATE_PAYMENT_UNLOCK: "simulate-payment-unlock",
   SIMULATE_DEVICE_GRACE: "simulate-device-grace",
   SIMULATE_UPCOMING_EMI: "simulate-upcoming-emi",
-  SIMULATE_RELEASE: "simulate-release"
+  SIMULATE_RELEASE: "simulate-release",
+  MANUAL_SET_OVERDUE: "manual-set-overdue",
+  MANUAL_SET_GRACE: "manual-set-grace",
+  MANUAL_SET_PAID: "manual-set-paid"
 });
 
 const createActionError = (message, statusCode = 400, code) => {
@@ -65,6 +68,17 @@ const findMostRecentOverdueInstallment = (schedule, now = new Date()) =>
     )
     .sort((left, right) => new Date(right.dueDate) - new Date(left.dueDate))[0] || null;
 
+const findLatestUnpaidInstallment = (schedule, now = new Date()) => {
+  const unpaidInstallments = [...(schedule.installments || [])]
+    .filter((installment) => ["pending", "overdue", "partial"].includes(installment.status))
+    .sort((left, right) => new Date(left.dueDate) - new Date(right.dueDate));
+  const alreadyDue = unpaidInstallments.filter(
+    (installment) => new Date(installment.dueDate) <= startOfUtcDay(now)
+  );
+
+  return alreadyDue.at(-1) || unpaidInstallments[0] || null;
+};
+
 const loadTestingContext = async (deviceId) => {
   const device = await Device.findById(deviceId);
   if (!device) throw createActionError("Device not found", 404);
@@ -94,6 +108,36 @@ const assertAutomaticEmiControl = (tenantPolicy) => {
       "AUTOMATIC_DEVICE_CONTROL_REQUIRED"
     );
   }
+};
+
+const assertManualEmiControl = (tenantPolicy) => {
+  if (!isManualDeviceControl(tenantPolicy)) {
+    throw createActionError(
+      "Manual-mode installment simulations require the tenant to use manual device control",
+      409,
+      "MANUAL_DEVICE_CONTROL_REQUIRED"
+    );
+  }
+};
+
+const recalculateScheduleOverdueState = (schedule, now = new Date()) => {
+  const overdueInstallments = schedule.installments.filter((installment) =>
+    ["overdue", "partial"].includes(installment.status)
+  );
+  schedule.overdueInstallments = overdueInstallments.length;
+  schedule.overdueAmount = overdueInstallments.reduce(
+    (total, installment) => total + getOutstandingAmount(installment),
+    0
+  );
+  schedule.dpd = overdueInstallments.reduce((maximumDpd, installment) => {
+    const installmentDpd = Math.max(
+      Math.floor(
+        (startOfUtcDay(now).getTime() - startOfUtcDay(installment.dueDate).getTime()) / DAY_IN_MS
+      ),
+      0
+    );
+    return Math.max(maximumDpd, installmentDpd);
+  }, 0);
 };
 
 const resetInstallmentForSimulation = (installment, dueDate) => {
@@ -397,6 +441,87 @@ const simulatePaymentUnlock = async ({ context, actorId }) => {
   }
 };
 
+const simulateManualInstallmentState = async ({ context, actorId, state }) => {
+  const { device, schedule, tenantPolicy } = context;
+  assertCommandAllowed(device);
+  assertManualEmiControl(tenantPolicy);
+
+  const installment = findLatestUnpaidInstallment(schedule);
+  if (!installment) {
+    throw createActionError("No unpaid EMI installment is available for manual-mode simulation", 409);
+  }
+
+  const now = new Date();
+  if (state === "paid") {
+    const paymentResult = markEmiInstallmentPaid({
+      schedule,
+      installmentId: installment._id,
+      accountId: actorId,
+      reason: "Admin testing panel manual-mode payment simulation",
+      reference: `ADMIN-TEST-MANUAL-${Date.now()}`,
+      paidAt: now,
+      now
+    });
+    await schedule.save();
+    await Device.updateOne(
+      { _id: device._id },
+      { $pull: { graceReminderHistory: { installmentId: installment._id } } }
+    );
+
+    return {
+      simulationState: state,
+      installment: paymentResult.installment,
+      scheduleStatus: schedule.status,
+      overdueInstallments: schedule.overdueInstallments,
+      overdueAmount: schedule.overdueAmount,
+      dpd: schedule.dpd
+    };
+  }
+
+  const lockRules = tenantPolicy.lockRules || {};
+  const dpd = Math.max(Number(lockRules.dpd ?? 30), 0);
+  const gracePeriodDays = Math.max(Number(lockRules.gracePeriodDays ?? 7), 0);
+  if (state === "grace" && gracePeriodDays <= 0) {
+    throw createActionError("Tenant grace period must be greater than zero", 409);
+  }
+
+  const dueDate = state === "overdue" ? addDays(now, -2) : addDays(now, -dpd);
+  installment.status = "overdue";
+  installment.dueDate = dueDate;
+  installment.paidAt = undefined;
+  installment.markedPaidBy = undefined;
+  installment.markPaidReason = undefined;
+  installment.markPaidReference = undefined;
+  installment.paymentId = undefined;
+  resetScheduleForSimulation(schedule);
+  recalculateScheduleOverdueState(schedule, now);
+  await schedule.save();
+  await Device.updateOne(
+    { _id: device._id },
+    { $pull: { graceReminderHistory: { installmentId: installment._id } } }
+  );
+
+  return {
+    simulationState: state,
+    installment: {
+      installmentId: installment._id,
+      installmentNumber: installment.installmentNumber,
+      status: installment.status,
+      dueDate: installment.dueDate
+    },
+    scheduleStatus: schedule.status,
+    overdueInstallments: schedule.overdueInstallments,
+    overdueAmount: schedule.overdueAmount,
+    dpd: schedule.dpd,
+    ...(state === "grace"
+      ? {
+          graceStartedAt: addDays(dueDate, dpd),
+          graceExpiresAt: addDays(dueDate, dpd + gracePeriodDays)
+        }
+      : {})
+  };
+};
+
 const simulateRelease = async ({ context, actorId }) => {
   const { device, schedule } = context;
   if (device.state === DEVICE_STATES.RELEASED) {
@@ -475,6 +600,12 @@ export const runAdminDeviceTestAction = async ({ deviceId, action, actorId }) =>
       return prepareCronSimulation({ context, actorId, mode: "upcoming" });
     case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_RELEASE:
       return simulateRelease({ context, actorId });
+    case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_OVERDUE:
+      return simulateManualInstallmentState({ context, actorId, state: "overdue" });
+    case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_GRACE:
+      return simulateManualInstallmentState({ context, actorId, state: "grace" });
+    case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_PAID:
+      return simulateManualInstallmentState({ context, actorId, state: "paid" });
     default:
       throw createActionError("Unsupported device testing action", 400);
   }
