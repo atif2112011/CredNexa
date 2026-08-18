@@ -58,7 +58,10 @@ import {
   normalizeUpcomingReminderWindowDays,
   queueEmiReminder
 } from "../../services/emiReminder.service.js";
-import { markEmiInstallmentPaid } from "../../services/emiInstallment.service.js";
+import {
+  markEmiInstallmentPaid,
+  shouldUnlockDeviceAfterInstallmentPayment
+} from "../../services/emiInstallment.service.js";
 import { sendApprovalMail } from "../../services/mail.service.js";
 import {
   NOTIFICATION_AUDIENCES,
@@ -1772,6 +1775,7 @@ export const markUserEmiInstallmentPaid = async (req, res) => {
 
     await schedule.save({ session });
     let releaseCommand = null;
+    let unlockResult = null;
 
     if (result.newlySettled) {
       if (!device) {
@@ -1790,6 +1794,24 @@ export const markUserEmiInstallmentPaid = async (req, res) => {
         session
       });
       releaseCommand = releaseResult.command;
+    } else if (
+      shouldUnlockDeviceAfterInstallmentPayment({
+        deviceState: device?.state,
+        newlySettled: result.newlySettled
+      })
+    ) {
+      unlockResult = await queueTenantDeviceCommand({
+        device,
+        commandType: "UNLOCK",
+        triggeredBy: "payment_unlock",
+        accountId: req.auth.id,
+        payload: {
+          reason,
+          emiScheduleId: schedule._id,
+          installmentId: result.installment._id
+        },
+        session
+      });
     }
 
     await Device.updateOne(
@@ -1817,12 +1839,36 @@ export const markUserEmiInstallmentPaid = async (req, res) => {
           reference: reference || null,
           paidAt,
           scheduleSettled: result.newlySettled,
-          commandScheduled: Boolean(releaseCommand),
-          releaseCommandId: releaseCommand?._id || null
+          commandScheduled: Boolean(releaseCommand || unlockResult?.command),
+          releaseCommandId: releaseCommand?._id || null,
+          unlockCommandId: unlockResult?.command?._id || null
         }
       },
       { session }
     );
+
+    if (unlockResult?.command) {
+      await createAuditLog(
+        {
+          eventType: AUDIT_EVENTS.UNLOCK_TRIGGERED,
+          actorId: req.auth.id,
+          actorCollection: "accounts",
+          tenantId: tenant._id,
+          channelPartnerId: tenant.channelPartnerId,
+          userId: user._id,
+          deviceId: device._id,
+          reason,
+          metadata: {
+            emiScheduleId: schedule._id,
+            installmentId: result.installment._id,
+            commandId: unlockResult.command._id,
+            triggeredBy: "payment_unlock",
+            source: "tenant_installment_mark_paid"
+          }
+        },
+        { session }
+      );
+    }
 
     if (result.newlySettled) {
       await createAuditLog(
@@ -1878,7 +1924,15 @@ export const markUserEmiInstallmentPaid = async (req, res) => {
       overdueAmount: schedule.overdueAmount,
       overdueInstallments: schedule.overdueInstallments,
       dpd: schedule.dpd,
-      commandScheduled: Boolean(releaseCommand),
+      commandScheduled: Boolean(releaseCommand || unlockResult?.command),
+      unlockQueued: Boolean(unlockResult?.command),
+      unlockCommand: unlockResult?.command
+        ? {
+            commandId: unlockResult.command._id,
+            commandType: unlockResult.command.commandType,
+            status: unlockResult.command.status
+          }
+        : null,
       releaseCommand: releaseCommand
         ? {
             commandId: releaseCommand._id,

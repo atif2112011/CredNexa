@@ -1,4 +1,5 @@
 import { settleCompletedSchedule } from "./deviceRelease.service.js";
+import { DEVICE_STATES } from "../constants/deviceStates.js";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const MARKABLE_INSTALLMENT_STATUSES = new Set(["pending", "overdue", "partial"]);
@@ -12,6 +13,9 @@ const getInstallmentOutstanding = (installment) => {
   const totalPayable = Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0);
   return Math.max(totalPayable - Number(installment.paidAmount || 0), 0);
 };
+
+export const shouldUnlockDeviceAfterInstallmentPayment = ({ deviceState, newlySettled }) =>
+  deviceState === DEVICE_STATES.LOCKED && !newlySettled;
 
 export const markEmiInstallmentPaid = ({
   schedule,

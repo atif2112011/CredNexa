@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { EMI_SCHEDULE_STATUSES } from "../src/models/EmiSchedule.js";
-import { markEmiInstallmentPaid } from "../src/services/emiInstallment.service.js";
+import { DEVICE_STATES } from "../src/constants/deviceStates.js";
+import {
+  markEmiInstallmentPaid,
+  shouldUnlockDeviceAfterInstallmentPayment
+} from "../src/services/emiInstallment.service.js";
 
 const id = (value) => ({ toString: () => value });
 
@@ -107,5 +111,29 @@ test("rejects missing and terminal installments", () => {
         reason: "Test"
       }),
     (error) => error.code === "EMI_INSTALLMENT_NOT_MARKABLE" && error.statusCode === 409
+  );
+});
+
+test("unlocks only a locked device when the installment payment does not settle the schedule", () => {
+  assert.equal(
+    shouldUnlockDeviceAfterInstallmentPayment({
+      deviceState: DEVICE_STATES.LOCKED,
+      newlySettled: false
+    }),
+    true
+  );
+  assert.equal(
+    shouldUnlockDeviceAfterInstallmentPayment({
+      deviceState: DEVICE_STATES.ACTIVE,
+      newlySettled: false
+    }),
+    false
+  );
+  assert.equal(
+    shouldUnlockDeviceAfterInstallmentPayment({
+      deviceState: DEVICE_STATES.LOCKED,
+      newlySettled: true
+    }),
+    false
   );
 });
