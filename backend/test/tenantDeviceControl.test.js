@@ -39,7 +39,7 @@ test("legacy lockOnGraceExpiry still disables automatic EMI lock only", () => {
   assert.equal(getBorrowerAppConfig(policy).paymentSubmissionEnabled, true);
 });
 
-test("manual mode disables borrower EMI features regardless of the legacy lock flag", () => {
+test("manual mode disables only borrower payment submission regardless of the legacy lock flag", () => {
   const policy = {
     deviceControlRules: { mode: DEVICE_CONTROL_MODES.MANUAL },
     lockRules: { lockOnGraceExpiry: true }
@@ -49,10 +49,10 @@ test("manual mode disables borrower EMI features regardless of the legacy lock f
   assert.equal(isAutomaticEmiLockEnabled(policy), false);
   assert.deepEqual(getBorrowerAppConfig(policy), {
     deviceControlMode: DEVICE_CONTROL_MODES.MANUAL,
-    showEmiDetails: false,
+    showEmiDetails: true,
     paymentSubmissionEnabled: false,
-    showPaymentHistory: false,
-    emiNotificationsEnabled: false,
+    showPaymentHistory: true,
+    emiNotificationsEnabled: true,
     unlockRequestEnabled: true
   });
 });

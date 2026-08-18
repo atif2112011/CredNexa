@@ -1753,11 +1753,15 @@ export const markUserEmiInstallmentPaid = async (req, res) => {
 
     session.startTransaction();
 
-    const [user, schedule, device] = await Promise.all([
-      User.findOne({ _id: req.params.userId, tenantId: tenant._id }).session(session),
-      EmiSchedule.findOne({ userId: req.params.userId, tenantId: tenant._id }).session(session),
-      Device.findOne({ userId: req.params.userId, tenantId: tenant._id }).session(session)
-    ]);
+    const user = await User.findOne({ _id: req.params.userId, tenantId: tenant._id }).session(session);
+    const schedule = await EmiSchedule.findOne({
+      userId: req.params.userId,
+      tenantId: tenant._id
+    }).session(session);
+    const device = await Device.findOne({
+      userId: req.params.userId,
+      tenantId: tenant._id
+    }).session(session);
 
     if (!user) {
       await session.abortTransaction();

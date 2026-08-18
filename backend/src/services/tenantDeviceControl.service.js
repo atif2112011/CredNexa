@@ -15,10 +15,10 @@ export const getBorrowerAppConfig = (tenantPolicy) => {
 
   return {
     deviceControlMode,
-    showEmiDetails: !manual,
+    showEmiDetails: true,
     paymentSubmissionEnabled: !manual,
-    showPaymentHistory: !manual,
-    emiNotificationsEnabled: !manual,
+    showPaymentHistory: true,
+    emiNotificationsEnabled: true,
     unlockRequestEnabled: true
   };
 };

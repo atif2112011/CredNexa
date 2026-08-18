@@ -395,7 +395,7 @@ export const runEmiPolicyJob = async ({
       const daysUntilDue = getDaysUntilDue(installment.dueDate, now);
       const notificationConfig = EMI_CRON_CONFIG.upcomingPaymentNotifications[daysUntilDue];
 
-      if (!manualDeviceControl && notificationConfig && !isDeviceReleaseState(device.state)) {
+      if (notificationConfig && !isDeviceReleaseState(device.state)) {
         const existingReminder = await DeviceCommand.findOne({
           deviceId: device._id,
           commandType: EMI_REMINDER_COMMAND_TYPE,
@@ -453,15 +453,6 @@ export const runEmiPolicyJob = async ({
       await schedule.save();
     }
 
-    if (manualDeviceControl) {
-      result.skippedManualTenants.push({
-        tenantId: schedule.tenantId,
-        deviceId: device._id,
-        scheduleId: schedule._id
-      });
-      continue;
-    }
-
     const isLocked = device.state === DEVICE_STATES.LOCKED;
     const hasActiveTempUnlock =
       device.state === DEVICE_STATES.TEMP_UNLOCK && device.tempUnlockExpiresAt && new Date(device.tempUnlockExpiresAt) > now;
@@ -478,7 +469,10 @@ export const runEmiPolicyJob = async ({
         const graceExpiresAt = addDays(graceInstallment.dueDate, dpd + gracePeriodDays);
         let activeDevice = device;
 
-        if (device.state !== DEVICE_STATES.GRACE_PERIOD || device.currentPolicyKey !== DEVICE_POLICY_KEYS.EMI_GRACE) {
+        if (
+          !manualDeviceControl &&
+          (device.state !== DEVICE_STATES.GRACE_PERIOD || device.currentPolicyKey !== DEVICE_POLICY_KEYS.EMI_GRACE)
+        ) {
           const gracePolicy = await DevicePolicy.findOne({
             tenantId: device.tenantId,
             policyKey: DEVICE_POLICY_KEYS.EMI_GRACE,
@@ -597,6 +591,15 @@ export const runEmiPolicyJob = async ({
           }
         }
       }
+    }
+
+    if (manualDeviceControl) {
+      result.skippedManualTenants.push({
+        tenantId: schedule.tenantId,
+        deviceId: device._id,
+        scheduleId: schedule._id
+      });
+      continue;
     }
 
     if (!lockOnGraceExpiry) continue;

@@ -123,7 +123,7 @@ const getUserRefreshCookieOptions = () => ({
   httpOnly: true,
   secure: env.cookieSecure,
   sameSite: env.cookieSecure ? "none" : "lax",
-  path: "/api/app"
+  path: "/"
 });
 
 const setUserRefreshCookie = (res, user) => {
