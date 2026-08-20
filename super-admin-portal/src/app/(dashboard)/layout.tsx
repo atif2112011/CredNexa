@@ -1,4 +1,5 @@
 import { Sidebar } from "@/components/shell/sidebar";
+import { MobileNavigation } from "@/components/shell/mobile-navigation";
 import { getCurrentUser } from "@/lib/session";
 import { KeyRound } from "lucide-react";
 import type { ReactNode } from "react";
@@ -13,6 +14,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
       </div>
       <div className="min-w-0">
         <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b bg-background/90 px-4 backdrop-blur lg:hidden">
+          <MobileNavigation />
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
             <KeyRound className="h-4 w-4" aria-hidden="true" />
           </div>

@@ -66,6 +66,12 @@ const actions = [
 
 const manualModeActions = [
   {
+    action: "manual-set-upcoming",
+    label: "Set Latest Unpaid Due in 6 Days",
+    description: "Moves the latest unpaid installment to six days from today so it appears in the upcoming EMI table.",
+    icon: CalendarClock
+  },
+  {
     action: "manual-set-overdue",
     label: "Set Latest Unpaid to Overdue",
     description: "Moves the latest unpaid installment to two days past its due date without changing device policy.",

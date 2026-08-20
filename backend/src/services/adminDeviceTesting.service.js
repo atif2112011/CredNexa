@@ -27,6 +27,7 @@ export const ADMIN_DEVICE_TEST_ACTIONS = Object.freeze({
   SIMULATE_DEVICE_GRACE: "simulate-device-grace",
   SIMULATE_UPCOMING_EMI: "simulate-upcoming-emi",
   SIMULATE_RELEASE: "simulate-release",
+  MANUAL_SET_UPCOMING: "manual-set-upcoming",
   MANUAL_SET_OVERDUE: "manual-set-overdue",
   MANUAL_SET_GRACE: "manual-set-grace",
   MANUAL_SET_PAID: "manual-set-paid"
@@ -485,14 +486,18 @@ const simulateManualInstallmentState = async ({ context, actorId, state }) => {
     throw createActionError("Tenant grace period must be greater than zero", 409);
   }
 
-  const dueDate = state === "overdue" ? addDays(now, -2) : addDays(now, -dpd);
-  installment.status = "overdue";
-  installment.dueDate = dueDate;
-  installment.paidAt = undefined;
-  installment.markedPaidBy = undefined;
-  installment.markPaidReason = undefined;
-  installment.markPaidReference = undefined;
-  installment.paymentId = undefined;
+  const dueDate = state === "upcoming" ? addDays(now, 6) : state === "overdue" ? addDays(now, -2) : addDays(now, -dpd);
+  if (state === "upcoming") {
+    resetInstallmentForSimulation(installment, dueDate);
+  } else {
+    installment.status = "overdue";
+    installment.dueDate = dueDate;
+    installment.paidAt = undefined;
+    installment.markedPaidBy = undefined;
+    installment.markPaidReason = undefined;
+    installment.markPaidReference = undefined;
+    installment.paymentId = undefined;
+  }
   resetScheduleForSimulation(schedule);
   recalculateScheduleOverdueState(schedule, now);
   await schedule.save();
@@ -600,6 +605,8 @@ export const runAdminDeviceTestAction = async ({ deviceId, action, actorId }) =>
       return prepareCronSimulation({ context, actorId, mode: "upcoming" });
     case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_RELEASE:
       return simulateRelease({ context, actorId });
+    case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_UPCOMING:
+      return simulateManualInstallmentState({ context, actorId, state: "upcoming" });
     case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_OVERDUE:
       return simulateManualInstallmentState({ context, actorId, state: "overdue" });
     case ADMIN_DEVICE_TEST_ACTIONS.MANUAL_SET_GRACE:

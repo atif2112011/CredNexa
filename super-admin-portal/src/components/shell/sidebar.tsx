@@ -49,12 +49,13 @@ const navItems = [
   { href: "/audit-logs", label: "Audit Logs", icon: FileClock }
 ];
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const pathname = usePathname();
   const router = useRouter();
 
   async function logout() {
     await fetch("/api/session/logout", { method: "POST" });
+    onNavigate?.();
     router.push("/login");
   }
 
@@ -77,6 +78,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={onNavigate}
               className={cn(
                 "group relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/65 transition-colors hover:bg-white/8 hover:text-white",
                 isActive && "bg-white/10 text-white shadow-sm ring-1 ring-white/10"
