@@ -41,6 +41,38 @@ export const normalizeMobileForMsg91 = (mobile) => {
   return `${countryCode}${digits}`;
 };
 
+export const normalizeMobileForOtpRouting = (mobile) => {
+  const digits = String(mobile || "").trim().replace(/\D/g, "");
+  const countryCode = String(env.msg91DefaultCountryCode || "91").replace(/\D/g, "") || "91";
+
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  if (digits.length === 10 + countryCode.length && digits.startsWith(countryCode)) {
+    return digits.slice(countryCode.length);
+  }
+
+  return digits;
+};
+
+export const isTestOtpMobile = (mobile, prefix = env.testOtpMobilePrefix) => {
+  if (!prefix) return false;
+
+  const normalizedMobile = normalizeMobileForOtpRouting(mobile);
+  return /^\d{10}$/.test(normalizedMobile) && normalizedMobile.startsWith(prefix);
+};
+
+export const resolveOtpProvider = ({
+  mobile,
+  configuredProvider = env.otpProvider,
+  testMobilePrefix = env.testOtpMobilePrefix
+} = {}) => {
+  if (isTestOtpMobile(mobile, testMobilePrefix)) {
+    return OTP_PROVIDERS.MOCK;
+  }
+
+  return configuredProvider === OTP_PROVIDERS.MSG91 ? OTP_PROVIDERS.MSG91 : OTP_PROVIDERS.MOCK;
+};
+
 const createVerificationSessionId = () => `otp_${crypto.randomBytes(12).toString("hex")}`;
 const generateOtpCode = () => String(crypto.randomInt(100000, 1000000));
 const getOtpExpiryMinutes = () => Math.ceil(OTP_EXPIRES_IN_SECONDS / 60);
@@ -230,7 +262,7 @@ const sendMsg91Otp = async ({ mobile, purpose, user, enrollmentToken, flowType, 
 };
 
 export const sendOtp = async (payload) => {
-  if (env.otpProvider === OTP_PROVIDERS.MSG91) {
+  if (resolveOtpProvider({ mobile: payload?.mobile }) === OTP_PROVIDERS.MSG91) {
     return sendMsg91Otp(payload);
   }
 

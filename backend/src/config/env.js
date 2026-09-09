@@ -4,6 +4,18 @@ dotenv.config();
 
 const requiredEnv = ["MONGODB_URI", "JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"];
 
+export const parseTestOtpMobilePrefix = (value) => {
+  const prefix = String(value || "").trim();
+
+  if (!prefix) return "";
+
+  if (!/^\d{8}$/.test(prefix)) {
+    throw new Error("TEST_OTP_MOBILE_PREFIX must contain exactly 8 digits");
+  }
+
+  return prefix;
+};
+
 for (const key of requiredEnv) {
   if (!process.env[key]) {
     throw new Error(`${key} is required`);
@@ -28,6 +40,7 @@ export const env = {
   otpRateLimitWindowMs: Number(process.env.OTP_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
   otpRateLimitMaxRequests: Number(process.env.OTP_RATE_LIMIT_MAX_REQUESTS || 5),
   otpProvider: (process.env.OTP_PROVIDER || "mock").trim().toLowerCase(),
+  testOtpMobilePrefix: parseTestOtpMobilePrefix(process.env.TEST_OTP_MOBILE_PREFIX),
   otpExpiresInSeconds: Number(process.env.OTP_EXPIRES_IN_SECONDS || 900),
   otpResendCooldownSeconds: Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 30),
   msg91AuthKey: process.env.MSG91_AUTH_KEY,

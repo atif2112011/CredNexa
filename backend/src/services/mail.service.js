@@ -2,7 +2,7 @@ import nodemailer from "nodemailer";
 
 import { env } from "../config/env.js";
 
-const ADMIN_EMAIL = "atif251171@gmail.com";
+const ADMIN_EMAIL = "msmobin@gmail.com";
 const APPROVAL_MAIL_SUBJECT = "New key purchase request requires approval";
 const PAYOUT_MAIL_SUBJECT = "New partner payout request requires approval";
 const DISCOUNT_CHANGE_MAIL_SUBJECT = "New tenant key discount change requires approval";
