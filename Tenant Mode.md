@@ -11,11 +11,12 @@ The legacy `TenantPolicy.lockRules.lockOnGraceExpiry` field remains supported. I
 | Behaviour | `EMI_AUTOMATED` | `MANUAL` |
 |---|---|---|
 | Internal EMI schedule and overdue calculations | Enabled | Enabled |
-| Upcoming and overdue EMI reminders | Enabled | Disabled |
+| Upcoming and overdue EMI reminders | Enabled | Enabled on the existing scheduler cadence |
 | Grace-period device transitions | Enabled | Disabled |
 | Scheduled EMI lock | Controlled by `lockOnGraceExpiry` | Disabled |
-| Borrower EMI details | Visible | Hidden |
-| Borrower payment submission and history | Enabled | Disabled |
+| Borrower EMI details | Visible | Visible |
+| Borrower payment submission | Enabled | Disabled |
+| Borrower payment history | Visible | Visible |
 | Payment-approval unlock/release | Enabled | Disabled |
 | Tenant manual lock, unlock, and temporary unlock | Enabled | Enabled |
 | Borrower unlock request | Enabled | Enabled |
@@ -57,7 +58,7 @@ mode == EMI_AUTOMATED AND lockOnGraceExpiry != false
 Consequently:
 
 - `EMI_AUTOMATED` plus `lockOnGraceExpiry: false` keeps borrower EMI/payment features but disables the final scheduled lock.
-- `MANUAL` disables all borrower-facing EMI automation regardless of the stored legacy flag.
+- `MANUAL` disables scheduled EMI grace transitions and EMI auto-lock regardless of the stored legacy flag. Scheduled upcoming and overdue reminders remain enabled.
 
 ## Tenant creation API
 
@@ -91,20 +92,22 @@ The super-admin tenant creation form exposes the same required selection and war
 
 ## Borrower app configuration
 
-The backend derives the following configuration for a manual tenant:
+The backend provides the following configuration for a manual tenant. The same presentation applies to Device Owner and running-app enrollments:
 
 ```json
 {
   "appConfig": {
     "deviceControlMode": "MANUAL",
-    "showEmiDetails": false,
+    "showEmiDetails": true,
     "paymentSubmissionEnabled": false,
-    "showPaymentHistory": false,
-    "emiNotificationsEnabled": false,
+    "showPaymentHistory": true,
+    "emiNotificationsEnabled": true,
     "unlockRequestEnabled": true
   }
 }
 ```
+
+These values preserve the current `getBorrowerAppConfig` behavior for both borrower apps. Manual mode changes payment submission and scheduled EMI device-control transitions; it does not hide the loan schedule, payment history, or automatic reminders.
 
 `appConfig` is returned through the normal device lifecycle rather than through a tenant-mode notification:
 
@@ -118,32 +121,24 @@ The backend derives the following configuration for a manual tenant:
 
 Because mode is immutable and chosen before borrowers are enrolled, no linked-device notification or configuration-change command is required.
 
-The borrower app should persist the last received configuration and use it after app or device restarts. In manual mode it should hide EMI amounts, schedules, due dates, payment history, and Pay Now. A manually locked screen should direct the borrower to the tenant and may continue to expose Request Unlock.
+The borrower app should persist the last received configuration and use it after app or device restarts. In manual mode it should show EMI amounts, schedules, due dates, and payment history, but hide Pay Now/payment submission. A manually locked screen should direct the borrower to the tenant and may continue to expose Request Unlock.
 
 ## Borrower API enforcement
 
-Manual-mode tenants cannot call borrower EMI/payment routes. The backend returns HTTP `403` even if an older borrower app displays a stale control.
-
-Disabled EMI routes:
+Manual-mode borrowers can read EMI details and payment history through the existing routes:
 
 ```text
 GET /api/app/installments
 GET /api/app/installments/:installmentId
+GET /api/app/payment/history
+GET /api/app/payment/:paymentId
 ```
 
-Error code:
-
-```text
-BORROWER_EMI_FEATURE_DISABLED
-```
-
-Disabled payment routes:
+Borrower payment submission remains disabled. The backend returns HTTP `403` for these routes, including when an older app displays a stale control:
 
 ```text
 GET  /api/app/payment/qr
 POST /api/app/payment/submit
-GET  /api/app/payment/history
-GET  /api/app/payment/:paymentId
 ```
 
 Error code:
@@ -192,15 +187,18 @@ For manual tenants, the EMI policy job continues to maintain financial records:
 - DPD is recalculated.
 - Overdue installment count and amount are recalculated.
 
-It skips borrower/device automation:
+It sends the existing scheduled reminders:
 
-- No upcoming EMI reminder.
-- No overdue/grace reminder.
+- Upcoming reminders at the configured due-date offsets.
+- Overdue reminders every 12 hours during the configured DPD/grace window, while the device is neither locked nor in an active temporary unlock.
+
+It skips EMI device-control automation:
+
 - No `GRACE_PERIOD` transition.
 - No `EMI_GRACE` policy update.
 - No automatic EMI `LOCK` command.
 
-`scheduledLockAt` is `null` for manual tenants. Automatic tenants preserve the existing `lockOnGraceExpiry` behaviour.
+`scheduledLockAt` is `null` for manual tenants. Automatic tenants preserve the existing `lockOnGraceExpiry` behaviour. Critical-risk auto-lock remains a separate `riskRules` decision for either tenant mode.
 
 ## Payment approval
 
