@@ -8,6 +8,8 @@
 
 > **Status — research and suggestions, not the final implementation plan.** The static APK findings describe the inspected sample; the EMI Shield architecture, Android flow, API shapes, test ideas, and implementation order in this document were exploratory recommendations prepared before the running-device backend was implemented. They are not approval to copy the sample or a contract for developers. For current product decisions use the [master plan](master%20plan.md); for implemented borrower endpoints, request bodies, responses, JWT authentication, and command acknowledgements use the [running APK backend API contract](running%20apk%20backend%20api%20contract.md). An early installation-key/challenge design was considered and **not implemented**. The current backend follows the existing borrower JWT convention for both device types.
 
+> **Current app handoff:** The [Running Device APK development plan](Running%20Device%20APK%20development%20plan.md) uses an in-app scanner for the running QR displayed from the dealer's borrower-list **Generate QR** action. Scan and preview come first, then manual IMEI entry, the permissions screen, OTP/consent, and final activation. The running QR carries an enrollment code; it is not the Android setup QR and does not grant Device Owner. The running APK skips Play Integrity during onboarding and regular operation; the server reserves its four Integrity endpoints for owner-provisioned devices. Any different order, link-sharing, or running Play Integrity proposal below was an earlier suggestion, not the current app handoff.
+
 ## 1. Initial interpretation in one page
 
 This analysis suggested a **separate, clearly identified running-device borrower app** that reuses EMI Shield's borrower, consent, payment, case, command, and audit services. The subsequent product/backend contract chose `RUNNING_APP` enrollment and app-controlled lock/reminder overlays. The running lock overlay can contain **Pay Now** and **Temp Unlock** buttons that open the existing borrower payment and unlock-request screens; an approved temporary unlock clears the overlay until the existing server deadline and expiry relock. A voluntary Device Admin `lockNow()` screen-lock call is only an optional idea from this early analysis; it is not required for enrollment or one of the agreed running controls. A normal installed app cannot deliver the same whole-device kiosk, uninstall prevention, factory-reset control, package suspension, or persistent policy enforcement as a fully managed Device Owner app.
@@ -219,7 +221,7 @@ This historical gap analysis led to mode-aware registration, exact running-claim
 
 ### 7.3 Suggested enrollment and authentication sequence
 
-The sequence below summarizes the implemented backend call order. Android UI and permission handling remain suggestions until the separate running APK is built. Follow the current [endpoint sequence](running%20apk%20backend%20api%20contract.md#3-enrollment-sequence-and-endpoint-index).
+The sequence below is an earlier architecture sketch, not the final app screen order. Follow the current [endpoint sequence](running%20apk%20backend%20api%20contract.md#3-enrollment-sequence-and-endpoint-index) and [app development plan](Running%20Device%20APK%20development%20plan.md) for implementation.
 
 ```text
 Tenant registers borrower and selects RUNNING_APP
@@ -231,11 +233,10 @@ Tenant registers borrower and selects RUNNING_APP
   → app requests only the chosen, disclosed Android grants
   → app submits exact QR, borrower JWT, IMEIs, activationRequestId, and fresh capabilities
   → backend stores entered IMEIs in existing fields and links the borrower/device
-  → optional Play Integrity verdict may be verified server-side
   → app reports observed capabilities and syncs desired state
 ```
 
-Manually entered IMEI, FCM token, Android ID, package hash, or SIM number must not be treated as an authenticator. Ask for both IMEIs when the phone has two; leave IMEI 2 absent if it genuinely has only one rather than inventing a value. Validate format and duplicates, and record that the borrower entered them. The backend authenticates app calls with the existing borrower JWT and resolves the linked device; it does not bind a key to the APK installation. A stolen valid JWT can therefore call protected app APIs. Play Integrity can add an app/device signal, but its verdict must be checked by the backend and is not a substitute for consent or Device Owner. [Play Integrity standard requests](https://developer.android.com/google/play/integrity/standard).
+Manually entered IMEI, FCM token, Android ID, package hash, or SIM number must not be treated as an authenticator. Ask for both IMEIs when the phone has two; leave IMEI 2 absent if it genuinely has only one rather than inventing a value. Validate format and duplicates, and record that the borrower entered them. The backend authenticates app calls with the existing borrower JWT and resolves the linked device; it does not bind a key to the APK installation. A stolen valid JWT can therefore call protected app APIs. Earlier research considered Play Integrity as an additional signal; the final running-device contract skips it and leaves owner-device Play Integrity behavior intact.
 
 Google Play's User Data policy restricts linking persistent identifiers such as IMEI with personal data, with narrow exceptions including Device Owner management. A manually entered IMEI does not give a running app that exception. Treat Play distribution of this IMEI-linked design as a launch blocker pending specific policy review; a direct APK download still needs clear consent and privacy review. [Google Play User Data policy](https://support.google.com/googleplay/android-developer/answer/10144311).
 

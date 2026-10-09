@@ -532,6 +532,7 @@ const RISK_INTEGRITY_ACTIONS = new Set([
 ]);
 
 const RISK_SEVERITIES = ["low", "medium", "high", "critical"];
+const UNSUPPORTED_RUNNING_COMMAND_REASON = "UNSUPPORTED_FOR_ENROLLMENT_MODE";
 
 const getDeviceSyncState = async (device) => {
   const [policy, pendingCommands, tenantPolicy] = await Promise.all([
@@ -2898,6 +2899,12 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       return sendError(res, 400, "Registered device not found");
     }
 
+    // Running-only failsafe ACKs require a real stored command ID. Leave the
+    // existing owner-device request path unchanged.
+    if (isRunningDevice(device) && !mongoose.isValidObjectId(req.body.commandId)) {
+      return sendError(res, 400, "Valid command ID is required");
+    }
+
     const command = await DeviceCommand.findOne({ _id: req.body.commandId, deviceId: device._id });
     if (!command) {
       return sendError(res, 404, "Device command not found", {
@@ -2905,10 +2912,72 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       });
     }
 
+    let unsupportedRunningCommand = false;
     try {
       assertRunningCommandAllowed(device, command.commandType, command.payload);
     } catch (error) {
-      return sendError(res, error.statusCode, error.message, { code: error.code });
+      if (isRunningDevice(device) && error.code === UNSUPPORTED_RUNNING_COMMAND_REASON &&
+        req.body.status === "failed" && req.body.failureReason === UNSUPPORTED_RUNNING_COMMAND_REASON) {
+        unsupportedRunningCommand = true;
+      } else {
+        return sendError(res, error.statusCode, error.message, { code: error.code });
+      }
+    }
+
+    if (unsupportedRunningCommand) {
+      // This exception records a command the running APK already encountered.
+      // It never applies a managed control or changes the device state.
+      if (command.status === "acknowledged" ||
+        (command.status === "failed" &&
+          command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT &&
+          command.failureReason !== UNSUPPORTED_RUNNING_COMMAND_REASON)) {
+        return sendError(res, 409, "Device command already has a different terminal status");
+      }
+
+      if (!(command.status === "failed" &&
+        command.failureSource === DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT)) {
+        const previousStatus = command.status;
+        command.status = "failed";
+        command.ackPayload = {
+          commandId: req.body.commandId,
+          status: "failed",
+          failureReason: UNSUPPORTED_RUNNING_COMMAND_REASON
+        };
+        command.failureReason = UNSUPPORTED_RUNNING_COMMAND_REASON;
+        command.failureSource = DEVICE_COMMAND_FAILURE_SOURCES.DEVICE_ENFORCEMENT;
+        command.nextRetryAt = undefined;
+        await command.save();
+
+        await createAuditLog({
+          eventType: AUDIT_EVENTS.DEVICE_COMMAND_ACKNOWLEDGED,
+          actorId: req.auth.id,
+          actorCollection: "users",
+          tenantId: device.tenantId,
+          userId: req.auth.id,
+          deviceId: device._id,
+          metadata: {
+            commandId: command._id,
+            commandType: command.commandType,
+            status: command.status,
+            failureReason: UNSUPPORTED_RUNNING_COMMAND_REASON,
+            previousStatus
+          }
+        });
+      }
+
+      return sendSuccess(res, 200, "Device command acknowledgement saved", {
+        commandId: command._id,
+        status: command.status,
+        deviceState: device.state,
+        restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
+        securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
+        lastLocation: device.lastLocation || null
+      });
+    }
+
+    if (isRunningDevice(device) && req.body.status === "failed" &&
+      req.body.failureReason === UNSUPPORTED_RUNNING_COMMAND_REASON) {
+      return sendError(res, 400, "Unsupported-command failure reason requires an unsupported running command");
     }
 
     if (!["acknowledged", "failed"].includes(req.body.status)) {

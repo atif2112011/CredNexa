@@ -1,5 +1,9 @@
 
-const SENSITIVE_LOG_FIELDS = new Set(["accesstoken", "refreshtoken", "resettoken", "password", "newpassword", "confirmpassword", "otp"]);
+const SENSITIVE_LOG_FIELDS = new Set([
+  "accesstoken", "refreshtoken", "resettoken", "password", "newpassword", "confirmpassword", "otp",
+  // Both enrollment modes return a QR containing an activation claim; never put it in API logs.
+  "enrollmenttoken", "qrpayload", "qrtext", "qrcodedataurl", "runningtokenciphertext", "runningtokenhash"
+]);
 const MAX_LOG_DEPTH = 6;
 
 const redactForLogs = (value, seen = new WeakSet(), depth = 0) => {

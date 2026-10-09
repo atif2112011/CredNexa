@@ -5,12 +5,12 @@
 ## 1. Base rules
 
 - Base path: `/api/app`. Send JSON with `Content-Type: application/json` unless the endpoint explicitly accepts a file upload.
-- An onboarding QR is an HTTPS app link. Read its `code` query parameter and pass that secret as `enrollmentToken`. The internal `enrollmentId` is **not** a substitute for the secret. Never log, cache in analytics, or expose the QR secret in screenshots.
+- On the dealer app's borrower list, an unlinked running borrower has **Generate QR**. The dealer app calls the existing borrower-scoped QR endpoint according to the borrower's saved `enrollmentMode` and displays its `qrCodeDataUrl`. The running APK scans this QR **inside the installed app**; it is an HTTPS `qrText` value with an opaque `code` query parameter. Extract that code and pass it as `enrollmentToken`. The internal `enrollmentId` is **not** a substitute for the secret. Never log, cache in analytics, or expose the code in screenshots.
 - `Authorization: Bearer <accessToken>` is required where the tables say **Bearer**. The OTP verification or consent acceptance response supplies the token. `/refresh-token` uses the existing HTTP-only refresh cookie.
 - Running and managed-device borrowers use the same JWT convention: send the Bearer token on authenticated `/api/app` calls. No installation-signature headers or separate installation challenge are used. Public endpoints remain public; refresh uses the existing cookie.
-- Before the running device is linked, the borrower JWT may call consent acceptance, device registration, and the optional onboarding Play Integrity challenge/verify APIs. Device operations return `403` until activation completes. Once linked, the backend resolves the exact `User.linkedDeviceId` for running app calls.
+- Before the running device is linked, the borrower JWT may call consent acceptance and device registration. Device operations return `403` until activation completes. Once linked, the backend resolves the exact `User.linkedDeviceId` for running app calls. Play Integrity endpoints return `409` for this enrollment mode at both stages.
 - Common success envelope: `{ "success": true, "message": "...", "data": { ... } }`. Common failure envelope: `{ "success": false, "error": "...", "data": { "code": "..." } }` when a structured code exists. Check HTTP status and `success`; not every older error has a `data.code`.
-- Dates in request bodies are ISO 8601 strings unless a field explicitly says Unix milliseconds. IDs are MongoDB ObjectId strings. Values such as `{{QR_CODE}}` in examples are placeholders.
+- Dates in request bodies are ISO 8601 strings unless a field explicitly says Unix milliseconds. IDs are MongoDB ObjectId strings. `{{ENROLLMENT_CODE}}` in examples means the opaque `code` extracted from the scanned running QR; it is unrelated to payment QR IDs.
 - Running-device controls are app-enforced overlays and notifications. The APK must not claim Device Owner or kiosk enforcement. `TEMP_UNLOCK` is supported: the app clears its lock overlay until the server expiry and then restores it locally and through the expiry `LOCK` command. Managed per-app restrictions, wipe, and manual override remain unavailable for `RUNNING_APP`.
 
 ## 2. Authentication and activation retry
@@ -21,11 +21,13 @@ The existing OTP and consent flow issues a borrower JWT. Use it exactly as the m
 Authorization: Bearer {{ACCESS_TOKEN}}
 ```
 
-For activation, generate a random URL-safe `activationRequestId` of 16–128 characters and include it **in the registration JSON body**. Persist the same value locally until the request succeeds. If the registration response is lost, retry with the same JWT, QR secret, and `activationRequestId`; the backend returns the linked device. This value is an idempotency marker, **not** an authenticator. A different value after activation conflicts.
+For activation, generate a random URL-safe `activationRequestId` of 16–128 characters and include it **in the registration JSON body**. Persist the same value locally until the request succeeds. If the registration response is lost, retry with the same JWT, scanned enrollment code, and `activationRequestId`; the backend returns the linked device. This value is an idempotency marker, **not** an authenticator. A different value after activation conflicts.
 
 There is no cryptographic binding to the APK installation. A party with a valid borrower JWT can make authenticated requests until that token expires or is revoked. The running app must protect tokens using Android secure storage, use HTTPS, and report permission health honestly. A controlled replacement process is still needed to prevent accidental re-enrollment, but the backend does not prove that subsequent requests came from the original installation.
 
 ## 3. Enrollment sequence and endpoint index
+
+The running app opens its QR scanner first. Scan the dealer's running QR, extract its `code`, call the preview endpoint, then show the manual IMEI screen and the permissions screen. Continue with OTP and consent, and recheck required grants just before registration because the submitted capability observation must be fresh. The owner provisioning QR is a different Android setup payload and must be rejected by this in-app scanner. This UI order changes no API endpoint or request field. Camera access is requested for the scanner, but the backend's final activation gates are notification and overlay access.
 
 | Step | Endpoint | Status | Authentication |
 | --- | --- | --- | --- |
@@ -45,7 +47,7 @@ The server creates a device **only at step 6**. The borrower enters IMEI 1 and I
 Request:
 
 ```json
-{ "enrollmentToken": "{{QR_CODE}}" }
+{ "enrollmentToken": "{{ENROLLMENT_CODE}}" }
 ```
 
 Response `200`:
@@ -72,12 +74,12 @@ An invalid, expired, cancelled, consumed, disabled-tenant, or already-linked cla
 
 ### 3.2 `POST /api/app/consent/terms`
 
-**Use POST with the scanned secret.** The existing `GET /consent/terms` has no claim parameter and returns the default managed-device terms.
+**Use POST with the code extracted from the scanned running QR.** The existing `GET /consent/terms` has no claim parameter and returns the default managed-device terms.
 
 Request:
 
 ```json
-{ "enrollmentToken": "{{QR_CODE}}" }
+{ "enrollmentToken": "{{ENROLLMENT_CODE}}" }
 ```
 
 Response `200` (relevant fields):
@@ -107,7 +109,7 @@ Display the returned rendered text. Keep `version` and `renderedConsentHash` for
 Request:
 
 ```json
-{ "mobile": "9876543210", "enrollmentToken": "{{QR_CODE}}" }
+{ "mobile": "9876543210", "enrollmentToken": "{{ENROLLMENT_CODE}}" }
 ```
 
 Response `200`:
@@ -165,7 +167,7 @@ Request:
   "mobile": "9876543210",
   "verificationSessionId": "{{OTP_SESSION_ID}}",
   "otp": "123456",
-  "enrollmentToken": "{{QR_CODE}}"
+  "enrollmentToken": "{{ENROLLMENT_CODE}}"
 }
 ```
 
@@ -193,7 +195,7 @@ Response `200` for first consent:
 }
 ```
 
-For a verified resume OTP, `flowType` is `ONBOARDING_RESUME` and `nextStep` is `REGISTER_DEVICE`. The exact scanned secret must match the OTP session's unconsumed claim. An OTP cannot be reused after a QR rotation.
+For a verified resume OTP, `flowType` is `ONBOARDING_RESUME` and `nextStep` is `REGISTER_DEVICE`. The exact scanned code must match the OTP session's unconsumed claim. An OTP cannot be reused after QR rotation.
 
 ### 3.6 `POST /api/app/consent/accept`
 
@@ -201,7 +203,7 @@ Headers: `Authorization: Bearer {{JWT}}`. Request:
 
 ```json
 {
-  "enrollmentToken": "{{QR_CODE}}",
+  "enrollmentToken": "{{ENROLLMENT_CODE}}",
   "consentCheckboxAccepted": true,
   "consentVersion": "running-1.0",
   "renderedConsentHash": "{{SHA256_HEX_FROM_TERMS}}",
@@ -227,7 +229,7 @@ Response `201` on first acceptance:
 }
 ```
 
-`locationConsentAccepted` is an explicit, optional location choice; default is `false`. A repeat acceptance for an already accepted claim returns `200` with `consentAccepted`, `accessToken`, `nextStep`, and `user`. Preserve the refreshed token/cookie. A rotated running QR requires a new OTP and consent tied to the new claim. `renderedConsentHash` is accepted as a change-detection check; send it even though the handler currently treats an omitted hash as acceptable.
+`locationConsentAccepted` is an explicit, optional location choice; default is `false`. A repeat acceptance for an already accepted claim returns `200` with `consentAccepted`, `accessToken`, `nextStep`, and `user`. Preserve the refreshed token/cookie. A rotated running enrollment link requires a new OTP and consent tied to the new claim. `renderedConsentHash` is accepted as a change-detection check; send it even though the handler currently treats an omitted hash as acceptable.
 
 ### 3.7 `POST /api/app/device/register`
 
@@ -235,7 +237,7 @@ Headers: `Authorization: Bearer {{JWT}}`. Request:
 
 ```json
 {
-  "enrollmentToken": "{{QR_CODE}}",
+  "enrollmentToken": "{{ENROLLMENT_CODE}}",
   "activationRequestId": "{{STABLE_RANDOM_URL_SAFE_ID_16_TO_128_CHARS}}",
   "requirementsVersion": 1,
   "imei": "490154203237518",
@@ -500,9 +502,34 @@ Representative response `200`:
 }
 ```
 
-The state depends on the command (`ACTIVE`, `LOCKED`, `RELEASED`, etc.). A repeat ACK with the same terminal status returns `200`; a conflicting status returns `409`. For an `EMI_GRACE` `POLICY_UPDATE` command, acknowledge with `commandId`, `status: "acknowledged"`, and the applied policy version; do not apply managed restrictions. Owner-only commands are filtered from running sync and rejected if acknowledged directly.
+The state depends on the command (`ACTIVE`, `LOCKED`, `RELEASED`, etc.). A repeat ACK with the same terminal status returns `200`; a conflicting status returns `409`. For an `EMI_GRACE` `POLICY_UPDATE` command, acknowledge with `commandId`, `status: "acknowledged"`, and the applied policy version; do not apply managed restrictions. Owner-only commands are blocked at creation and filtered from running sync/FCM. A successful ACK for one of them remains prohibited.
 
-## 6. Existing account, payment, support, and integrity APIs
+If the running APK has already encountered an existing stale or misrouted owner-only command, it may report that specific command as failed:
+
+```json
+{ "commandId": "{{EXISTING_UNSUPPORTED_COMMAND_ID}}", "status": "failed", "failureReason": "UNSUPPORTED_FOR_ENROLLMENT_MODE" }
+```
+
+The backend requires a valid command ID belonging to the authenticated running device, a command type or payload that is unsupported for `RUNNING_APP`, and the exact `failed` status and failure reason above. It returns HTTP `200` with the ordinary ACK envelope and `data.status: "failed"`; the command becomes terminal with `failureSource: "device_enforcement"` and an audit record, while the device state stays unchanged. Repeating the same failed ACK returns `200` without a second audit entry. A success ACK or another failure reason still returns `409 UNSUPPORTED_FOR_ENROLLMENT_MODE`. A missing command returns `404 COMMAND_NOT_FOUND`. The APK must not fabricate command IDs or treat receipt of FCM as successful enforcement.
+
+Representative failed-ACK response (`200`; `deviceState` remains whatever the server requested before this report):
+
+```json
+{
+  "success": true,
+  "message": "Device command acknowledgement saved",
+  "data": {
+    "commandId": "{{EXISTING_UNSUPPORTED_COMMAND_ID}}",
+    "status": "failed",
+    "deviceState": "ACTIVE",
+    "restrictionState": {},
+    "securityControlState": {},
+    "lastLocation": null
+  }
+}
+```
+
+## 6. Existing account, payment, and support APIs
 
 These APIs remain usable by the running APK; they are not duplicated under a new route tree. Use the existing borrower JWT on authenticated endpoints unless listed as public. MANUAL tenant mode keeps EMI details and history visible but disables borrower payment submission through `appConfig.paymentSubmissionEnabled: false`; dealer/admin payment management remains separate.
 
@@ -607,38 +634,25 @@ Authorization: Bearer {{JWT}}
 }
 ```
 
-The existing integrity APIs are also usable. `/integrity/verify` and `/integrity/risk/verify` evaluate a running borrower's Play Integrity token against the configured running APK package name. Integrity is an optional existing app-security flow and does not cryptographically bind the borrower JWT to an installation:
+### Play Integrity is owner-only
 
-| Endpoint | Request body | Success response `data` |
-| --- | --- | --- |
-| `POST /integrity/challenge` | `{ "action": "ONBOARDING_PRE_REGISTRATION", "enrollmentToken": "{{QR_CODE}}", "deviceContext": {} }` | `{ "challengeId": "{{ID}}", "requestHash": "{{HASH}}", "expiresAt": "{{ISO_DATE}}", "action": "ONBOARDING_PRE_REGISTRATION" }`. The claim, when supplied, is resolved mode-aware. |
-| `POST /integrity/verify` | `{ "challengeId": "{{ID}}", "integrityToken": "{{PLAY_TOKEN}}", "action": "ONBOARDING_PRE_REGISTRATION", "localSignals": {} }` | On allow: `decision`, `integrityStatus`, `reasonCode`, `requiredLevel`, `deviceIntegrity`, `appIntegrity`, `verifiedAt`, `nextStep`, `integrityCheckId`, `riskFlagIds`, `autoLocks`. A retry/block can be an HTTP error with `data.decision`. |
-| `POST /integrity/risk/challenge` | `{ "action": "APP_STARTUP", "deviceContext": {} }` | `{ "status": "challenge_created", "challengeId": "{{ID}}", "requestHash": "{{HASH}}", "expiresAt": "{{ISO_DATE}}", "action": "APP_STARTUP" }`. |
-| `POST /integrity/risk/verify` | `{ "challengeId": "{{ID}}", "integrityToken": "{{PLAY_TOKEN}}", "action": "APP_STARTUP", "localSignals": {} }` | `{ "status": "recorded", "integrityCheckId": "{{ID}}", "riskFlagIds": [], "resolvedRiskIds": [], "commandsQueued": [], "syncRecommended": true }`. Sync after risk checks; critical risk auto-lock is independent of MANUAL EMI mode. |
-| `POST /security/event` | `{ "type": "TAMPER_DETECTED", "severity": "high", "message": "Example observation", "metadata": {} }` | `201` with `{ "riskFlagId": "{{ID}}", "status": "{{STATUS}}", "autoLock": { ... } }`. Report actual observations; a critical event may queue a separate risk lock. |
+The running APK must **not** call `POST /integrity/challenge`, `POST /integrity/verify`, `POST /integrity/risk/challenge`, or `POST /integrity/risk/verify` during onboarding or regular operation. Each route accepts the existing borrower Bearer JWT but returns HTTP `409` for `RUNNING_APP`, before or after device activation, regardless of the request body. No Play Integrity challenge, verification record, or associated risk lock is created. The QR-provisioned APK continues using these routes as before.
 
-All four integrity endpoints and `/security/event` use the existing Bearer JWT when authenticated. `POST /security/event` is not a replacement for `/device/capabilities` when Android grants change.
-
-Example Play Integrity risk-check request/response after obtaining a `requestHash` from `/integrity/risk/challenge` and a Play token from Android:
-
-```json
-{ "challengeId": "{{CHALLENGE_ID}}", "integrityToken": "{{PLAY_INTEGRITY_TOKEN}}", "action": "APP_STARTUP", "localSignals": {} }
-```
+Example response if an old running build calls any of the four endpoints:
 
 ```json
 {
-  "success": true,
-  "message": "Risk integrity result recorded",
-  "data": {
-    "status": "recorded",
-    "integrityCheckId": "{{INTEGRITY_CHECK_ID}}",
-    "riskFlagIds": [],
-    "resolvedRiskIds": [],
-    "commandsQueued": [],
-    "syncRecommended": true
-  }
+  "success": false,
+  "error": "Play Integrity is not supported for running-device enrollment",
+  "data": { "code": "UNSUPPORTED_FOR_ENROLLMENT_MODE" }
 }
 ```
+
+`RUNNING_ENROLLMENT_PACKAGE_NAME` remains required in backend running-enrollment configuration; it does not make Play Integrity part of the running APK contract. No Integrity result is required by `POST /device/register`. Keep the separate `POST /security/event` route for actual local security observations and `POST /device/capabilities` for Android grant changes:
+
+| Endpoint | Request body | Success response `data` |
+| --- | --- | --- |
+| `POST /security/event` | `{ "type": "TAMPER_DETECTED", "severity": "high", "message": "Example observation", "metadata": {} }` | `201` with `{ "riskFlagId": "{{ID}}", "status": "{{STATUS}}", "autoLock": { ... } }`. A critical event may queue a separate risk lock. |
 
 Example security-event request/response:
 
@@ -682,12 +696,12 @@ FCM messages are not HTTP API responses and may arrive late, out of order, or no
 | --- | --- | --- |
 | QR invalid/expired/rotated/claimed | `400`, `INVALID_ENROLLMENT_TOKEN` | Stop that enrollment and request a fresh QR. |
 | Running tenant disabled | `409`, `RUNNING_ENROLLMENT_DISABLED` | Stop activation; dealer/admin must enable the tenant. |
-| Consent missing or mismatched | `403 CONSENT_REQUIRED` or `400` | Repeat the OTP/consent steps for the current QR. |
+| Consent missing or mismatched | `403 CONSENT_REQUIRED` or `400` | Repeat the OTP/consent steps for the current enrollment link. |
 | Requirements changed | `409 REQUIREMENTS_CHANGED` | Reload preview/permissions and repeat final check. |
 | Required grant unavailable | `409 CAPABILITY_UNAVAILABLE` | Show the specific grant and offer a Settings retry. |
 | Existing active IMEI | `409 IMEI_REVIEW_REQUIRED` | Stop; send borrower to dealer review. |
 | Borrower already linked | `409 DEVICE_ALREADY_LINKED` | Do not silently bind another phone. |
-| Running device not enrolled | `403` on device operations | Finish activation with the current QR, OTP/consent, IMEIs, and required grants. |
+| Running device not enrolled | `403` on device operations | Finish activation with the current enrollment link, OTP/consent, IMEIs, and required grants. |
 | Missing/invalid/expired JWT | `401` or `403` | Log in again through the existing borrower OTP flow or refresh the token when eligible. |
 | Different activation request ID after linkage | `409 DEVICE_ALREADY_LINKED` | Reuse the original `activationRequestId` only for a genuine lost-response retry; otherwise use the reviewed replacement flow. |
 | Owner-only feature attempted | `409 UNSUPPORTED_FOR_ENROLLMENT_MODE` | Hide/disable that action. |

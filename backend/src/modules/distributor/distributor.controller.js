@@ -2690,7 +2690,9 @@ export const regenerateEnrollmentQr = async (req, res) => {
     }
 
     const existingDevice = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
-    if (existingDevice) {
+    // The list hides Generate QR for linked borrowers. Enforce that saved link state here too,
+    // including an inconsistent record whose linked Device document is temporarily missing.
+    if (user.isDeviceLinked === true || existingDevice) {
       return sendError(res, 400, "Device is already registered for this borrower");
     }
 

@@ -5,12 +5,20 @@ import mongoose from "mongoose";
 
 import { env } from "../src/config/env.js";
 import { ENROLLMENT_MODES, getEnrollmentMode } from "../src/constants/enrollmentModes.js";
+import { ACCOUNT_ROLES } from "../src/constants/roles.js";
+import { TENANT_CAPABILITIES } from "../src/constants/tenant.js";
 import { buildPolicyUpdateMessage } from "../src/jobs/fcmDeliveryWorker.js";
+import { getDistributorUsers, regenerateEnrollmentQr } from "../src/modules/distributor/distributor.controller.js";
 import { acknowledgeDeviceCommand, getPaymentQr } from "../src/modules/app/app.controller.js";
 import { registerRunningDevice } from "../src/modules/app/runningEnrollment.controller.js";
 import { resolveRunningDevice } from "../src/middleware/resolveRunningDevice.js";
+import { AuditLog } from "../src/models/AuditLog.js";
 import { Device } from "../src/models/Device.js";
 import { DeviceCommand } from "../src/models/DeviceCommand.js";
+import { EnrollmentToken } from "../src/models/EnrollmentToken.js";
+import { ProvisioningDetails } from "../src/models/ProvisioningDetails.js";
+import { Tenant } from "../src/models/Tenant.js";
+import { TenantPolicy } from "../src/models/TenantPolicy.js";
 import { User } from "../src/models/User.js";
 import { backfillManualOverrideTokens, generateManualOverrideTokenForDevice } from "../src/services/manualOverrideToken.service.js";
 import {
@@ -29,6 +37,173 @@ import {
   matchesEnrollmentSecret,
   validateRunningCapabilities
 } from "../src/services/runningEnrollment.service.js";
+
+test("dealer borrower list exposes saved mode and link status for Generate QR", async () => {
+  const originalTenantFind = Tenant.findById;
+  const originalUserFind = User.find;
+  const originalCount = User.countDocuments;
+  const tenantId = new mongoose.Types.ObjectId().toString();
+  const users = [
+    { _id: "running-user", enrollmentMode: ENROLLMENT_MODES.RUNNING_APP, isDeviceLinked: false },
+    { _id: "legacy-owner-user", isDeviceLinked: true }
+  ];
+  Tenant.findById = () => ({ lean: async () => ({
+    _id: tenantId, isActive: true, capabilities: [TENANT_CAPABILITIES.DISTRIBUTE]
+  }) });
+  User.find = () => ({
+    populate() { return this; }, sort() { return this; }, skip() { return this; }, limit() { return this; },
+    lean: async () => users
+  });
+  User.countDocuments = async () => users.length;
+  const res = {
+    status(code) { this.code = code; return this; },
+    json(body) { this.body = body; return this; }
+  };
+  try {
+    await getDistributorUsers({
+      auth: { role: ACCOUNT_ROLES.TENANT_ADMIN, tenantId }, query: {}
+    }, res);
+    assert.equal(res.code, 200);
+    assert.equal(res.body.data.items[0].enrollmentMode, ENROLLMENT_MODES.RUNNING_APP);
+    assert.equal(res.body.data.items[0].isDeviceLinked, false);
+    assert.equal(res.body.data.items[1].enrollmentMode, ENROLLMENT_MODES.DEVICE_OWNER_QR);
+    assert.equal(res.body.data.items[1].isDeviceLinked, true);
+  } finally {
+    Tenant.findById = originalTenantFind;
+    User.find = originalUserFind;
+    User.countDocuments = originalCount;
+  }
+});
+
+test("borrower-list Generate QR preserves owner response and serves running QR from saved mode", async () => {
+  const original = {
+    startSession: mongoose.startSession,
+    tenantFind: Tenant.findById,
+    userFind: User.findOne,
+    policyFind: TenantPolicy.findOne,
+    deviceFind: Device.findOne,
+    tokenFind: EnrollmentToken.findOne,
+    provisioningFind: ProvisioningDetails.findOne,
+    auditCreate: AuditLog.create,
+    log: console.log,
+    secretKey: env.runningEnrollmentSecretKey,
+    linkBase: env.runningEnrollmentLinkBase
+  };
+  const tenantId = new mongoose.Types.ObjectId().toString();
+  const userId = new mongoose.Types.ObjectId().toString();
+  const secret = crypto.randomBytes(32).toString("base64url");
+  let mode = ENROLLMENT_MODES.RUNNING_APP;
+  let linkedDevice = null;
+  let userLinked = false;
+  const logged = [];
+  const expiry = new Date(Date.now() + 60_000);
+  const runningToken = {
+    _id: "running-claim",
+    enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
+    runningTokenCiphertext: null,
+    expiresAt: expiry,
+    async save() {}
+  };
+  const ownerToken = {
+    _id: "owner-claim",
+    enrollmentMode: ENROLLMENT_MODES.DEVICE_OWNER_QR,
+    token: "owner-enrollment-secret",
+    expiresAt: expiry,
+    async save() {}
+  };
+  const response = () => ({
+    status(code) { this.code = code; return this; },
+    json(body) { this.body = body; return this; }
+  });
+  try {
+    env.runningEnrollmentSecretKey = crypto.randomBytes(32).toString("hex");
+    env.runningEnrollmentLinkBase = "https://enroll.example.test/running-enrollment";
+    runningToken.runningTokenCiphertext = encryptRunningSecret(secret);
+    mongoose.startSession = async () => ({ inTransaction: () => false, endSession() {} });
+    Tenant.findById = () => ({ lean: async () => ({
+      _id: tenantId, isActive: true, capabilities: [TENANT_CAPABILITIES.DISTRIBUTE]
+    }) });
+    User.findOne = () => ({ lean: async () => ({
+      _id: userId, tenantId, isActive: true, isDeviceLinked: userLinked, enrollmentMode: mode,
+      name: "Borrower", mobile: "9876543210", loanId: "LOAN-1"
+    }) });
+    TenantPolicy.findOne = () => ({ select: () => ({ lean: async () => ({ runningEnrollmentEnabled: true }) }) });
+    Device.findOne = () => ({ lean: async () => linkedDevice });
+    EnrollmentToken.findOne = (filter) => ({
+      select: () => ({ sort: async () => filter.enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? runningToken : ownerToken })
+    });
+    ProvisioningDetails.findOne = () => ({ lean: async () => ({
+      adminComponentName: "com.emishield.app/.AdminReceiver",
+      adminPackageDownloadUrl: "https://example.test/owner.apk",
+      adminSignatureChecksum: "checksum"
+    }) });
+    AuditLog.create = async () => [{}];
+    console.log = (...args) => { logged.push(args); };
+
+    const req = (body) => ({
+      auth: { id: "dealer-id", role: ACCOUNT_ROLES.TENANT_ADMIN, tenantId },
+      params: { userId }, body
+    });
+    const running = response();
+    await regenerateEnrollmentQr(req({ enrollmentMode: ENROLLMENT_MODES.RUNNING_APP }), running);
+    assert.equal(running.code, 200);
+    assert.equal(running.body.data.reusedExistingToken, true);
+    assert.equal(running.body.data.qrType, "RUNNING_APP_LINK");
+    assert.equal(new URL(running.body.data.qrText).searchParams.get("code"), secret);
+    assert.match(running.body.data.qrCodeDataUrl, /^data:image\/png;base64,/);
+    assert.equal(running.body.data.enrollmentToken, undefined);
+
+    const oldDealer = response();
+    await regenerateEnrollmentQr(req({}), oldDealer);
+    assert.equal(oldDealer.code, 409);
+    assert.equal(oldDealer.body.data.code, "DEALER_APP_UPGRADE_REQUIRED");
+
+    mode = ENROLLMENT_MODES.DEVICE_OWNER_QR;
+    const owner = response();
+    await regenerateEnrollmentQr(req({}), owner);
+    assert.equal(owner.code, 200);
+    assert.equal(owner.body.data.enrollmentToken, ownerToken.token);
+    assert.equal(owner.body.data.qrPayload["android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE"].enrollmentToken,
+      ownerToken.token);
+    assert.equal(owner.body.data.qrType, undefined);
+
+    const mismatch = response();
+    await regenerateEnrollmentQr(req({ enrollmentMode: ENROLLMENT_MODES.RUNNING_APP }), mismatch);
+    assert.equal(mismatch.code, 409);
+    assert.equal(mismatch.body.data.code, "ENROLLMENT_MODE_MISMATCH");
+
+    linkedDevice = { _id: "already-linked" };
+    const linked = response();
+    await regenerateEnrollmentQr(req({}), linked);
+    assert.equal(linked.code, 400);
+    assert.match(linked.body.error, /already registered/);
+
+    linkedDevice = null;
+    userLinked = true;
+    const linkedFlag = response();
+    await regenerateEnrollmentQr(req({}), linkedFlag);
+    assert.equal(linkedFlag.code, 400);
+    assert.match(linkedFlag.body.error, /already registered/);
+
+    const logText = JSON.stringify(logged);
+    assert.equal(logText.includes(secret), false);
+    assert.equal(logText.includes(ownerToken.token), false);
+    assert.equal(logText.includes(running.body.data.qrCodeDataUrl), false);
+  } finally {
+    mongoose.startSession = original.startSession;
+    Tenant.findById = original.tenantFind;
+    User.findOne = original.userFind;
+    TenantPolicy.findOne = original.policyFind;
+    Device.findOne = original.deviceFind;
+    EnrollmentToken.findOne = original.tokenFind;
+    ProvisioningDetails.findOne = original.provisioningFind;
+    AuditLog.create = original.auditCreate;
+    console.log = original.log;
+    env.runningEnrollmentSecretKey = original.secretKey;
+    env.runningEnrollmentLinkBase = original.linkBase;
+  }
+});
 
 test("missing enrollment mode keeps the owner-device contract", () => {
   assert.equal(getEnrollmentMode({}), ENROLLMENT_MODES.DEVICE_OWNER_QR);
@@ -311,6 +486,7 @@ test("running FCM carries its command type and reminder data while owner payload
 test("running temporary unlock ACK requires the overlay to clear and rejects an expired deadline", async () => {
   const originalFindDevice = Device.findById;
   const originalFindCommand = DeviceCommand.findOne;
+  const tempCommandId = new mongoose.Types.ObjectId().toString();
   const device = {
     _id: "running-device",
     enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
@@ -319,7 +495,7 @@ test("running temporary unlock ACK requires the overlay to clear and rejects an 
   };
   Device.findById = async () => device;
   DeviceCommand.findOne = async () => ({
-    _id: "temp-command",
+    _id: tempCommandId,
     commandType: "TEMP_UNLOCK",
     status: "pending",
     payload: { tempUnlockExpiresAt: device.tempUnlockExpiresAt }
@@ -334,7 +510,7 @@ test("running temporary unlock ACK requires the overlay to clear and rejects an 
     await acknowledgeDeviceCommand({
       runningDevice: device,
       auth: { id: "borrower" },
-      body: { commandId: "temp-command", status: "acknowledged" }
+      body: { commandId: tempCommandId, status: "acknowledged" }
     }, missingProof);
     assert.equal(missingProof.code, 400);
     assert.match(missingProof.body.error, /temporary unlock acknowledgement/);
@@ -344,7 +520,7 @@ test("running temporary unlock ACK requires the overlay to clear and rejects an 
     await acknowledgeDeviceCommand({
       runningDevice: device,
       auth: { id: "borrower" },
-      body: { commandId: "temp-command", status: "acknowledged", appRestrictionCleared: true, lockOverlayCleared: true }
+      body: { commandId: tempCommandId, status: "acknowledged", appRestrictionCleared: true, lockOverlayCleared: true }
     }, expired);
     assert.equal(expired.code, 409);
     assert.equal(expired.body.data.code, "COMMAND_EXPIRED");

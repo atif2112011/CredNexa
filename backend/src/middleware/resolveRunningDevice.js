@@ -5,9 +5,7 @@ import { sendError } from "../utils/apiResponse.js";
 
 const RUNNING_PRE_ACTIVATION_PATHS = new Set([
   "/consent/accept",
-  "/device/register",
-  "/integrity/challenge",
-  "/integrity/verify"
+  "/device/register"
 ]);
 
 /** Keep the existing borrower JWT convention while selecting the linked running device. */
