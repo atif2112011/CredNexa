@@ -6,6 +6,7 @@ import {
 } from "../constants/deviceStates.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { Device } from "../models/Device.js";
+import { assertRunningActionCapability } from "./runningDevicePolicy.service.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
 import { DevicePolicy } from "../models/DevicePolicy.js";
 import { IntegrityCheck } from "../models/IntegrityCheck.js";
@@ -609,6 +610,12 @@ export const enforceRiskAutoLock = async ({ device, riskFlag, eventType, severit
 
   if (device.state === DEVICE_STATES.LOCKED) {
     return { queued: false, reason: "DEVICE_ALREADY_LOCKED" };
+  }
+
+  try {
+    assertRunningActionCapability(device, "LOCK");
+  } catch (error) {
+    return { queued: false, reason: error.code || "CAPABILITY_UNAVAILABLE" };
   }
 
   const policy = await DevicePolicy.findOne({

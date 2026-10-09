@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ENROLLMENT_MODES } from "../constants/enrollmentModes.js";
 
 const renderedConsentSchema = new mongoose.Schema(
   {
@@ -64,6 +65,12 @@ const consentRecordSchema = new mongoose.Schema(
       email: String,
       verificationMethod: String
     },
+    enrollmentMode: {
+      type: String,
+      enum: Object.values(ENROLLMENT_MODES),
+      default: ENROLLMENT_MODES.DEVICE_OWNER_QR
+    },
+    locationConsentAccepted: { type: Boolean, default: false },
     renderedConsent: renderedConsentSchema,
     renderedConsentHash: String,
     payloadHash: {

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { ownerOnlyAdminDevice, ownerOnlyRiskFlag } from "../../middleware/requireOwnerEnrollment.js";
 
 import { ACCOUNT_ROLES } from "../../constants/roles.js";
 import { parseApkUpload } from "../../middleware/parseApkUpload.js";
@@ -65,6 +66,7 @@ import {
   rejectAdminEscalation,
   renewExpiringManualOverrideTokensForDevices,
   releaseAdminDevice,
+  sendAdminEmiReminder,
   revokeManualOverrideToken,
   sendCustomNotification,
   tempUnlockAdminEscalation,
@@ -84,6 +86,7 @@ import {
   updateAdminUnknownAppInstallsControl,
   updatePayoutConstants,
   updateTenant,
+  updateTenantRunningEnrollment,
   updateTenantCreditPurchaseDiscounts,
   updateTenantStatus,
   upsertProvisioningDetails,
@@ -144,6 +147,7 @@ adminRoutes.get("/tenants", listTenants);
 adminRoutes.post("/tenants", createTenant);
 adminRoutes.get("/tenants/:id", getTenantById);
 adminRoutes.patch("/tenants/:id", updateTenant);
+adminRoutes.patch("/tenants/:id/running-enrollment", updateTenantRunningEnrollment);
 adminRoutes.put("/tenants/:id/credit-purchase-discounts", updateTenantCreditPurchaseDiscounts);
 adminRoutes.patch("/tenants/:id/status", updateTenantStatus);
 // @legacy Backwards-compatible manual balance adjustment. Paid purchases use tenant-credit-purchases.
@@ -176,18 +180,19 @@ adminRoutes.post("/manual-override-tokens/renew-expiring", renewExpiringManualOv
 adminRoutes.get("/manual-override-tokens/:tokenId", getManualOverrideTokenById);
 adminRoutes.post("/manual-override-tokens/:tokenId/revoke", revokeManualOverrideToken);
 adminRoutes.get("/devices/:deviceId", getDeviceById);
-adminRoutes.post("/devices/:deviceId/manual-override-token", generateDeviceManualOverrideToken);
+adminRoutes.post("/devices/:deviceId/manual-override-token", ownerOnlyAdminDevice, generateDeviceManualOverrideToken);
 adminRoutes.get("/devices/:deviceId/manual-override-tokens", listDeviceManualOverrideTokens);
 adminRoutes.post("/devices/:deviceId/lock", lockAdminDevice);
 adminRoutes.post("/devices/:deviceId/temp-unlock", tempUnlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
-adminRoutes.post("/devices/:deviceId/unlock-waive", unlockAdminDeviceWithWaive);
+adminRoutes.post("/devices/:deviceId/unlock-waive", ownerOnlyAdminDevice, unlockAdminDeviceWithWaive);
 adminRoutes.post("/devices/:deviceId/release", releaseAdminDevice);
-adminRoutes.post("/devices/:deviceId/testing/:action", runAdminDeviceTestingAction);
-adminRoutes.patch("/devices/:deviceId/restrictions", updateAdminDeviceRestrictions);
-adminRoutes.patch("/devices/:deviceId/controls/factory-reset", updateAdminFactoryResetControl);
-adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", updateAdminUsbDebuggingControl);
-adminRoutes.patch("/devices/:deviceId/controls/unknown-app-installs", updateAdminUnknownAppInstallsControl);
+adminRoutes.post("/devices/:deviceId/emi-reminder", sendAdminEmiReminder);
+adminRoutes.post("/devices/:deviceId/testing/:action", ownerOnlyAdminDevice, runAdminDeviceTestingAction);
+adminRoutes.patch("/devices/:deviceId/restrictions", ownerOnlyAdminDevice, updateAdminDeviceRestrictions);
+adminRoutes.patch("/devices/:deviceId/controls/factory-reset", ownerOnlyAdminDevice, updateAdminFactoryResetControl);
+adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", ownerOnlyAdminDevice, updateAdminUsbDebuggingControl);
+adminRoutes.patch("/devices/:deviceId/controls/unknown-app-installs", ownerOnlyAdminDevice, updateAdminUnknownAppInstallsControl);
 adminRoutes.post("/devices/:deviceId/location-request", requestAdminDeviceLocation);
 adminRoutes.get("/devices/:deviceId/commands", getDeviceCommands);
 adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
@@ -195,10 +200,10 @@ adminRoutes.get("/devices/:deviceId/audit-logs", getDeviceAuditLogs);
 adminRoutes.get("/risk-flags", getAdminRiskFlags);
 adminRoutes.get("/risk-flags/:flagId", getAdminRiskFlagById);
 adminRoutes.patch("/risk-flags/:flagId/acknowledge", acknowledgeRiskFlag);
-adminRoutes.post("/risk-flags/:flagId/recheck", requestRiskFlagRecheck);
+adminRoutes.post("/risk-flags/:flagId/recheck", ownerOnlyRiskFlag, requestRiskFlagRecheck);
 adminRoutes.post("/risk-flags/:flagId/clear", clearRiskFlag);
-adminRoutes.post("/risk-flags/:flagId/app-update", queueRiskFlagAppUpdate);
-adminRoutes.post("/risk-flags/:flagId/wipe", queueRiskFlagWipe);
+adminRoutes.post("/risk-flags/:flagId/app-update", ownerOnlyRiskFlag, queueRiskFlagAppUpdate);
+adminRoutes.post("/risk-flags/:flagId/wipe", ownerOnlyRiskFlag, queueRiskFlagWipe);
 adminRoutes.get("/audit-logs", getAuditLogs);
 
 adminRoutes.get("/notifications/targets", listNotificationTargets);

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
 import { DEVICE_STATES } from "../constants/deviceStates.js";
+import { assertRunningCommandAllowed } from "../services/runningDevicePolicy.service.js";
 import { Device } from "./Device.js";
 
 export const DEVICE_COMMAND_FAILURE_SOURCES = Object.freeze({
@@ -102,7 +103,8 @@ const deviceCommandSchema = new mongoose.Schema(
 deviceCommandSchema.pre("validate", async function preventCommandsAfterRelease() {
   if (!this.isNew || this.commandType === "RELEASE_DEVICE") return;
 
-  const device = await Device.findById(this.deviceId).select("state").lean();
+  const device = await Device.findById(this.deviceId).select("state enrollmentMode").lean();
+  assertRunningCommandAllowed(device, this.commandType, this.payload);
   const isReleased = device?.state === DEVICE_STATES.RELEASED;
   const isReleasePending = device?.state === DEVICE_STATES.RELEASE_PENDING;
   const notificationAllowedWhilePending =

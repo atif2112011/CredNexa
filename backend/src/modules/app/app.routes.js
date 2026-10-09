@@ -1,7 +1,12 @@
 import { Router } from "express";
 
 import { verifyJwt } from "../../middleware/verifyJwt.js";
-import { otpRateLimiter } from "../../middleware/rateLimiters.js";
+import { otpRateLimiter, runningEnrollmentRateLimiter } from "../../middleware/rateLimiters.js";
+import { resolveRunningDevice } from "../../middleware/resolveRunningDevice.js";
+import {
+  previewRunningEnrollment,
+  reportRunningCapabilities
+} from "./runningEnrollment.controller.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
 import { parsePaymentProofUpload, parseUnlockRequestImageUpload } from "../../middleware/parsePaymentProofUpload.js";
 import {
@@ -49,6 +54,9 @@ appRoutes.post("/consent/terms", getConsentTerms);
 appRoutes.post("/consent/initiate", otpRateLimiter, initiateConsentOtp);
 appRoutes.post("/consent/resend-otp", otpRateLimiter, resendConsentOtp);
 appRoutes.post("/consent/verify-otp", otpRateLimiter, verifyConsentOtp);
+appRoutes.post("/running-enrollment/preview", runningEnrollmentRateLimiter, previewRunningEnrollment);
+// Both APKs use the existing borrower JWT. Running calls resolve the saved linked device.
+appRoutes.use(verifyJwt, requireTokenType("user"), resolveRunningDevice);
 appRoutes.post("/integrity/challenge", verifyJwt, requireTokenType("user"), createIntegrityChallenge);
 appRoutes.post("/integrity/verify", verifyJwt, requireTokenType("user"), verifyIntegrity);
 appRoutes.post("/integrity/risk/challenge", verifyJwt, requireTokenType("user"), createRiskIntegrityChallenge);
@@ -56,6 +64,7 @@ appRoutes.post("/integrity/risk/verify", verifyJwt, requireTokenType("user"), ve
 appRoutes.post("/consent/accept", verifyJwt, requireTokenType("user"), acceptConsent);
 
 appRoutes.post("/device/register", verifyJwt, requireTokenType("user"), registerDevice);
+appRoutes.post("/device/capabilities", reportRunningCapabilities);
 appRoutes.get("/device/policy", verifyJwt, requireTokenType("user"), getDevicePolicy);
 appRoutes.post("/device/ping", verifyJwt, requireTokenType("user"), pingDevice);
 appRoutes.post("/device/sync", verifyJwt, requireTokenType("user"), syncDevice);

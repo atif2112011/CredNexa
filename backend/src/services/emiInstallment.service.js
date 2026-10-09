@@ -15,7 +15,7 @@ const getInstallmentOutstanding = (installment) => {
 };
 
 export const shouldUnlockDeviceAfterInstallmentPayment = ({ deviceState, newlySettled }) =>
-  deviceState === DEVICE_STATES.LOCKED && !newlySettled;
+  [DEVICE_STATES.LOCKED, DEVICE_STATES.TEMP_UNLOCK].includes(deviceState) && !newlySettled;
 
 export const markEmiInstallmentPaid = ({
   schedule,

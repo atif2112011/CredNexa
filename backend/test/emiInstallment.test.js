@@ -114,10 +114,17 @@ test("rejects missing and terminal installments", () => {
   );
 });
 
-test("unlocks only a locked device when the installment payment does not settle the schedule", () => {
+test("payment fully unlocks a locked or temporarily unlocked device until final settlement", () => {
   assert.equal(
     shouldUnlockDeviceAfterInstallmentPayment({
       deviceState: DEVICE_STATES.LOCKED,
+      newlySettled: false
+    }),
+    true
+  );
+  assert.equal(
+    shouldUnlockDeviceAfterInstallmentPayment({
+      deviceState: DEVICE_STATES.TEMP_UNLOCK,
       newlySettled: false
     }),
     true

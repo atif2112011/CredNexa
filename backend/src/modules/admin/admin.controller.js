@@ -3,6 +3,7 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
+import { ENROLLMENT_MODES, getEnrollmentMode, isRunningDevice } from "../../constants/enrollmentModes.js";
 import { DEFAULT_DEVICE_POLICIES, DEFAULT_TENANT_POLICY } from "../../constants/defaultPolicies.js";
 import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
 import {
@@ -43,6 +44,19 @@ import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
 import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
+import {
+  assertRunningActionCapability,
+  assertRunningCommandAllowed,
+  formatControlResult,
+  formatDeviceReference,
+  getRunningAllowedActions
+} from "../../services/runningDevicePolicy.service.js";
+import { assertRunningEnrollmentConfigured } from "../../services/runningEnrollment.service.js";
+import {
+  EMI_REMINDER_TYPES,
+  findUpcomingEmiInstallment,
+  queueEmiReminder
+} from "../../services/emiReminder.service.js";
 import {
   BORROWER_ANDROID_PACKAGE_NAME,
   publishBuild,
@@ -462,6 +476,11 @@ const applyEscalationDeviceCommand = async ({
   durationHours,
   session
 }) => {
+  const currentDevice = await Device.findById(unlockRequest.deviceId).session(session);
+  if (!currentDevice) throw Object.assign(new Error("Device not found"), { statusCode: 404 });
+  assertRunningCommandAllowed(currentDevice, commandType);
+  assertRunningActionCapability(currentDevice, commandType);
+  const tempUnlockExpiresAt = durationHours ? new Date(Date.now() + durationHours * 60 * 60 * 1000) : null;
   const deviceUpdate = {
     $set: {
       state: targetState,
@@ -473,7 +492,9 @@ const applyEscalationDeviceCommand = async ({
   };
 
   if (durationHours) {
-    deviceUpdate.$set.tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+    deviceUpdate.$set.tempUnlockExpiresAt = tempUnlockExpiresAt;
+  } else {
+    deviceUpdate.$unset = { tempUnlockExpiresAt: "" };
   }
 
   const device = await Device.findByIdAndUpdate(unlockRequest.deviceId, deviceUpdate, {
@@ -493,7 +514,8 @@ const applyEscalationDeviceCommand = async ({
           reason,
           policyKey,
           desiredPolicyVersion: device?.desiredPolicyVersion,
-          durationHours
+          durationHours,
+          ...(tempUnlockExpiresAt ? { tempUnlockExpiresAt } : {})
         }
       }
     ],
@@ -514,6 +536,9 @@ const queueAdminDeviceCommand = async ({
   extraPayload = {},
   session
 }) => {
+  assertRunningCommandAllowed(device, commandType, extraPayload);
+  assertRunningActionCapability(device, commandType);
+  const tempUnlockExpiresAt = durationHours ? new Date(Date.now() + durationHours * 60 * 60 * 1000) : null;
   const activePolicy = await DevicePolicy.findOne({
     tenantId: device.tenantId,
     policyKey,
@@ -537,7 +562,7 @@ const queueAdminDeviceCommand = async ({
   };
 
   if (durationHours) {
-    deviceUpdate.$set.tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+    deviceUpdate.$set.tempUnlockExpiresAt = tempUnlockExpiresAt;
   } else {
     deviceUpdate.$unset = { tempUnlockExpiresAt: "" };
   }
@@ -558,6 +583,7 @@ const queueAdminDeviceCommand = async ({
         payload: {
           reason,
           durationHours,
+          ...(tempUnlockExpiresAt ? { tempUnlockExpiresAt } : {}),
           policyKey,
           policyVersion: nextPolicyVersion,
           ...extraPayload
@@ -680,7 +706,7 @@ export const getAdminDashboard = async (req, res) => {
       UnlockRequest.find({ status: { $in: openCaseStatuses } })
         .populate("tenantId", "name")
         .populate("channelPartnerId", "name")
-        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
         .populate("userId", "name mobile loanId")
         .sort({ updatedAt: -1 })
         .limit(8)
@@ -708,7 +734,10 @@ export const getAdminDashboard = async (req, res) => {
       escalationsByStatus: toCountMap(escalationsByStatus),
       riskFlagsByStatus: toCountMap(riskFlagsByStatus),
       riskFlagsBySeverity: toCountMap(riskFlagsBySeverity),
-      recentEscalations,
+      recentEscalations: recentEscalations.map((item) => ({
+        ...item,
+        deviceId: formatDeviceReference(item.deviceId)
+      })),
       recentRiskFlags,
       recentAuditLogs
     });
@@ -2099,6 +2128,54 @@ export const listTenantCreditDiscountChangeRequests = async (req, res) => {
   }
 };
 
+/** Enable running enrollment for one tenant only after server keys, app link and terms exist. */
+export const updateTenantRunningEnrollment = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id) || typeof req.body.enabled !== "boolean") {
+      return sendError(res, 400, "Valid tenant ID and enabled boolean are required");
+    }
+    if (req.body.locationEnabled !== undefined && typeof req.body.locationEnabled !== "boolean") {
+      return sendError(res, 400, "locationEnabled must be a boolean");
+    }
+    const tenant = await Tenant.findById(req.params.id).lean();
+    if (!tenant) return sendError(res, 404, "Tenant not found");
+    if (req.body.enabled) {
+      try {
+        assertRunningEnrollmentConfigured();
+      } catch (error) {
+        return sendError(res, 409, error.message, { code: "RUNNING_ENROLLMENT_NOT_CONFIGURED" });
+      }
+      const terms = await ConsentVersion.findOne({
+        enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
+        isCurrent: true
+      }).lean();
+      if (!terms) return sendError(res, 409, "Publish running-app consent before enabling enrollment");
+    }
+    const policy = await TenantPolicy.findOneAndUpdate(
+      { tenantId: tenant._id },
+      { $set: {
+        runningEnrollmentEnabled: req.body.enabled,
+        ...(req.body.locationEnabled === undefined ? {} : { runningLocationEnabled: req.body.locationEnabled }),
+        updatedBy: req.auth.id
+      } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.TENANT_UPDATED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      metadata: { runningEnrollmentEnabled: req.body.enabled, runningLocationEnabled: policy.runningLocationEnabled }
+    });
+    return sendSuccess(res, 200, "Running enrollment setting updated", {
+      tenantId: tenant._id,
+      runningEnrollmentEnabled: policy.runningEnrollmentEnabled,
+      runningLocationEnabled: policy.runningLocationEnabled
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
 /** Fetch one partner-submitted tenant discount change request. */
 export const getTenantCreditDiscountChangeRequestById = async (req, res) => {
   try {
@@ -3402,6 +3479,14 @@ export const listConsentVersions = async (req, res) => {
 
     if (req.query.status === "current") filter.isCurrent = true;
     if (req.query.status === "draft") filter.isCurrent = false;
+    if (req.query.enrollmentMode) {
+      if (!Object.values(ENROLLMENT_MODES).includes(req.query.enrollmentMode)) {
+        return sendError(res, 400, "Invalid enrollmentMode filter");
+      }
+      filter.enrollmentMode = req.query.enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] };
+    }
 
     const [items, total] = await Promise.all([
       ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
@@ -3434,6 +3519,9 @@ export const createConsentVersion = async (req, res) => {
     if (!hasRequiredFields(req.body, requiredFields)) {
       return sendError(res, 400, "Version, title, borrowerAgreementText, deviceControlConsentText, and privacyPolicyText are required");
     }
+    if (req.body.enrollmentMode !== undefined && !Object.values(ENROLLMENT_MODES).includes(req.body.enrollmentMode)) {
+      return sendError(res, 400, "Invalid enrollmentMode");
+    }
 
     const existingVersion = await ConsentVersion.findOne({ version: req.body.version });
 
@@ -3441,7 +3529,13 @@ export const createConsentVersion = async (req, res) => {
       return sendError(res, 400, "Consent version already exists");
     }
 
-    const consentVersion = await ConsentVersion.create(req.body);
+    const consentVersion = await ConsentVersion.create({
+      ...req.body,
+      enrollmentMode: req.body.enrollmentMode || ENROLLMENT_MODES.DEVICE_OWNER_QR,
+      isCurrent: false,
+      publishedAt: undefined,
+      publishedBy: undefined
+    });
 
     await createAuditLog({
       eventType: AUDIT_EVENTS.CONSENT_VERSION_CREATED,
@@ -3484,6 +3578,9 @@ export const updateConsentVersion = async (req, res) => {
 
     if (consentVersion.isCurrent || consentVersion.publishedAt) {
       return sendError(res, 409, "Published consent versions cannot be edited. Duplicate this consent to create a new version.");
+    }
+    if (req.body.enrollmentMode !== undefined && req.body.enrollmentMode !== getEnrollmentMode(consentVersion)) {
+      return sendError(res, 409, "Consent enrollment mode cannot be changed");
     }
 
     const duplicateVersion = await ConsentVersion.findOne({
@@ -3565,7 +3662,16 @@ export const publishConsentVersion = async (req, res) => {
 
     session.startTransaction();
 
-    await ConsentVersion.updateMany({}, { isCurrent: false }, { session });
+    const mode = getEnrollmentMode(consentVersion);
+    await ConsentVersion.updateMany(
+      {
+        enrollmentMode: mode === ENROLLMENT_MODES.RUNNING_APP
+          ? ENROLLMENT_MODES.RUNNING_APP
+          : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] }
+      },
+      { isCurrent: false },
+      { session }
+    );
     consentVersion.isCurrent = true;
     consentVersion.publishedAt = new Date();
     consentVersion.publishedBy = req.auth.id;
@@ -3613,7 +3719,7 @@ export const listAdminEscalations = async (req, res) => {
     const [items, total] = await Promise.all([
       UnlockRequest.find(filter)
         .populate("userId", "name mobile")
-        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
         .populate("tenantId", "name")
         .populate("channelPartnerId", "name")
         .skip(skip)
@@ -3624,7 +3730,7 @@ export const listAdminEscalations = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Escalations fetched successfully", {
-      items,
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -3655,7 +3761,7 @@ export const getAdminEscalationByCaseId = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Escalation fetched successfully", {
-      unlockRequest,
+      unlockRequest: { ...unlockRequest, deviceId: formatDeviceReference(unlockRequest.deviceId) },
       commands,
       auditLogs
     });
@@ -3759,7 +3865,7 @@ export const unlockAdminEscalation = async (req, res) => {
 
     return sendSuccess(res, 200, "Admin unlock override queued successfully", {
       unlockRequest,
-      device,
+      device: formatDeviceReference(device.toObject?.() || device),
       command
     });
   } catch (error) {
@@ -3849,7 +3955,7 @@ export const tempUnlockAdminEscalation = async (req, res) => {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -3913,6 +4019,14 @@ export const listDevices = async (req, res) => {
     if (req.query.imei) filter.imei = req.query.imei;
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
     if (req.query.state) filter.state = req.query.state;
+    if (req.query.enrollmentMode) {
+      if (!Object.values(ENROLLMENT_MODES).includes(req.query.enrollmentMode)) {
+        return sendError(res, 400, "Invalid enrollmentMode filter");
+      }
+      filter.enrollmentMode = req.query.enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] };
+    }
 
     if (req.query.mobile) {
       const users = await User.find({ mobile: buildRegex(req.query.mobile) }).select("_id").lean();
@@ -3929,9 +4043,30 @@ export const listDevices = async (req, res) => {
         .lean(),
       Device.countDocuments(filter)
     ]);
+    const runningTenantIds = [...new Set(items.filter(isRunningDevice).map((device) =>
+      String(device.tenantId?._id || device.tenantId)))];
+    const runningPolicies = runningTenantIds.length
+      ? await TenantPolicy.find({ tenantId: { $in: runningTenantIds } })
+        .select("tenantId runningEnrollmentEnabled runningLocationEnabled").lean()
+      : [];
+    const locationByTenant = new Map(runningPolicies.map((policy) => [
+      String(policy.tenantId),
+      policy.runningLocationEnabled === true
+    ]));
 
     return sendSuccess(res, 200, "Devices fetched successfully", {
-      items,
+      items: items.map((device) => isRunningDevice(device)
+        ? {
+            ...device,
+            imei: `***********${device.imei.slice(-4)}`,
+            imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null,
+            activationIdempotencyKey: undefined,
+            fcmToken: undefined,
+            allowedActions: getRunningAllowedActions(device, {
+              locationEnabled: locationByTenant.get(String(device.tenantId?._id || device.tenantId)) === true
+            })
+          }
+        : { ...device, enrollmentMode: getEnrollmentMode(device) }),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -3960,7 +4095,7 @@ export const getDeviceById = async (req, res) => {
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
     device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
 
-    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands] = await Promise.all([
+    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands, tenantPolicy] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
@@ -3980,16 +4115,33 @@ export const getDeviceById = async (req, res) => {
             commandType
           }).sort({ createdAt: -1 }).lean()
         )
-      )
+      ),
+      isRunningDevice(device)
+        ? TenantPolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId })
+          .select("runningEnrollmentEnabled runningLocationEnabled").lean()
+        : null
     ]);
     const release = getDeviceReleaseSummary({
       schedule: emiSchedule,
       device,
       latestReleaseCommand
     });
+    const responseDevice = isRunningDevice(device)
+      ? {
+          ...device,
+          imei: `***********${device.imei.slice(-4)}`,
+          imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null,
+          activationIdempotencyKey: undefined,
+          fcmToken: undefined,
+          allowedActions: getRunningAllowedActions(device, {
+            releaseEligible: release.canQueue,
+            locationEnabled: tenantPolicy?.runningLocationEnabled === true
+          })
+        }
+      : { ...device, enrollmentMode: getEnrollmentMode(device) };
 
     return sendSuccess(res, 200, "Device fetched successfully", {
-      device,
+      device: responseDevice,
       policy,
       commands,
       latestSecurityControlCommands: formatLatestSecurityControlCommands(
@@ -4072,12 +4224,65 @@ export const releaseAdminDevice = async (req, res) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device release queued successfully", result);
+    return sendSuccess(res, 200, "Device release queued successfully", formatControlResult(result));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
   } finally {
     session.endSession();
+  }
+};
+
+/** Normal admin EMI reminder: choose the financial event, never a client-selected kiosk payload. */
+export const sendAdminEmiReminder = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.deviceId) || ![EMI_REMINDER_TYPES.OVERDUE, EMI_REMINDER_TYPES.UPCOMING].includes(req.body.reminderType) ||
+      !String(req.body.reason || "").trim()) {
+      return sendError(res, 400, "Valid device ID, reminderType and reason are required");
+    }
+    const device = await Device.findById(req.params.deviceId).lean();
+    if (!device) return sendError(res, 404, "Device not found");
+    assertRunningCommandAllowed(device, "EMI_REMINDER");
+    assertRunningActionCapability(device, "EMI_REMINDER");
+    const schedule = await EmiSchedule.findOne({ userId: device.userId, tenantId: device.tenantId }).lean();
+    if (!schedule) return sendError(res, 404, "EMI schedule not found");
+    const now = new Date();
+    const installment = req.body.reminderType === EMI_REMINDER_TYPES.UPCOMING
+      ? findUpcomingEmiInstallment({ schedule, now, windowDays: 30 })
+      : schedule.installments
+          .filter((item) => ["overdue", "partial"].includes(item.status) && new Date(item.dueDate) < now)
+          .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
+    if (!installment) return sendError(res, 409, "Matching EMI installment not found");
+    const amount = Math.max(Number(installment.emiAmount || 0) + Number(installment.penaltyAmount || 0) - Number(installment.paidAmount || 0), 0);
+    const result = await queueEmiReminder({
+      device,
+      tenantId: device.tenantId,
+      triggeredBy: "super_admin",
+      triggeredByAccountId: req.auth.id,
+      payload: {
+        reminderType: req.body.reminderType,
+        amount,
+        dueDate: installment.dueDate,
+        installmentNumber: installment.installmentNumber,
+        totalInstallments: schedule.installments.length
+      }
+    });
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_COMMAND_CREATED,
+      actorId: req.auth.id,
+      tenantId: device.tenantId,
+      userId: device.userId,
+      deviceId: device._id,
+      reason: req.body.reason.trim(),
+      metadata: { commandId: result.command._id, reminderType: req.body.reminderType, installmentId: installment._id }
+    });
+    return sendSuccess(res, result.created ? 201 : 200, "EMI reminder queued", {
+      commandId: result.command._id,
+      created: result.created,
+      reminderType: req.body.reminderType
+    });
+  } catch (error) {
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   }
 };
 
@@ -4386,10 +4591,10 @@ export const lockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Device lock queued successfully", result);
+    return sendSuccess(res, 200, "Device lock queued successfully", formatControlResult(result));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -4460,7 +4665,7 @@ export const tempUnlockAdminDevice = async (req, res) => {
     });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -4519,13 +4724,13 @@ export const unlockAdminDevice = async (req, res) => {
     await session.commitTransaction();
 
     return sendSuccess(res, 200, "Device unlock queued successfully", {
-      ...result,
+      ...formatControlResult(result),
       riskWarning: riskWarningPayload.riskWarning,
       activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
     });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -5145,7 +5350,7 @@ export const getAdminRiskFlags = async (req, res) => {
     const [items, total] = await Promise.all([
       RiskFlag.find(filter)
         .populate("tenantId", "name")
-        .populate("deviceId", "imei deviceModel manufacturer state deviceSecurityState")
+        .populate("deviceId", "imei deviceModel manufacturer state deviceSecurityState enrollmentMode")
         .populate("userId", "name mobile loanId")
         .populate("acknowledgedBy", "name email role")
         .populate("clearedBy", "name email role")
@@ -5157,7 +5362,7 @@ export const getAdminRiskFlags = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Risk flags fetched successfully", {
-      items,
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -5173,7 +5378,7 @@ export const getAdminRiskFlagById = async (req, res) => {
 
     const riskFlag = await RiskFlag.findById(req.params.flagId)
       .populate("tenantId", "name supportPhone supportEmail")
-      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey deviceSecurityState lastIntegrityCheckAt lastCleanIntegrityAt lastRiskAt")
+      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey deviceSecurityState lastIntegrityCheckAt lastCleanIntegrityAt lastRiskAt enrollmentMode")
       .populate("userId", "name mobile email loanId")
       .populate("acknowledgedBy", "name email role")
       .populate("clearedBy", "name email role")
@@ -5203,7 +5408,7 @@ export const getAdminRiskFlagById = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Risk flag fetched successfully", {
-      riskFlag,
+      riskFlag: { ...riskFlag, deviceId: formatDeviceReference(riskFlag.deviceId) },
       integrityChecks,
       commands,
       auditLogs,

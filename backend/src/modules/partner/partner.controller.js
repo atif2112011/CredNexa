@@ -38,6 +38,7 @@ import {
 } from "../../services/partnerTenantOnboarding.service.js";
 import { buildEmptyTenantMetrics, safeRefreshTenantMetrics } from "../../services/tenantMetrics.service.js";
 import { isValidDeviceControlMode } from "../../services/tenantDeviceControl.service.js";
+import { assertRunningActionCapability, assertRunningCommandAllowed } from "../../services/runningDevicePolicy.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import {
   getOrCreatePayoutConstants,
@@ -495,6 +496,11 @@ const applyPartnerEscalationCommand = async ({
   durationHours,
   session
 }) => {
+  const currentDevice = await Device.findById(unlockRequest.deviceId).session(session);
+  if (!currentDevice) throw Object.assign(new Error("Device not found"), { statusCode: 404 });
+  assertRunningCommandAllowed(currentDevice, commandType);
+  assertRunningActionCapability(currentDevice, commandType);
+  const tempUnlockExpiresAt = durationHours ? new Date(Date.now() + durationHours * 60 * 60 * 1000) : null;
   const deviceUpdate = {
     $set: {
       state: targetState,
@@ -506,7 +512,9 @@ const applyPartnerEscalationCommand = async ({
   };
 
   if (durationHours) {
-    deviceUpdate.$set.tempUnlockExpiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000);
+    deviceUpdate.$set.tempUnlockExpiresAt = tempUnlockExpiresAt;
+  } else {
+    deviceUpdate.$unset = { tempUnlockExpiresAt: "" };
   }
 
   const device = await Device.findByIdAndUpdate(unlockRequest.deviceId, deviceUpdate, {
@@ -526,7 +534,8 @@ const applyPartnerEscalationCommand = async ({
           note,
           policyKey,
           desiredPolicyVersion: device?.desiredPolicyVersion,
-          durationHours
+          durationHours,
+          ...(tempUnlockExpiresAt ? { tempUnlockExpiresAt } : {})
         }
       }
     ],
@@ -2016,7 +2025,7 @@ export const tempUnlockPartnerEscalation = async (req, res) => {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }

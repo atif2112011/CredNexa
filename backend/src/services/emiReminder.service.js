@@ -1,4 +1,6 @@
 import { isDeviceReleaseState } from "../constants/deviceStates.js";
+import { isRunningDevice } from "../constants/enrollmentModes.js";
+import { assertRunningActionCapability } from "./runningDevicePolicy.service.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
 import { safeQueueUpcomingEmiNotification } from "../utils/appNotifications.js";
 
@@ -79,10 +81,13 @@ export const queueEmiReminder = async ({
     error.statusCode = 409;
     throw error;
   }
+  assertRunningActionCapability(device, EMI_REMINDER_COMMAND_TYPE);
 
   const normalizedPayload = buildEmiReminderPayload(payload);
   const queueVisibleUpcomingNotification = (command) => {
     if (normalizedPayload.reminderType !== EMI_REMINDER_TYPES.UPCOMING) return null;
+    // The running app presents the reminder itself and posts one fallback notification if needed.
+    if (isRunningDevice(device)) return { command: null, created: false };
 
     return safeQueueUpcomingEmiNotification({
       deviceId: device._id,

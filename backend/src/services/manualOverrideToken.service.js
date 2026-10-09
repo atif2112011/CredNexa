@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 
 import { AUDIT_EVENTS } from "../constants/auditEvents.js";
+import { ENROLLMENT_MODES, isRunningDevice } from "../constants/enrollmentModes.js";
 import { env } from "../config/env.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { Device } from "../models/Device.js";
@@ -12,6 +13,7 @@ import {
   ManualOverrideToken
 } from "../models/ManualOverrideToken.js";
 import { Tenant } from "../models/Tenant.js";
+import { runningModeError } from "./runningDevicePolicy.service.js";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -39,7 +41,6 @@ const normalizePem = (value) => {
 
 const getManualOverrideSigningKey = () => {
   try {
-     console.log("Key in getManualOverrideSigningKey",normalizePem(env.manualOverridePrivateKey))
     const key = crypto.createPrivateKey({
       key: normalizePem(env.manualOverridePrivateKey),
       format: "pem"
@@ -124,6 +125,7 @@ export const hasValidManualOverrideToken = async (deviceId, options = {}) => {
 };
 
 export const generateManualOverrideTokenForDevice = async (device, options = {}) => {
+  if (isRunningDevice(device)) throw runningModeError();
   const now = options.now || new Date();
   const { issuedAt, expiresAt } = getTokenWindow({ now, validityDays: options.validityDays });
   const tokenId = options.tokenId || `mot_${crypto.randomUUID()}`;
@@ -249,7 +251,7 @@ export const recordManualOverrideTokenUsage = async ({ tokenId, device, deviceEv
 };
 
 const buildDeviceQuery = (filters = {}) => {
-  const query = {};
+  const query = { enrollmentMode: { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] } };
   if (filters.deviceId) query._id = filters.deviceId;
   if (filters.tenantId) query.tenantId = filters.tenantId;
   return query;

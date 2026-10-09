@@ -77,3 +77,12 @@ export const otpRateLimiter = rateLimit({
   message: "Too many OTP requests. Please try again later.",
   handler: createRateLimitHandler("Too many OTP requests. Please try again later.")
 });
+
+export const runningEnrollmentRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  keyGenerator: (req) => ipKeyGenerator(resolveRateLimitClientIp(req)),
+  handler: createRateLimitHandler("Too many enrollment requests. Please try again later.")
+});

@@ -1,5 +1,8 @@
 import { DEVICE_STATES } from "../constants/deviceStates.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
+import { TenantPolicy } from "../models/TenantPolicy.js";
+import { isRunningDevice } from "../constants/enrollmentModes.js";
+import { assertRunningActionCapability } from "./runningDevicePolicy.service.js";
 
 export const GET_LOCATION_COMMAND_TYPE = "GET_LOCATION";
 const ACTIVE_COMMAND_STATUSES = ["pending", "sent"];
@@ -23,6 +26,17 @@ export const queueGetLocationCommand = async ({
     const error = new Error("Location cannot be requested after device release begins");
     error.statusCode = 409;
     throw error;
+  }
+
+  if (isRunningDevice(device)) {
+    // Running installations can lose location permission after enrollment; check each request.
+    const tenantPolicy = await TenantPolicy.findOne({ tenantId: device.tenantId })
+      .select("runningEnrollmentEnabled runningLocationEnabled")
+      .session(session || null)
+      .lean();
+    assertRunningActionCapability(device, GET_LOCATION_COMMAND_TYPE, {
+      locationEnabled: tenantPolicy?.runningLocationEnabled === true
+    });
   }
 
   await DeviceCommand.updateMany(buildActiveLocationCommandFilter(device._id), {

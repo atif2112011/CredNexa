@@ -8,6 +8,7 @@ import {
 } from "../constants/deviceStates.js";
 import { AuditLog } from "../models/AuditLog.js";
 import { Device } from "../models/Device.js";
+import { assertRunningActionCapability, getRunningAllowedActions } from "../services/runningDevicePolicy.service.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
 import { DevicePolicy } from "../models/DevicePolicy.js";
 import { EmiSchedule } from "../models/EmiSchedule.js";
@@ -287,14 +288,28 @@ export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.temp
 
     if (!policy) continue;
 
-    const nextPolicyVersion = Number(device.desiredPolicyVersion || 0) + 1;
-    device.state = DEVICE_STATES.LOCKED;
-    device.currentPolicyKey = DEVICE_POLICY_KEYS.EMI_LOCKED;
-    device.currentPolicyId = policy._id;
-    device.desiredPolicyVersion = nextPolicyVersion;
-    device.stateUpdatedAt = now;
-    device.tempUnlockExpiresAt = undefined;
-    await device.save();
+    // Recheck the state atomically: payment or a full unlock may have superseded this expiry.
+    const updatedDevice = await Device.findOneAndUpdate(
+      { _id: device._id, state: DEVICE_STATES.TEMP_UNLOCK, tempUnlockExpiresAt: { $lte: now } },
+      {
+        $set: {
+          state: DEVICE_STATES.LOCKED,
+          currentPolicyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
+          currentPolicyId: policy._id,
+          stateUpdatedAt: now
+        },
+        $unset: { tempUnlockExpiresAt: "" },
+        $inc: { desiredPolicyVersion: 1 }
+      },
+      { new: true }
+    );
+    if (!updatedDevice) continue;
+
+    // A late temporary-unlock delivery must not clear an overlay after its relock deadline.
+    await DeviceCommand.updateMany(
+      { deviceId: device._id, commandType: "TEMP_UNLOCK", status: { $in: ["pending", "sent"] } },
+      { $set: { status: "expired", failureReason: "Temporary unlock expired" }, $unset: { nextRetryAt: "" } }
+    );
 
     const command = await DeviceCommand.create({
       deviceId: device._id,
@@ -303,7 +318,7 @@ export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.temp
       triggeredBy: "temp_unlock_expiry",
       payload: {
         policyKey: DEVICE_POLICY_KEYS.EMI_LOCKED,
-        policyVersion: nextPolicyVersion,
+        policyVersion: updatedDevice.desiredPolicyVersion,
         reason: "Temporary unlock expired"
       }
     });
@@ -349,27 +364,33 @@ export const runEmiPolicyJob = async ({
   const reminderDays = Object.keys(EMI_CRON_CONFIG.upcomingPaymentNotifications).map(Number);
   const maxReminderDays = Math.max(...reminderDays);
   const queryDueDate = addDays(now, maxReminderDays);
-  const schedules = await EmiSchedule.find({
-    ...(scheduleId ? { _id: scheduleId } : {}),
-    status: { $ne: "settled" },
-    installments: {
-      $elemMatch: {
-        status: { $in: ["pending", "overdue", "partial"] },
-        dueDate: { $lte: queryDueDate }
-      }
-    }
-  }).limit(limit);
-
   const result = {
-    scannedSchedules: schedules.length,
+    scannedSchedules: 0,
     remindersQueued: [],
     gracePolicyCommandsQueued: [],
     graceRemindersQueued: [],
     devicesLocked: [],
     skippedManualTenants: [],
     skippedTempUnlock: [],
-    skippedAlreadyLocked: []
+    skippedAlreadyLocked: [],
+    skippedCapability: []
   };
+
+  let cursor = null;
+  do {
+    const schedules = await EmiSchedule.find({
+      ...(scheduleId ? { _id: scheduleId } : cursor ? { _id: { $gt: cursor } } : {}),
+      status: { $ne: "settled" },
+      installments: {
+        $elemMatch: {
+          status: { $in: ["pending", "overdue", "partial"] },
+          dueDate: { $lte: queryDueDate }
+        }
+      }
+    }).sort({ _id: 1 }).limit(limit);
+    if (!schedules.length) break;
+    cursor = schedules[schedules.length - 1]._id;
+    result.scannedSchedules += schedules.length;
 
   for (const schedule of schedules) {
     const [tenantPolicy, device] = await Promise.all([
@@ -377,9 +398,28 @@ export const runEmiPolicyJob = async ({
       Device.findOne({ userId: schedule.userId, tenantId: schedule.tenantId })
     ]);
 
-    if (!device) continue;
+    if (!device) {
+      // Financial arrears belong to the loan even before a running app finishes enrollment.
+      let changed = false;
+      for (const installment of schedule.installments) {
+        if (installment.status === "pending" && new Date(installment.dueDate) < startOfUtcDay(now)) {
+          installment.status = "overdue";
+          changed = true;
+        }
+      }
+      const overdue = schedule.installments.filter((item) => ["overdue", "partial"].includes(item.status));
+      schedule.overdueInstallments = overdue.length;
+      schedule.overdueAmount = overdue.reduce((sum, item) => sum + getInstallmentOutstanding(item), 0);
+      schedule.dpd = overdue.reduce((maximum, item) => Math.max(
+        maximum,
+        Math.max(Math.floor((startOfUtcDay(now) - startOfUtcDay(item.dueDate)) / DAY_IN_MS), 0)
+      ), 0);
+      if (changed || schedule.isModified()) await schedule.save();
+      continue;
+    }
 
     const lockRules = tenantPolicy?.lockRules || {};
+    const reminderAllowed = getRunningAllowedActions(device)?.reminder.enabled !== false;
     const manualDeviceControl = isManualDeviceControl(tenantPolicy);
     const dpd = Number(lockRules.dpd ?? 30);
     const gracePeriodDays = Number(lockRules.gracePeriodDays ?? 7);
@@ -395,7 +435,7 @@ export const runEmiPolicyJob = async ({
       const daysUntilDue = getDaysUntilDue(installment.dueDate, now);
       const notificationConfig = EMI_CRON_CONFIG.upcomingPaymentNotifications[daysUntilDue];
 
-      if (notificationConfig && !isDeviceReleaseState(device.state)) {
+      if (notificationConfig && reminderAllowed && !isDeviceReleaseState(device.state)) {
         const existingReminder = await DeviceCommand.findOne({
           deviceId: device._id,
           commandType: EMI_REMINDER_COMMAND_TYPE,
@@ -550,7 +590,7 @@ export const runEmiPolicyJob = async ({
           !lastGraceReminder ||
           new Date(lastGraceReminder.sentAt).getTime() <= now.getTime() - EMI_CRON_CONFIG.graceReminderIntervalMs;
 
-        if (reminderDue && !isDeviceReleaseState(activeDevice.state)) {
+        if (reminderDue && reminderAllowed && !isDeviceReleaseState(activeDevice.state)) {
           const { command: reminderCommand, created } = await queueEmiReminder({
             device: activeDevice,
             tenantId: activeDevice.tenantId,
@@ -603,6 +643,12 @@ export const runEmiPolicyJob = async ({
     }
 
     if (!lockOnGraceExpiry) continue;
+    try {
+      assertRunningActionCapability(device, "LOCK");
+    } catch (error) {
+      result.skippedCapability.push({ deviceId: device._id, reason: error.code });
+      continue;
+    }
     if (device.state === DEVICE_STATES.LOCKED) {
       result.skippedAlreadyLocked.push(device._id);
       continue;
@@ -703,6 +749,8 @@ export const runEmiPolicyJob = async ({
       installmentId: lockableInstallment._id
     });
   }
+
+  } while (!scheduleId);
 
   return result;
 };

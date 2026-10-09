@@ -103,6 +103,7 @@ export function DeviceSecurityControlsPanel({
   const [commands, setCommands] = useState(incomingCommands);
   const [updatingKey, setUpdatingKey] = useState<ControlKey | null>(null);
   const released = ["RELEASE_PENDING", "RELEASED"].includes(String(device.state || ""));
+  const runningDevice = device.enrollmentMode === "RUNNING_APP";
 
   useEffect(() => {
     setControlState(incomingState);
@@ -110,6 +111,8 @@ export function DeviceSecurityControlsPanel({
   }, [incomingCommands, incomingState]);
 
   async function updateControl(key: ControlKey, blocked: boolean, retry = false) {
+    // These restrictions require owner-level policy; a running app's Device Admin grant is insufficient.
+    if (runningDevice || released) return;
     const option = controlOptions.find((item) => item.key === key);
     if (!option) return;
 
@@ -143,6 +146,45 @@ export function DeviceSecurityControlsPanel({
     setCommands((current) => ({ ...current, [key]: result.data?.command || null }));
     toast.success(retry ? `${option.label} command requeued` : `${option.label} control queued`);
     router.refresh();
+  }
+
+  if (runningDevice) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Device Security Controls</CardTitle>
+          <CardDescription>
+            Factory reset, USB debugging, and unknown app install controls require Device Owner privileges. They are unavailable for running devices, even when Device Admin is active.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 lg:grid-cols-3">
+            {controlOptions.map(({ key, label, description, icon: Icon }) => (
+              <div key={key} className="flex items-start justify-between gap-3 rounded-xl border bg-muted/20 p-4">
+                <div className="flex items-start gap-3">
+                  <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <div>
+                    <p className="font-semibold">{label}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+                    <p className="mt-2 text-xs font-medium text-muted-foreground">Unavailable for running devices</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={false}
+                  aria-label={`${label} unavailable for running devices`}
+                  disabled
+                  className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full bg-input opacity-50"
+                >
+                  <span className="ml-0.5 size-5 rounded-full bg-background shadow-sm" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    );
   }
 
   return (

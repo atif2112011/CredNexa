@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import QRCode from "qrcode";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
+import { ENROLLMENT_MODES, getEnrollmentMode, isRunningDevice } from "../../constants/enrollmentModes.js";
 import { normalizeDeviceRestrictionState } from "../../constants/deviceRestrictions.js";
 import {
   DEVICE_SECURITY_CONTROL_COMMAND_TYPES,
@@ -44,6 +45,7 @@ import {
   validateDeviceSecurityControlUpdate
 } from "../../services/deviceSecurityControls.service.js";
 import {
+  getDeviceReleaseSummary,
   queueDeviceRelease,
   settleCompletedSchedule
 } from "../../services/deviceRelease.service.js";
@@ -76,6 +78,19 @@ import {
   isManualDeviceControl
 } from "../../services/tenantDeviceControl.service.js";
 import { isTenantDeviceCommandStateSatisfied } from "../../services/tenantDeviceCommand.service.js";
+import {
+  assertRunningEnrollmentConfigured,
+  buildRunningQrText,
+  createRunningTokenFields,
+  decryptRunningSecret
+} from "../../services/runningEnrollment.service.js";
+import {
+  assertRunningActionCapability,
+  assertRunningCommandAllowed,
+  formatControlResult,
+  formatDeviceReference,
+  getRunningAllowedActions
+} from "../../services/runningDevicePolicy.service.js";
 import {
   getEffectiveTenantCreditPerKeyPrice,
   getOrCreatePayoutConstants,
@@ -122,8 +137,17 @@ const buildPagination = (page, limit, total) => ({
 
 const buildSearchRegex = (value) => new RegExp(String(value).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
-const formatTenantDevice = (device = {}) => ({
+const formatTenantDevice = (device = {}, { locationEnabled = false } = {}) => ({
   ...device,
+  enrollmentMode: getEnrollmentMode(device),
+  identifierSource: device.identifierSource || "DEVICE_REPORTED",
+  ...(isRunningDevice(device) ? {
+    imei: device.imei ? `***********${device.imei.slice(-4)}` : null,
+    imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null,
+    allowedActions: getRunningAllowedActions(device, { locationEnabled }),
+    activationIdempotencyKey: undefined,
+    fcmToken: undefined
+  } : {}),
   stateLabel: getDeviceStateLabel(device.state),
   currentPolicyLabel: getDevicePolicyLabel(device.currentPolicyKey),
   releasedAt: device.releasedAt || null
@@ -312,6 +336,8 @@ const queueTenantDeviceCommand = async ({
   session,
   skipIfStateMatches = false
 }) => {
+  assertRunningCommandAllowed(device, commandType, payload);
+  assertRunningActionCapability(device, commandType);
   if (skipIfStateMatches && isTenantDeviceCommandStateSatisfied(device, commandType)) {
     return { device, command: null, noChange: true };
   }
@@ -482,6 +508,22 @@ const buildQrPayload = (enrollmentToken, provisioningDetails) => (
 });
 
 const buildQrResponse = async (enrollmentToken) => {
+  if (isRunningDevice(enrollmentToken)) {
+    const secret = decryptRunningSecret(enrollmentToken.runningTokenCiphertext);
+    const qrText = buildRunningQrText(secret);
+    return {
+      enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
+      qrType: "RUNNING_APP_LINK",
+      qrText,
+      qrCodeDataUrl: await QRCode.toDataURL(qrText, {
+        errorCorrectionLevel: "M",
+        margin: 2,
+        width: 512
+      }),
+      qrCodeMimeType: "image/png",
+      tokenExpiresAt: enrollmentToken.expiresAt
+    };
+  }
   const provisioningDetails = await ProvisioningDetails.findOne({}).lean();
   const qrPayload = buildQrPayload(enrollmentToken.token, provisioningDetails);
   const qrCodeDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
@@ -532,6 +574,26 @@ export const registerBorrower = async (req, res) => {
 
     if (!hasRequiredFields(req.body, requiredFields)) {
       return sendError(res, 400, "Borrower and EMI details are required");
+    }
+
+    const enrollmentMode = req.body.enrollmentMode === undefined
+      ? ENROLLMENT_MODES.DEVICE_OWNER_QR
+      : req.body.enrollmentMode;
+    if (!Object.values(ENROLLMENT_MODES).includes(enrollmentMode)) {
+      return sendError(res, 400, "Invalid enrollmentMode");
+    }
+    if (enrollmentMode === ENROLLMENT_MODES.RUNNING_APP) {
+      const tenantPolicy = await TenantPolicy.findOne({ tenantId: tenant._id }).lean();
+      if (tenantPolicy?.runningEnrollmentEnabled !== true) {
+        return sendError(res, 409, "Running enrollment is not enabled for this dealer", {
+          code: "RUNNING_ENROLLMENT_DISABLED"
+        });
+      }
+      try {
+        assertRunningEnrollmentConfigured();
+      } catch (error) {
+        return sendError(res, 409, error.message, { code: "RUNNING_ENROLLMENT_NOT_CONFIGURED" });
+      }
     }
 
     const loanAmount = Number(req.body.loanAmount);
@@ -598,6 +660,7 @@ export const registerBorrower = async (req, res) => {
           aadhaarLinkedMobile: req.body.aadhaarLinkedMobile,
           tenantId: tenant._id,
           loanId,
+          enrollmentMode,
           loanAmount,
           emiAmount,
           tenureMonths,
@@ -642,12 +705,17 @@ export const registerBorrower = async (req, res) => {
       { session, ordered: true }
     );
 
-    const enrollmentTokenValue = createEnrollmentTokenValue();
+    const runningTokenFields = enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+      ? createRunningTokenFields()
+      : null;
+    const enrollmentTokenValue = runningTokenFields?.token || createEnrollmentTokenValue();
     const expiresAt = getEnrollmentTokenExpiry();
     const enrollmentTokens = await EnrollmentToken.create(
       [
         {
           token: enrollmentTokenValue,
+          enrollmentMode,
+          ...(runningTokenFields || {}),
           userId: user._id,
           tenantId: tenant._id,
           expiresAt,
@@ -701,7 +769,9 @@ export const registerBorrower = async (req, res) => {
       loanId: user.loanId,
       emiScheduleId: schedules[0]._id,
       emiScheduleTenantId: schedules[0].tenantId,
-      enrollmentToken: enrollmentTokens[0].token,
+      ...(enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? { enrollmentMode, enrollmentId: enrollmentTokens[0]._id }
+        : { enrollmentToken: enrollmentTokens[0].token }),
       enrollmentTokenTenantId: enrollmentTokens[0].tenantId,
       tokenExpiresAt: enrollmentTokens[0].expiresAt,
       credits: {
@@ -733,6 +803,7 @@ export const generateEnrollmentQr = async (req, res) => {
 
     const enrollmentToken = await EnrollmentToken.findOne({
       token: req.body.enrollmentToken,
+      enrollmentMode: { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
       tenantId: tenant._id,
       consumedAt: null,
       cancelledAt: null,
@@ -829,7 +900,9 @@ export const getDashboard = async (req, res) => {
           : null;
 
         return {
-          enrollmentToken: enrollmentToken.token,
+          ...(isRunningDevice(enrollmentToken) ? {} : { enrollmentToken: enrollmentToken.token }),
+          enrollmentId: enrollmentToken._id,
+          enrollmentMode: getEnrollmentMode(enrollmentToken),
           status: getEnrollmentStatus({
             enrollmentToken,
             user: enrollmentToken.userId,
@@ -1134,8 +1207,14 @@ export const getEnrollmentStatusByToken = async (req, res) => {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
 
+    const byId = mongoose.isValidObjectId(req.params.token);
     const enrollmentToken = await EnrollmentToken.findOne({
-      token: req.params.token,
+      ...(byId
+        ? { _id: req.params.token }
+        : {
+            token: req.params.token,
+            enrollmentMode: { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] }
+          }),
       tenantId: tenant._id
     }).lean();
 
@@ -1154,8 +1233,9 @@ export const getEnrollmentStatusByToken = async (req, res) => {
     }
 
     return sendSuccess(res, 200, "Enrollment status fetched successfully", {
-      enrollmentToken: enrollmentToken.token,
+      ...(isRunningDevice(enrollmentToken) ? {} : { enrollmentToken: enrollmentToken.token }),
       enrollmentTokenId: enrollmentToken._id,
+      enrollmentMode: getEnrollmentMode(enrollmentToken),
       status: getEnrollmentStatus({ enrollmentToken, user, device }),
       tokenExpiresAt: enrollmentToken.expiresAt,
       consumedAt: enrollmentToken.consumedAt,
@@ -1179,7 +1259,7 @@ export const getEnrollmentStatusByToken = async (req, res) => {
       device: device
         ? {
             id: device._id,
-            imei: device.imei,
+            imei: isRunningDevice(device) ? `***********${device.imei.slice(-4)}` : device.imei,
             deviceModel: device.deviceModel,
             manufacturer: device.manufacturer,
             state: device.state,
@@ -1204,6 +1284,15 @@ export const getDistributorUsers = async (req, res) => {
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
 
+    if (req.query.enrollmentMode) {
+      if (!Object.values(ENROLLMENT_MODES).includes(req.query.enrollmentMode)) {
+        return sendError(res, 400, "Invalid enrollmentMode filter");
+      }
+      filter.enrollmentMode = req.query.enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] };
+    }
+
     if (req.query.search) {
       const search = buildSearchRegex(req.query.search);
       filter.$or = [{ name: search }, { mobile: search }, { email: search }, { loanId: search }];
@@ -1214,7 +1303,7 @@ export const getDistributorUsers = async (req, res) => {
 
     const [items, total] = await Promise.all([
       User.find(filter)
-        .populate("linkedDeviceId", "imei deviceModel manufacturer state lastSeenAt")
+        .populate("linkedDeviceId", "imei deviceModel manufacturer state lastSeenAt enrollmentMode")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -1223,7 +1312,16 @@ export const getDistributorUsers = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Users fetched successfully", {
-      items,
+      items: items.map((item) => ({
+        ...item,
+        enrollmentMode: getEnrollmentMode(item),
+        linkedDeviceId: isRunningDevice(item.linkedDeviceId)
+          ? {
+              ...item.linkedDeviceId,
+              imei: item.linkedDeviceId.imei ? `***********${item.linkedDeviceId.imei.slice(-4)}` : null
+            }
+          : item.linkedDeviceId
+      })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -1979,9 +2077,12 @@ export const getDistributorUserById = async (req, res) => {
       Device.findOne({ userId: user._id, tenantId: tenant._id }).lean(),
       user.consentRecordId ? ConsentRecord.findById(user.consentRecordId).lean() : null
     ]);
+    const runningPolicy = isRunningDevice(device)
+      ? await TenantPolicy.findOne({ tenantId: tenant._id }).select("runningLocationEnabled").lean()
+      : null;
 
     return sendSuccess(res, 200, "Borrower detail fetched successfully", {
-      borrower: user,
+      borrower: { ...user, enrollmentMode: getEnrollmentMode(user) },
       activationStatus: enrollmentToken
         ? getEnrollmentStatus({ enrollmentToken, user, device })
         : device
@@ -1993,7 +2094,8 @@ export const getDistributorUserById = async (req, res) => {
       enrollment: enrollmentToken
         ? {
             enrollmentTokenId: enrollmentToken._id,
-            enrollmentToken: enrollmentToken.token,
+            enrollmentMode: getEnrollmentMode(enrollmentToken),
+            ...(isRunningDevice(enrollmentToken) ? {} : { enrollmentToken: enrollmentToken.token }),
             tokenExpiresAt: enrollmentToken.expiresAt,
             consumedAt: enrollmentToken.consumedAt,
             cancelledAt: enrollmentToken.cancelledAt,
@@ -2008,7 +2110,7 @@ export const getDistributorUserById = async (req, res) => {
             verifiedProfile: consentRecord.verifiedProfile
           }
         : null,
-      device
+      device: device ? formatTenantDevice(device, { locationEnabled: runningPolicy?.runningLocationEnabled === true }) : null
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -2026,6 +2128,15 @@ export const getDistributorDevices = async (req, res) => {
 
     const { page, limit, skip } = getPagination(req.query);
     const filter = { tenantId: tenant._id };
+
+    if (req.query.enrollmentMode) {
+      if (!Object.values(ENROLLMENT_MODES).includes(req.query.enrollmentMode)) {
+        return sendError(res, 400, "Invalid enrollmentMode filter");
+      }
+      filter.enrollmentMode = req.query.enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] };
+    }
 
     if (req.query.state) {
       if (!Object.values(DEVICE_STATES).includes(req.query.state)) {
@@ -2054,18 +2165,22 @@ export const getDistributorDevices = async (req, res) => {
       ];
     }
 
-    const [items, total] = await Promise.all([
+    const [items, total, runningPolicy] = await Promise.all([
       Device.find(filter)
         .populate("userId", "name mobile email loanId loanAmount emiAmount tenureMonths isDeviceLinked")
         .sort({ updatedAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      Device.countDocuments(filter)
+      Device.countDocuments(filter),
+      TenantPolicy.findOne({ tenantId: tenant._id })
+        .select("runningEnrollmentEnabled runningLocationEnabled").lean()
     ]);
 
+    const locationEnabled = runningPolicy?.runningLocationEnabled === true;
+
     return sendSuccess(res, 200, "Devices fetched successfully", {
-      items: items.map(formatTenantDevice),
+      items: items.map((device) => formatTenantDevice(device, { locationEnabled })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -2098,7 +2213,12 @@ export const getDistributorDeviceById = async (req, res) => {
     }
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
     device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
-    Object.assign(device, formatTenantDevice(device));
+    const runningPolicy = isRunningDevice(device)
+      ? await TenantPolicy.findOne({ tenantId: tenant._id })
+        .select("runningEnrollmentEnabled runningLocationEnabled").lean()
+      : null;
+    const locationEnabled = runningPolicy?.runningLocationEnabled === true;
+    Object.assign(device, formatTenantDevice(device, { locationEnabled }));
 
     const [policy, emiSchedule, latestRestrictionCommand, latestSecurityControlCommands, latestLocationCommand] = await Promise.all([
       device.currentPolicyId
@@ -2136,6 +2256,11 @@ export const getDistributorDeviceById = async (req, res) => {
     const borrower = device.userId
       ? { ...device.userId, disbursementDate: device.userId.disbursementDate ?? null }
       : null;
+
+    if (isRunningDevice(device)) {
+      const release = getDeviceReleaseSummary({ schedule: emiSchedule, device });
+      device.allowedActions = getRunningAllowedActions(device, { releaseEligible: release.canQueue, locationEnabled });
+    }
 
     return sendSuccess(res, 200, "Device detail fetched successfully", {
       device,
@@ -2542,6 +2667,28 @@ export const regenerateEnrollmentQr = async (req, res) => {
       return sendError(res, 404, "Active borrower not found");
     }
 
+    const savedMode = getEnrollmentMode(user);
+    if (savedMode === ENROLLMENT_MODES.RUNNING_APP) {
+      const runningPolicy = await TenantPolicy.findOne({ tenantId: tenant._id })
+        .select("runningEnrollmentEnabled").lean();
+      if (runningPolicy?.runningEnrollmentEnabled !== true) {
+        return sendError(res, 409, "Running enrollment is disabled for this dealer", {
+          code: "RUNNING_ENROLLMENT_DISABLED"
+        });
+      }
+    }
+    if (req.body.enrollmentMode !== undefined && req.body.enrollmentMode !== savedMode) {
+      return sendError(res, 409, "Enrollment mode does not match borrower", {
+        code: "ENROLLMENT_MODE_MISMATCH"
+      });
+    }
+    // Older dealer builds omit mode and must never render a running claim as an owner QR.
+    if (savedMode === ENROLLMENT_MODES.RUNNING_APP && req.body.enrollmentMode !== savedMode) {
+      return sendError(res, 409, "Dealer app upgrade required for running enrollment", {
+        code: "DEALER_APP_UPGRADE_REQUIRED"
+      });
+    }
+
     const existingDevice = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
     if (existingDevice) {
       return sendError(res, 400, "Device is already registered for this borrower");
@@ -2551,12 +2698,15 @@ export const regenerateEnrollmentQr = async (req, res) => {
     const validEnrollmentToken = await EnrollmentToken.findOne({
       userId: user._id,
       tenantId: tenant._id,
+      enrollmentMode: savedMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
       consumedAt: null,
       cancelledAt: null,
       expiresAt: { $gt: now }
-    }).sort({ createdAt: -1 });
+    }).select("+runningTokenCiphertext").sort({ createdAt: -1 });
 
-    if (validEnrollmentToken) {
+    if (validEnrollmentToken && req.body.rotate !== true) {
       validEnrollmentToken.lastQrGeneratedAt = now;
       await validEnrollmentToken.save();
 
@@ -2588,6 +2738,9 @@ export const regenerateEnrollmentQr = async (req, res) => {
     const oldEnrollmentToken = await EnrollmentToken.findOne({
       userId: user._id,
       tenantId: tenant._id,
+      enrollmentMode: savedMode === ENROLLMENT_MODES.RUNNING_APP
+        ? ENROLLMENT_MODES.RUNNING_APP
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
       consumedAt: null,
       cancelledAt: null
     })
@@ -2599,10 +2752,25 @@ export const regenerateEnrollmentQr = async (req, res) => {
       await oldEnrollmentToken.save({ session });
     }
 
+    if (savedMode === ENROLLMENT_MODES.RUNNING_APP && user.consentRecordId) {
+      // A rotated QR is a new claim. Keep the old consent record immutable but require
+      // fresh OTP and acceptance bound to the new claim before activation.
+      await User.updateOne(
+        { _id: user._id, tenantId: tenant._id, isDeviceLinked: false },
+        { $set: { consentRecordId: null } },
+        { session }
+      );
+    }
+
+    const runningTokenFields = savedMode === ENROLLMENT_MODES.RUNNING_APP
+      ? createRunningTokenFields()
+      : null;
     const newEnrollmentTokens = await EnrollmentToken.create(
       [
         {
-          token: createEnrollmentTokenValue(),
+          token: runningTokenFields?.token || createEnrollmentTokenValue(),
+          enrollmentMode: savedMode,
+          ...(runningTokenFields || {}),
           userId: user._id,
           tenantId: tenant._id,
           expiresAt: getEnrollmentTokenExpiry(),
@@ -2640,7 +2808,9 @@ export const regenerateEnrollmentQr = async (req, res) => {
 
     return sendSuccess(res, 201, "Enrollment QR regenerated successfully", {
       reusedExistingToken: false,
-      oldEnrollmentToken: oldEnrollmentToken?.token,
+      ...(savedMode === ENROLLMENT_MODES.DEVICE_OWNER_QR
+        ? { oldEnrollmentToken: oldEnrollmentToken?.token }
+        : {}),
       oldEnrollmentTokenId: oldEnrollmentToken?._id,
       borrower: {
         id: user._id,
@@ -2801,11 +2971,14 @@ export const listPendingPayments = async (req, res) => {
 
     const payments = await Payment.find({ tenantId: tenant._id, approvalStatus: "pending_approval" })
       .populate("userId", "name mobile loanId")
-      .populate("deviceId", "imei deviceModel manufacturer state")
+      .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
       .sort({ submittedAt: -1, _id: -1 })
       .lean();
 
-    return sendSuccess(res, 200, "Pending payments fetched successfully", payments);
+    return sendSuccess(res, 200, "Pending payments fetched successfully", payments.map((payment) => ({
+      ...payment,
+      deviceId: formatDeviceReference(payment.deviceId)
+    })));
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -2842,7 +3015,7 @@ export const listPaymentApprovalRequests = async (req, res) => {
     const [items, total] = await Promise.all([
       Payment.find(filter)
         .populate("userId", "name mobile email loanId")
-        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
         .sort({ submittedAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)
@@ -2851,7 +3024,7 @@ export const listPaymentApprovalRequests = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Payment approval requests fetched successfully", {
-      items,
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -2870,14 +3043,17 @@ export const getPaymentById = async (req, res) => {
 
     const payment = await Payment.findOne({ _id: req.params.paymentId, tenantId: tenant._id })
       .populate("userId", "name mobile loanId")
-      .populate("deviceId", "imei deviceModel manufacturer state")
+      .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
       .lean();
 
     if (!payment) {
       return sendError(res, 404, "Payment not found");
     }
 
-    return sendSuccess(res, 200, "Payment fetched successfully", payment);
+    return sendSuccess(res, 200, "Payment fetched successfully", {
+      ...payment,
+      deviceId: formatDeviceReference(payment.deviceId)
+    });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }
@@ -2949,7 +3125,7 @@ export const approvePayment = async (req, res) => {
           session
         });
 
-    const restrictionClearResult = releaseQueued
+    const restrictionClearResult = releaseQueued || isRunningDevice(device)
       ? {
           cleared: false,
           command: null,
@@ -3198,7 +3374,7 @@ export const lockTenantDevice = async (req, res) => {
 
     if (result.noChange) {
       await session.commitTransaction();
-      return sendSuccess(res, 200, "Device is already in the requested state", result);
+      return sendSuccess(res, 200, "Device is already in the requested state", formatControlResult(result));
     }
 
     await createAuditLog(
@@ -3216,10 +3392,10 @@ export const lockTenantDevice = async (req, res) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device lock queued successfully", result);
+    return sendSuccess(res, 200, "Device lock queued successfully", formatControlResult(result));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -3260,7 +3436,7 @@ export const unlockTenantDevice = async (req, res) => {
 
     if (result.noChange) {
       await session.commitTransaction();
-      return sendSuccess(res, 200, "Device is already in the requested state", result);
+      return sendSuccess(res, 200, "Device is already in the requested state", formatControlResult(result));
     }
 
     await createAuditLog(
@@ -3278,10 +3454,51 @@ export const unlockTenantDevice = async (req, res) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device unlock queued successfully", result);
+    return sendSuccess(res, 200, "Device unlock queued successfully", formatControlResult(result));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
+  } finally {
+    session.endSession();
+  }
+};
+
+/** Dealers can release a settled running or owner device through the shared release service. */
+export const releaseTenantDevice = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const tenant = await ensureDistributorAccess(req, res);
+    if (!tenant) return null;
+    if (!mongoose.isValidObjectId(req.params.id) || !String(req.body.reason || "").trim()) {
+      return sendError(res, 400, "Valid device ID and reason are required");
+    }
+    const device = await Device.findOne({ _id: req.params.id, tenantId: tenant._id }).session(session);
+    if (!device) return sendError(res, 404, "Device not found");
+    const schedule = await EmiSchedule.findOne({ userId: device.userId, tenantId: tenant._id }).session(session);
+    if (!schedule) return sendError(res, 404, "EMI schedule not found");
+    session.startTransaction();
+    const result = await queueDeviceRelease({
+      device,
+      schedule,
+      accountId: req.auth.id,
+      triggeredBy: "manual_tenant",
+      reason: req.body.reason.trim(),
+      session
+    });
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.DEVICE_RELEASE_QUEUED,
+      actorId: req.auth.id,
+      tenantId: tenant._id,
+      userId: device.userId,
+      deviceId: device._id,
+      reason: req.body.reason.trim(),
+      metadata: { commandId: result.command._id, emiScheduleId: schedule._id }
+    }, { session });
+    await session.commitTransaction();
+    return sendSuccess(res, 200, "Device release queued successfully", formatControlResult(result));
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -3345,7 +3562,7 @@ export const tempUnlockTenantDevice = async (req, res) => {
     return sendSuccess(res, 200, "Temporary unlock queued successfully", result);
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }
@@ -3380,7 +3597,7 @@ export const listTenantUnlockRequests = async (req, res) => {
     const [items, total] = await Promise.all([
       UnlockRequest.find(filter)
         .populate("userId", "name mobile email loanId")
-        .populate("deviceId", "imei deviceModel manufacturer state")
+        .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -3389,7 +3606,7 @@ export const listTenantUnlockRequests = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Unlock requests fetched successfully", {
-      items,
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -3408,7 +3625,7 @@ export const getTenantUnlockRequestByCaseId = async (req, res) => {
 
     const unlockRequest = await UnlockRequest.findOne({ caseId: req.params.caseId, tenantId: tenant._id })
       .populate("userId", "name mobile loanId loanAmount emiAmount")
-      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey")
+      .populate("deviceId", "imei deviceModel manufacturer state currentPolicyKey enrollmentMode")
       .lean();
 
     if (!unlockRequest) {
@@ -3422,7 +3639,7 @@ export const getTenantUnlockRequestByCaseId = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Unlock request detail fetched successfully", {
-      unlockRequest,
+      unlockRequest: { ...unlockRequest, deviceId: formatDeviceReference(unlockRequest.deviceId) },
       emiSchedule,
       commands,
       auditLogs
@@ -3603,7 +3820,7 @@ export const tempUnlockTenantUnlockRequest = async (req, res) => {
     });
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
-    return sendError(res, 500, error.message || "Internal server error");
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
   } finally {
     session.endSession();
   }

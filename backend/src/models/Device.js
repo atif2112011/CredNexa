@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ENROLLMENT_MODES } from "../constants/enrollmentModes.js";
 
 import { DEFAULT_DEVICE_RESTRICTIONS } from "../constants/deviceRestrictions.js";
 import { DEVICE_POLICY_KEYS, DEVICE_STATES } from "../constants/deviceStates.js";
@@ -59,6 +60,23 @@ const deviceSchema = new mongoose.Schema(
       index: true,
       trim: true
     },
+    enrollmentMode: {
+      type: String,
+      enum: Object.values(ENROLLMENT_MODES),
+      default: ENROLLMENT_MODES.DEVICE_OWNER_QR,
+      index: true
+    },
+    identifierSource: {
+      type: String,
+      enum: ["DEVICE_REPORTED", "BORROWER_ENTERED"],
+      default: "DEVICE_REPORTED"
+    },
+    // A request identifier deduplicates a lost activation response; it is not an auth credential.
+    activationIdempotencyKey: String,
+    capabilities: { type: mongoose.Schema.Types.Mixed, default: null },
+    capabilitiesObservedAt: Date,
+    capabilitiesReceivedAt: Date,
+    locationConsentAccepted: { type: Boolean, default: false },
     imei2: {
       type: String,
       trim: true
@@ -219,5 +237,7 @@ const deviceSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+deviceSchema.index({ tenantId: 1, enrollmentMode: 1, createdAt: -1 });
 
 export const Device = mongoose.model("Device", deviceSchema);

@@ -2,6 +2,8 @@ import { connectDatabase } from "../config/database.js";
 import { AccountPushToken } from "../models/AccountPushToken.js";
 import { AppNotificationJob } from "../models/AppNotificationJob.js";
 import { Device } from "../models/Device.js";
+import { isRunningDevice } from "../constants/enrollmentModes.js";
+import { assertRunningCommandAllowed } from "../services/runningDevicePolicy.service.js";
 import {
   DEVICE_COMMAND_FAILURE_SOURCES,
   DeviceCommand
@@ -82,6 +84,18 @@ export const buildPolicyUpdateMessage = ({ device, command }) => {
   ]);
 
   if (command.commandType === "EMI_REMINDER") {
+    if (isRunningDevice(device)) {
+      // The running app needs the pending reminder payload to show an overlay and play sound.
+      return {
+        token: device.fcmToken,
+        data: {
+          ...baseData,
+          ...stringifyDataPayload(command.payload),
+          type: "EMI_REMINDER"
+        },
+        android: { priority: "high" }
+      };
+    }
     // Kept for command compatibility. The borrower app was not handling this
     // data-only EMI reminder push as a visible notification.
     return {
@@ -148,6 +162,21 @@ export const buildPolicyUpdateMessage = ({ device, command }) => {
       android: {
         priority: "high"
       }
+    };
+  }
+
+  if (isRunningDevice(device) && ["LOCK", "UNLOCK", "TEMP_UNLOCK"].includes(command.commandType)) {
+    return {
+      token: device.fcmToken,
+      data: {
+        ...baseData,
+        ...stringifyDataPayload(command.payload),
+        ...(command.commandType === "TEMP_UNLOCK" && command.payload?.tempUnlockExpiresAt
+          ? { tempUnlockExpiresAt: new Date(command.payload.tempUnlockExpiresAt).toISOString() }
+          : {}),
+        type: command.commandType
+      },
+      android: { priority: "high" }
     };
   }
 
@@ -236,6 +265,16 @@ export const runFcmDeliveryBatch = async ({ limit = 50, commandIds } = {}) => {
 
   for (const command of commands) {
     const device = await Device.findById(command.deviceId).lean();
+
+    try {
+      assertRunningCommandAllowed(device, command.commandType, command.payload);
+    } catch (error) {
+      command.status = "expired";
+      command.failureReason = error.message;
+      await command.save();
+      results.push({ commandId: command._id, status: "expired", reason: error.code });
+      continue;
+    }
 
     if (!device?.fcmToken) {
       command.status = command.commandType === "EMI_REMINDER" ? "pending" : "failed";
@@ -345,6 +384,7 @@ export const deliverDeviceCommandImmediately = async ({
       error: error.message
     };
   }
+
 };
 
 export const runAppNotificationDeliveryBatch = async ({ limit = 50, jobIds } = {}) => {

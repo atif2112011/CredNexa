@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 
 import { env } from "../../config/env.js";
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
+import { ENROLLMENT_MODES, getEnrollmentMode, isRunningDevice } from "../../constants/enrollmentModes.js";
 import {
   normalizeDeviceRestrictionState,
   normalizeDeviceRestrictions
@@ -76,6 +77,13 @@ import {
   isManualDeviceControl
 } from "../../services/tenantDeviceControl.service.js";
 import { resendOtp, sendOtp, verifyOtpCode } from "../../services/otp.service.js";
+import { EMI_REMINDER_TYPES } from "../../services/emiReminder.service.js";
+import {
+  findEnrollmentTokenBySecret,
+  matchesEnrollmentSecret,
+  RUNNING_REQUIREMENTS_VERSION,
+  validateRunningCapabilities
+} from "../../services/runningEnrollment.service.js";
 import { sendError, sendSuccess } from "../../utils/apiResponse.js";
 import { uploadImageToFirebase } from "../../utils/firebaseImageUpload.js";
 import {
@@ -84,6 +92,8 @@ import {
   safeQueueNotification
 } from "../../utils/appNotifications.js";
 import { hasRequiredFields } from "../../utils/validators.js";
+import { registerRunningDevice } from "./runningEnrollment.controller.js";
+import { assertRunningCommandAllowed } from "../../services/runningDevicePolicy.service.js";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const OPEN_UNLOCK_REQUEST_STATUSES = ["PENDING_TENANT", "ESCALATED_PARTNER", "ESCALATED_ADMIN", "UNDER_REVIEW"];
@@ -129,6 +139,11 @@ const getUserRefreshCookieOptions = () => ({
 const setUserRefreshCookie = (res, user) => {
   res.cookie(env.refreshCookieName, signUserRefreshToken(user), getUserRefreshCookieOptions());
 };
+
+// Running borrowers use their exact linked device; owner borrowers retain the legacy lookup.
+const findDeviceForAppRequest = (req, extra = {}) => Device.findOne(req.runningDevice
+  ? { _id: req.runningDevice._id, userId: req.auth.id, ...extra }
+  : { userId: req.auth.id, ...extra });
 
 const hashPayload = (payload) => {
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
@@ -401,10 +416,10 @@ const getPlayIntegrityClient = async () => {
   return playIntegrityClient;
 };
 
-const decodePlayIntegrityToken = async ({ integrityToken }) => {
+const decodePlayIntegrityToken = async ({ integrityToken, packageName = env.playIntegrityPackageName }) => {
   const client = await getPlayIntegrityClient();
   const response = await client.v1.decodeIntegrityToken({
-    packageName: env.playIntegrityPackageName,
+    packageName,
     requestBody: { integrityToken }
   });
 
@@ -453,12 +468,12 @@ const isPlayIntegrityTimestampValid = (timestampMillis) => {
   return ageMs <= env.playIntegrityChallengeTtlSeconds * 1000;
 };
 
-const evaluatePlayIntegrityVerdict = ({ challenge, summary, localSignals = {} }) => {
+const evaluatePlayIntegrityVerdict = ({ challenge, summary, localSignals = {}, packageName = env.playIntegrityPackageName }) => {
   if (summary.requestHash !== challenge.requestHash) {
     return { decision: "block", integrityStatus: "failed", reasonCode: "REQUEST_HASH_MISMATCH" };
   }
 
-  if (summary.packageName !== env.playIntegrityPackageName) {
+  if (summary.packageName !== packageName) {
     return { decision: "block", integrityStatus: "failed", reasonCode: "PACKAGE_NAME_MISMATCH" };
   }
 
@@ -532,6 +547,14 @@ const getDeviceSyncState = async (device) => {
     latestSecurityCommands.map((command) => String(command._id))
   );
   const syncCommands = pendingCommands.filter((command) => {
+    try {
+      assertRunningCommandAllowed(device, command.commandType, command.payload);
+    } catch {
+      return false;
+    }
+    if (isRunningDevice(device) && command.commandType === "TEMP_UNLOCK" &&
+      (device.state !== DEVICE_STATES.TEMP_UNLOCK || !device.tempUnlockExpiresAt ||
+        new Date(device.tempUnlockExpiresAt) <= new Date())) return false;
     if (!getDeviceSecurityControlByCommandType(command.commandType)) return true;
     return latestSecurityCommandIds.has(String(command._id));
   });
@@ -547,12 +570,13 @@ const getDeviceSyncState = async (device) => {
 
   return {
     deviceState: device.state,
+    tempUnlockExpiresAt: device.tempUnlockExpiresAt || null,
     appConfig: getBorrowerAppConfig(tenantPolicy),
     currentPolicyKey: device.currentPolicyKey,
     desiredPolicyVersion: device.desiredPolicyVersion,
     restrictionState: normalizeDeviceRestrictionState(device.restrictionState),
     securityControlState: normalizeDeviceSecurityControlState(device.securityControlState),
-    policy,
+    policy: isRunningDevice(device) && policy ? { ...policy, restrictions: {} } : policy,
     pendingCommands: syncCommands.map((command) => {
       if (getDeviceSecurityControlByCommandType(command.commandType)) {
         return {
@@ -578,9 +602,7 @@ const getDeviceSyncState = async (device) => {
  */
 export const generateTestUserAccessToken = async (req, res) => {
   try {
-    // if (env.nodeEnv === "production") {
-    //   return sendError(res, 404, "Route not found");
-    // }
+    if (env.nodeEnv === "production") return sendError(res, 404, "Route not found");
 
     const { userId, mobile, loanId } = req.body;
 
@@ -652,25 +674,27 @@ export const refreshUserAccessToken = async (req, res) => {
  */
 export const getConsentTerms = async (req, res) => {
   try {
-    const consentVersion = await ConsentVersion.findOne({ isCurrent: true }).lean();
-
-    if (!consentVersion) {
-      return sendError(res, 400, "Active consent version not found");
-    }
-
     const enrollmentTokenValue = req.method === "POST" ? String(req.body?.enrollmentToken || "").trim() : "";
+    const enrollmentToken = enrollmentTokenValue
+      ? await findEnrollmentTokenBySecret(enrollmentTokenValue, {
+          consumedAt: null,
+          cancelledAt: null,
+          expiresAt: { $gt: new Date() }
+        }).lean()
+      : null;
+    if (enrollmentTokenValue && !enrollmentToken) {
+      return sendError(res, 400, "Valid enrollment token not found");
+    }
+    const mode = getEnrollmentMode(enrollmentToken);
+    const consentVersion = await ConsentVersion.findOne({
+      isCurrent: true,
+      enrollmentMode: mode === ENROLLMENT_MODES.RUNNING_APP
+        ? mode
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] }
+    }).lean();
+    if (!consentVersion) return sendError(res, 400, "Active consent version not found");
     if (!enrollmentTokenValue) {
       return sendSuccess(res, 200, "Consent terms fetched successfully", consentVersion);
-    }
-
-    const enrollmentToken = await EnrollmentToken.findOne({
-      token: enrollmentTokenValue,
-      consumedAt: null,
-      cancelledAt: null,
-      expiresAt: { $gt: new Date() }
-    }).lean();
-    if (!enrollmentToken) {
-      return sendError(res, 400, "Valid enrollment token not found");
     }
 
     const [user, tenant] = await Promise.all([
@@ -711,8 +735,7 @@ export const initiateConsentOtp = async (req, res) => {
     let enrollmentToken = null;
 
     if (enrollmentTokenValue) {
-      enrollmentToken = await EnrollmentToken.findOne({
-        token: enrollmentTokenValue,
+      enrollmentToken = await findEnrollmentTokenBySecret(enrollmentTokenValue, {
         consumedAt: null,
         cancelledAt: null,
         expiresAt: { $gt: new Date() }
@@ -738,7 +761,12 @@ export const initiateConsentOtp = async (req, res) => {
           return sendError(res, 400, "Mobile does not match registered borrower");
         }
 
-        const consentVersion = await ConsentVersion.findOne({ isCurrent: true }).lean();
+        const consentVersion = await ConsentVersion.findOne({
+          isCurrent: true,
+          enrollmentMode: isRunningDevice(enrollmentToken)
+            ? ENROLLMENT_MODES.RUNNING_APP
+            : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] }
+        }).lean();
 
         if (!consentVersion) {
           return sendError(res, 400, "Active consent version not found");
@@ -932,9 +960,9 @@ export const verifyConsentOtp = async (req, res) => {
         consumedAt: null,
         cancelledAt: null,
         expiresAt: { $gt: new Date() }
-      });
+      }).select("+runningTokenHash");
 
-      if (!enrollmentToken || enrollmentToken.token !== req.body.enrollmentToken) {
+      if (!enrollmentToken || !matchesEnrollmentSecret(enrollmentToken, req.body.enrollmentToken)) {
         return sendError(res, 400, "Valid enrollment token not found");
       }
     }
@@ -990,7 +1018,9 @@ export const verifyConsentOtp = async (req, res) => {
       return sendError(res, 400, "Unsupported OTP purpose");
     }
 
-    const device = await Device.findOne({ userId: user._id });
+    const device = await Device.findOne(isRunningDevice(user)
+      ? { _id: user.linkedDeviceId, userId: user._id, tenantId: user.tenantId }
+      : { userId: user._id });
 
     if (!device) {
       return sendError(res, 400, "Registered device not found");
@@ -1057,8 +1087,7 @@ export const createIntegrityChallenge = async (req, res) => {
 
     let enrollmentToken = null;
     if (req.body.enrollmentToken) {
-      enrollmentToken = await EnrollmentToken.findOne({
-        token: req.body.enrollmentToken,
+      enrollmentToken = await findEnrollmentTokenBySecret(req.body.enrollmentToken, {
         userId: user._id,
         consumedAt: null,
         cancelledAt: null,
@@ -1122,7 +1151,7 @@ export const createRiskIntegrityChallenge = async (req, res) => {
       return sendError(res, 400, "Active user not found");
     }
 
-    const device = await Device.findOne({ userId: user._id, tenantId: user.tenantId }).lean();
+    const device = await findDeviceForAppRequest(req, { tenantId: user.tenantId }).lean();
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
@@ -1220,12 +1249,19 @@ export const verifyIntegrity = async (req, res) => {
     }
 
     const localSignals = req.body.localSignals || {};
-    const device = await Device.findOne({ userId: req.auth.id });
+    const [device, user] = await Promise.all([
+      findDeviceForAppRequest(req),
+      User.findById(req.auth.id).select("enrollmentMode").lean()
+    ]);
+    // Play Integrity decodes against the APK's package, which differs by enrollment mode.
+    const packageName = isRunningDevice(device || user)
+      ? env.runningEnrollmentPackageName
+      : env.playIntegrityPackageName;
     const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     let verdict;
 
     try {
-      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken });
+      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken, packageName });
     } catch (error) {
       console.error("Play Integrity verification failed", {
         challengeId: challenge._id,
@@ -1305,7 +1341,7 @@ export const verifyIntegrity = async (req, res) => {
     }
 
     const summary = getPlayIntegritySummary(verdict);
-    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals });
+    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals, packageName });
     const finalDecision = applyObserveModeDecision(evaluatedDecision);
     const verifiedAt = new Date();
 
@@ -1451,17 +1487,18 @@ export const verifyRiskIntegrity = async (req, res) => {
     }
 
     const localSignals = req.body.localSignals || {};
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = await findDeviceForAppRequest(req);
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
 
+    const packageName = isRunningDevice(device) ? env.runningEnrollmentPackageName : env.playIntegrityPackageName;
     const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     const verifiedAt = new Date();
     let verdict;
 
     try {
-      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken });
+      verdict = await decodePlayIntegrityToken({ integrityToken: req.body.integrityToken, packageName });
     } catch (error) {
       console.error("Risk Play Integrity verification failed", {
         challengeId: challenge._id,
@@ -1520,7 +1557,7 @@ export const verifyRiskIntegrity = async (req, res) => {
     }
 
     const summary = getPlayIntegritySummary(verdict);
-    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals });
+    const evaluatedDecision = evaluatePlayIntegrityVerdict({ challenge, summary, localSignals, packageName });
     const finalDecision = applyObserveModeDecision(evaluatedDecision);
 
     challenge.consumedAt = verifiedAt;
@@ -1635,8 +1672,7 @@ export const acceptConsent = async (req, res) => {
       });
     }
 
-    const [consentVersion, otpRecord, enrollmentToken, tenant] = await Promise.all([
-      ConsentVersion.findOne({ version: req.body.consentVersion, isCurrent: true }),
+    const [otpRecord, enrollmentToken, tenant] = await Promise.all([
       OtpRecord.findOne({
         userId: user._id,
         purpose: { $in: [OTP_PURPOSES.CONSENT, OTP_PURPOSES.AADHAAR_CONSENT] },
@@ -1649,13 +1685,9 @@ export const acceptConsent = async (req, res) => {
         consumedAt: null,
         cancelledAt: null,
         expiresAt: { $gt: new Date() }
-      }).sort({ createdAt: -1 }),
+      }).select("+runningTokenHash").sort({ createdAt: -1 }),
       Tenant.findOne({ _id: user.tenantId, isActive: true }).lean()
     ]);
-
-    if (!consentVersion) {
-      return sendError(res, 400, "Current consent version does not match request");
-    }
 
     if (!otpRecord) {
       return sendError(res, 400, "Verified OTP session not found");
@@ -1663,6 +1695,22 @@ export const acceptConsent = async (req, res) => {
 
     if (!enrollmentToken || !otpRecord.enrollmentTokenId?.equals(enrollmentToken._id)) {
       return sendError(res, 400, "Valid enrollment token not found");
+    }
+    const enrollmentMode = getEnrollmentMode(enrollmentToken);
+    if (enrollmentMode !== getEnrollmentMode(user) ||
+      (enrollmentMode === ENROLLMENT_MODES.RUNNING_APP &&
+        !matchesEnrollmentSecret(enrollmentToken, req.body.enrollmentToken))) {
+      return sendError(res, 400, "Valid enrollment token not found");
+    }
+    const consentVersion = await ConsentVersion.findOne({
+      version: req.body.consentVersion,
+      isCurrent: true,
+      enrollmentMode: enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
+        ? enrollmentMode
+        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] }
+    });
+    if (!consentVersion) {
+      return sendError(res, 400, "Current consent version does not match request");
     }
 
     if (!tenant) {
@@ -1692,6 +1740,8 @@ export const acceptConsent = async (req, res) => {
       consentVersionId: consentVersion._id,
       consentVersion: consentVersion.version,
       enrollmentTokenId: enrollmentToken._id,
+      enrollmentMode,
+      locationConsentAccepted: enrollmentMode === ENROLLMENT_MODES.RUNNING_APP && req.body.locationConsentAccepted === true,
       aadhaarVerificationRef,
       verificationSessionId: otpRecord.verificationSessionId,
       consentCheckboxAccepted: true,
@@ -1769,17 +1819,21 @@ export const acceptConsent = async (req, res) => {
  * Sample body: { "imei": "123456789012345", "deviceModel": "Samsung A15", "manufacturer": "Samsung", "androidVersion": "14", "appVersion": "1.0.0", "fcmToken": "..." }
  */
 export const registerDevice = async (req, res) => {
-  const session = await mongoose.startSession();
+  let session;
 
   try {
-    if (!hasRequiredFields(req.body, ["imei", "deviceModel", "manufacturer", "androidVersion", "appVersion", "fcmToken"])) {
-      return sendError(res, 400, "Device identity and FCM token are required");
-    }
-
     const user = await User.findById(req.auth.id);
 
     if (!user || !user.isActive) {
       return sendError(res, 400, "Active user not found");
+    }
+
+    if (isRunningDevice(user)) return registerRunningDevice(req, res, user);
+
+    session = await mongoose.startSession();
+
+    if (!hasRequiredFields(req.body, ["imei", "deviceModel", "manufacturer", "androidVersion", "appVersion", "fcmToken"])) {
+      return sendError(res, 400, "Device identity and FCM token are required");
     }
 
     if (!user.consentRecordId) {
@@ -1806,6 +1860,7 @@ export const registerDevice = async (req, res) => {
     const enrollmentToken = await EnrollmentToken.findOne({
       userId: user._id,
       tenantId: user.tenantId,
+      enrollmentMode: { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
       consumedAt: null,
       cancelledAt: null,
       expiresAt: { $gt: new Date() }
@@ -1822,6 +1877,7 @@ export const registerDevice = async (req, res) => {
         {
           userId: user._id,
           tenantId: user.tenantId,
+          enrollmentMode: ENROLLMENT_MODES.DEVICE_OWNER_QR,
           imei: req.body.imei,
           imei2: req.body.imei2,
           deviceModel: req.body.deviceModel,
@@ -1917,12 +1973,12 @@ export const registerDevice = async (req, res) => {
       policy: activePolicy
     });
   } catch (error) {
-    if (session.inTransaction()) {
+    if (session?.inTransaction()) {
       await session.abortTransaction();
     }
     return sendError(res, 500, error.message || "Internal server error");
   } finally {
-    session.endSession();
+    if (session) session.endSession();
   }
 };
 
@@ -1932,7 +1988,9 @@ export const registerDevice = async (req, res) => {
  */
 export const getDevicePolicy = async (req, res) => {
   try {
-    const device = await Device.findOne({ userId: req.auth.id }).lean();
+    const device = req.runningDevice
+      ? await Device.findById(req.runningDevice._id).lean()
+      : await Device.findOne({ userId: req.auth.id }).lean();
 
     if (!device) {
       return sendError(res, 400, "Registered device not found");
@@ -1956,8 +2014,8 @@ export const getDevicePolicy = async (req, res) => {
       appConfig: getBorrowerAppConfig(tenantPolicy),
       policyKey: policy.policyKey,
       policyVersion: policy.version,
-      restrictions: policy.restrictions,
-      tempUnlockExpiresAt: device.tempUnlockExpiresAt
+      restrictions: isRunningDevice(device) ? {} : policy.restrictions,
+      tempUnlockExpiresAt: device.tempUnlockExpiresAt || null
     });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
@@ -1978,7 +2036,7 @@ export const getAppDashboard = async (req, res) => {
 
     const [schedule, device, tenantPolicy] = await Promise.all([
       EmiSchedule.findOne({ userId: user._id, tenantId: user.tenantId }).lean(),
-      Device.findOne({ userId: user._id }).lean(),
+      findDeviceForAppRequest(req).lean(),
       TenantPolicy.findOne({ tenantId: user.tenantId }).lean()
     ]);
     const appConfig = getBorrowerAppConfig(tenantPolicy);
@@ -2137,7 +2195,7 @@ export const getInstallmentDetail = async (req, res) => {
  */
 export const getPaymentQr = async (req, res) => {
   try {
-    const device = await Device.findOne({ userId: req.auth.id }).lean();
+    const device = await findDeviceForAppRequest(req).lean();
 
     if (!device) {
       return sendError(res, 400, "Registered device not found");
@@ -2191,7 +2249,7 @@ export const submitPayment = async (req, res) => {
       return sendError(res, 400, "Valid payment amount is required");
     }
 
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = await findDeviceForAppRequest(req);
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
@@ -2338,7 +2396,7 @@ export const createUnlockRequest = async (req, res) => {
       return sendError(res, 400, "Reason is required");
     }
 
-    const device = await Device.findOne({ userId: req.auth.id }).lean();
+    const device = await findDeviceForAppRequest(req).lean();
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
@@ -2507,7 +2565,9 @@ export const listBorrowerUnlockRequests = async (req, res) => {
  */
 export const pingDevice = async (req, res) => {
   try {
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = req.runningDevice
+      ? await Device.findById(req.runningDevice._id)
+      : await Device.findOne({ userId: req.auth.id });
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
@@ -2556,9 +2616,16 @@ export const pingDevice = async (req, res) => {
  */
 export const syncDevice = async (req, res) => {
   try {
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = req.runningDevice
+      ? await Device.findById(req.runningDevice._id)
+      : await Device.findOne({ userId: req.auth.id });
     if (!device) {
       return sendError(res, 400, "Registered device not found");
+    }
+    if (isRunningDevice(device) && (req.body.manualOverride?.active || req.body.manualOverride?.tokenId)) {
+      return sendError(res, 409, "Manual override is unavailable for running-device enrollment", {
+        code: "UNSUPPORTED_FOR_ENROLLMENT_MODE"
+      });
     }
 
     device.lastSeenAt = new Date();
@@ -2824,7 +2891,9 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       return sendError(res, 400, "Command ID and status are required");
     }
 
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = req.runningDevice
+      ? await Device.findById(req.runningDevice._id)
+      : await Device.findOne({ userId: req.auth.id });
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }
@@ -2834,6 +2903,12 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       return sendError(res, 404, "Device command not found", {
         code: "COMMAND_NOT_FOUND"
       });
+    }
+
+    try {
+      assertRunningCommandAllowed(device, command.commandType, command.payload);
+    } catch (error) {
+      return sendError(res, error.statusCode, error.message, { code: error.code });
     }
 
     if (!["acknowledged", "failed"].includes(req.body.status)) {
@@ -2865,6 +2940,41 @@ export const acknowledgeDeviceCommand = async (req, res) => {
       req.body.releaseCompleted !== true
     ) {
       return sendError(res, 400, "releaseCompleted must be true for a successful device release");
+    }
+
+    if (isRunningDevice(device) && !["acknowledged", "failed"].includes(command.status) &&
+      command.commandType === "TEMP_UNLOCK" &&
+      (device.state !== DEVICE_STATES.TEMP_UNLOCK || !device.tempUnlockExpiresAt ||
+        new Date(device.tempUnlockExpiresAt) <= new Date())) {
+      return sendError(res, 409, "Temporary unlock was superseded or expired", { code: "COMMAND_EXPIRED" });
+    }
+
+    if (isRunningDevice(device) && req.body.status === "acknowledged") {
+      if (command.commandType === "LOCK" &&
+        (req.body.appRestrictionApplied !== true || req.body.lockOverlayShown !== true)) {
+        return sendError(res, 400, "Running lock acknowledgement requires applied restriction and shown overlay");
+      }
+      if (command.commandType === "UNLOCK" &&
+        (req.body.appRestrictionCleared !== true || req.body.lockOverlayCleared !== true)) {
+        return sendError(res, 400, "Running unlock acknowledgement requires cleared restriction and overlay");
+      }
+      if (command.commandType === "TEMP_UNLOCK" &&
+        (req.body.appRestrictionCleared !== true || req.body.lockOverlayCleared !== true)) {
+        return sendError(res, 400, "Running temporary unlock acknowledgement requires cleared restriction and overlay");
+      }
+      if (command.commandType === "EMI_REMINDER" &&
+        !["OVERLAY_SHOWN", "NOTIFICATION_POSTED", "DEFERRED"].includes(req.body.presentationResult)) {
+        return sendError(res, 400, "Running reminder acknowledgement requires actual presentation result");
+      }
+      if (command.commandType === "EMI_REMINDER" &&
+        command.payload?.reminderType === EMI_REMINDER_TYPES.OVERDUE &&
+        req.body.presentationResult === "OVERLAY_SHOWN") {
+        return sendError(res, 400, "Overdue reminders must be notification-only on running devices");
+      }
+      if (command.commandType === "EMI_REMINDER" &&
+        req.body.presentationResult === "OVERLAY_SHOWN" && typeof req.body.soundPlayed !== "boolean") {
+        return sendError(res, 400, "Overlay reminder acknowledgement requires actual soundPlayed outcome");
+      }
     }
 
     const terminalStatusAlreadyRecorded =
@@ -2911,7 +3021,7 @@ export const acknowledgeDeviceCommand = async (req, res) => {
           command.triggeredByAccountId || null
         );
         device.state = DEVICE_STATES.RELEASED;
-        device.deviceOwnerStatus = "RELEASED";
+        if (!isRunningDevice(device)) device.deviceOwnerStatus = "RELEASED";
         device.releasedAt = releasedAt;
         device.tempUnlockExpiresAt = undefined;
         device.restrictionState.desired = clearedRestrictions;
@@ -2921,6 +3031,9 @@ export const acknowledgeDeviceCommand = async (req, res) => {
         device.securityControlState = clearedSecurityControls;
         device.lastPolicyAppliedAt = releasedAt;
         device.stateUpdatedAt = releasedAt;
+        if (isRunningDevice(device)) {
+          device.fcmToken = undefined;
+        }
       } else if (command.commandType === "RESTRICTIONS_UPDATE") {
         const appliedRestrictionsVersion = Number(req.body.appliedRestrictionsVersion);
         const commandVersion = Number(command.payload?.restrictionVersion);
@@ -3065,7 +3178,7 @@ export const reportSecurityEvent = async (req, res) => {
       return sendError(res, 400, "Security event type and message are required");
     }
 
-    const device = await Device.findOne({ userId: req.auth.id });
+    const device = await findDeviceForAppRequest(req);
     if (!device) {
       return sendError(res, 400, "Registered device not found");
     }

@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ENROLLMENT_MODES } from "../constants/enrollmentModes.js";
 
 const userSchema = new mongoose.Schema(
   {
@@ -36,6 +37,12 @@ const userSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true
+    },
+    enrollmentMode: {
+      type: String,
+      enum: Object.values(ENROLLMENT_MODES),
+      default: ENROLLMENT_MODES.DEVICE_OWNER_QR,
+      index: true
     },
     loanAmount: Number,
     emiAmount: Number,

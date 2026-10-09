@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { ownerOnlyDealerDevice } from "../../middleware/requireOwnerEnrollment.js";
 
 import { verifyJwt } from "../../middleware/verifyJwt.js";
 import { requireTokenType } from "../../middleware/requireTokenType.js";
@@ -31,6 +32,7 @@ import {
   lockTenantDevice,
   markUserEmiInstallmentPaid,
   regenerateEnrollmentQr,
+  releaseTenantDevice,
   registerBorrower,
   rejectPayment,
   rejectTenantUnlockRequest,
@@ -81,11 +83,12 @@ distributorRoutes.get("/devices/:id", getDistributorDeviceById);
 distributorRoutes.post("/devices/:id/upcoming-payment-reminder", sendUpcomingPaymentCommand);
 distributorRoutes.post("/devices/:id/lock", lockTenantDevice);
 distributorRoutes.post("/devices/:id/unlock", unlockTenantDevice);
+distributorRoutes.post("/devices/:id/release", releaseTenantDevice);
 distributorRoutes.post("/devices/:id/temp-unlock", tempUnlockTenantDevice);
-distributorRoutes.patch("/devices/:id/restrictions", updateTenantDeviceRestrictions);
-distributorRoutes.patch("/devices/:id/controls/factory-reset", updateTenantFactoryResetControl);
-distributorRoutes.patch("/devices/:id/controls/usb-debugging", updateTenantUsbDebuggingControl);
-distributorRoutes.patch("/devices/:id/controls/unknown-app-installs", updateTenantUnknownAppInstallsControl);
+distributorRoutes.patch("/devices/:id/restrictions", ownerOnlyDealerDevice, updateTenantDeviceRestrictions);
+distributorRoutes.patch("/devices/:id/controls/factory-reset", ownerOnlyDealerDevice, updateTenantFactoryResetControl);
+distributorRoutes.patch("/devices/:id/controls/usb-debugging", ownerOnlyDealerDevice, updateTenantUsbDebuggingControl);
+distributorRoutes.patch("/devices/:id/controls/unknown-app-installs", ownerOnlyDealerDevice, updateTenantUnknownAppInstallsControl);
 distributorRoutes.post("/devices/:id/location-request", requestTenantDeviceLocation);
 distributorRoutes.get("/qr-codes", listQrCodes);
 distributorRoutes.post("/qr-codes", parseTenantQrImageUpload, addQrCode);
