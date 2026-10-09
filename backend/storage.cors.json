@@ -2,7 +2,8 @@
   {
     "origin": [
       "http://localhost:3000",
-      "https://cred-nexa-t1o7.vercel.app"
+      "https://cred-nexa-t1o7.vercel.app",
+      "https://admin.crednexa.co.in"
     ],
     "method": [
       "GET",
