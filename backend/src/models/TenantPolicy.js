@@ -10,7 +10,7 @@ const tenantPolicySchema = new mongoose.Schema(
       required: true,
       unique: true
     },
-    runningEnrollmentEnabled: { type: Boolean, default: false },
+    runningEnrollmentEnabled: { type: Boolean, default: true },
     runningLocationEnabled: { type: Boolean, default: false },
     version: {
       type: Number,

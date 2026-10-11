@@ -648,7 +648,7 @@ Example response if an old running build calls any of the four endpoints:
 }
 ```
 
-`RUNNING_ENROLLMENT_PACKAGE_NAME` remains required in backend running-enrollment configuration; it does not make Play Integrity part of the running APK contract. No Integrity result is required by `POST /device/register`. Keep the separate `POST /security/event` route for actual local security observations and `POST /device/capabilities` for Android grant changes:
+The running APK's eventual Android package ID is not required for borrower registration, QR generation, or device activation. The running app does not call Play Integrity and no Integrity result is required by `POST /device/register`. Keep the separate `POST /security/event` route for actual local security observations and `POST /device/capabilities` for Android grant changes:
 
 | Endpoint | Request body | Success response `data` |
 | --- | --- | --- |

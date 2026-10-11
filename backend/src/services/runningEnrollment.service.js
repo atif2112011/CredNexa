@@ -8,9 +8,6 @@ export const RUNNING_REQUIREMENTS_VERSION = 1;
 
 export const assertRunningEnrollmentConfigured = () => {
   getEncryptionKey();
-  if (!env.runningEnrollmentPackageName) {
-    throw new Error("RUNNING_ENROLLMENT_PACKAGE_NAME is required before running enrollment is enabled");
-  }
   buildRunningQrText("configuration-check");
 };
 

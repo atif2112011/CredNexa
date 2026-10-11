@@ -1,4 +1,5 @@
 import { PublishConsentAction } from "@/components/actions/publish-consent-action";
+import { notFound } from "next/navigation";
 import { DetailGrid } from "@/components/data/detail-grid";
 import { FormDialog } from "@/components/data/form-dialog";
 import { ConsentTextPanel } from "@/components/data/visual-panels";
@@ -11,6 +12,7 @@ import type { RecordItem } from "@/types/api";
 export default async function ConsentVersionDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const consent = (await getDetail(`/admin/consent-versions/${id}`)) as RecordItem;
+  if (consent.enrollmentMode === "RUNNING_APP") notFound();
   const published = Boolean(consent.isCurrent || consent.publishedAt);
   const consentFormValues = {
     version: consent.version,
@@ -46,6 +48,7 @@ export default async function ConsentVersionDetailPage({ params }: { params: Pro
               endpoint="/api/admin/consent-versions"
               fields={consentFields}
               defaultValues={{ ...consentFormValues, version: "" }}
+              fixedPayload={{ enrollmentMode: "DEVICE_OWNER_QR" }}
               variant={published ? "default" : "secondary"}
             />
           </>

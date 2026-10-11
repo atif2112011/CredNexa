@@ -17,6 +17,7 @@ import { Account } from "../../models/Account.js";
 import { APP_BUILD_CHANNELS, APP_BUILD_PLATFORMS, APP_BUILD_STATUSES, APP_BUILD_TYPES, AppBuild } from "../../models/AppBuild.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { ChannelPartner } from "../../models/ChannelPartner.js";
+import { ConsentRecord } from "../../models/ConsentRecord.js";
 import { ConsentVersion } from "../../models/ConsentVersion.js";
 import { Device } from "../../models/Device.js";
 import { DeviceCommand } from "../../models/DeviceCommand.js";
@@ -3611,6 +3612,43 @@ export const updateConsentVersion = async (req, res) => {
     });
 
     return sendSuccess(res, 200, "Consent version updated successfully", consentVersion);
+  } catch (error) {
+    return sendError(res, 500, error.message || "Internal server error");
+  }
+};
+
+/** Delete an unused draft consent version. Published borrower terms remain immutable. */
+export const deleteConsentVersion = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return sendError(res, 400, "Invalid consent version ID");
+    }
+    const consentVersion = await ConsentVersion.findById(req.params.id).lean();
+    if (!consentVersion) return sendError(res, 404, "Consent version not found");
+    if (consentVersion.isCurrent || consentVersion.publishedAt) {
+      return sendError(res, 409, "Published consent versions cannot be deleted");
+    }
+    if (await ConsentRecord.exists({ consentVersionId: consentVersion._id })) {
+      return sendError(res, 409, "Consent version has borrower acceptances and cannot be deleted");
+    }
+    const result = await ConsentVersion.deleteOne({
+      _id: consentVersion._id,
+      isCurrent: { $ne: true },
+      publishedAt: null
+    });
+    if (result.deletedCount !== 1) {
+      return sendError(res, 409, "Consent version changed; reload before deleting");
+    }
+    await createAuditLog({
+      eventType: AUDIT_EVENTS.CONSENT_VERSION_DELETED,
+      actorId: req.auth.id,
+      metadata: {
+        consentVersionId: consentVersion._id,
+        version: consentVersion.version,
+        enrollmentMode: getEnrollmentMode(consentVersion)
+      }
+    });
+    return sendSuccess(res, 200, "Draft consent version deleted", { id: consentVersion._id });
   } catch (error) {
     return sendError(res, 500, error.message || "Internal server error");
   }

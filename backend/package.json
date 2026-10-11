@@ -17,6 +17,8 @@
     "migrate:risk-auto-lock-types": "node src/scripts/migrateRiskAutoLockTypes.js",
     "migrate:tenant-device-control-mode": "node src/scripts/migrateTenantDeviceControlMode.js",
     "migrate:enrollment-modes": "node src/scripts/migrateEnrollmentModes.js",
+    "migrate:running-enrollment-default": "node src/scripts/backfillRunningEnrollmentEnabled.js",
+    "migrate:running-consent": "node src/scripts/publishRunningConsentFromOwner.js",
     "migrate:partner-tenant-onboarding": "node src/scripts/backfillPartnerTenantOnboarding.js",
     "cleanup:security-control-commands": "node src/scripts/cleanupSecurityControlCommands.js",
     "backfill:tenant-poc": "node src/scripts/backfillTenantPoc.js",

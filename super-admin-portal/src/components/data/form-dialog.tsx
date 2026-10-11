@@ -35,6 +35,7 @@ type FormDialogProps = {
   variant?: "default" | "outline" | "secondary" | "destructive";
   payloadMode?: "default" | "account";
   successVariant?: "partner" | "tenant";
+  fixedPayload?: Record<string, unknown>;
 };
 
 type ApiEnvelope = {
@@ -123,7 +124,8 @@ export function FormDialog({
   defaultValues,
   variant = "default",
   payloadMode = "default",
-  successVariant
+  successVariant,
+  fixedPayload
 }: FormDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -166,12 +168,13 @@ export function FormDialog({
         return [key, normalizedValue];
       })
     );
-    const payload =
+    const preparedPayload =
       payloadMode === "account"
         ? prepareAccountPayload(values)
         : fields.some((field) => field.name.startsWith("address"))
           ? buildPartnerOrTenantPayload(values)
           : normalizedPayload;
+    const payload = { ...preparedPayload, ...fixedPayload };
 
     const response = await fetch(endpoint, {
       method,

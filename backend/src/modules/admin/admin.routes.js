@@ -21,6 +21,7 @@ import {
   createAdminAccount,
   createChannelPartner,
   createConsentVersion,
+  deleteConsentVersion,
   createTenant,
   generateDeviceManualOverrideToken,
   getAdminDashboard,
@@ -163,6 +164,7 @@ adminRoutes.get("/consent-versions", listConsentVersions);
 adminRoutes.post("/consent-versions", createConsentVersion);
 adminRoutes.get("/consent-versions/:id", getConsentVersionById);
 adminRoutes.patch("/consent-versions/:id", updateConsentVersion);
+adminRoutes.delete("/consent-versions/:id", deleteConsentVersion);
 adminRoutes.patch("/consent-versions/:id/publish", publishConsentVersion);
 
 adminRoutes.get("/escalations", listAdminEscalations);

@@ -1254,10 +1254,8 @@ export const verifyIntegrity = async (req, res) => {
       findDeviceForAppRequest(req),
       User.findById(req.auth.id).select("enrollmentMode").lean()
     ]);
-    // Play Integrity decodes against the APK's package, which differs by enrollment mode.
-    const packageName = isRunningDevice(device || user)
-      ? env.runningEnrollmentPackageName
-      : env.playIntegrityPackageName;
+    // Running enrollment is rejected by requireOwnerPlayIntegrity before this point.
+    const packageName = env.playIntegrityPackageName;
     const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     let verdict;
 
@@ -1493,7 +1491,8 @@ export const verifyRiskIntegrity = async (req, res) => {
       return sendError(res, 400, "Registered device not found");
     }
 
-    const packageName = isRunningDevice(device) ? env.runningEnrollmentPackageName : env.playIntegrityPackageName;
+    // Running enrollment is rejected by requireOwnerPlayIntegrity before this point.
+    const packageName = env.playIntegrityPackageName;
     const enforcementEnabled = ["enforce", "enforcement"].includes(env.deviceIntegrityMode);
     const verifiedAt = new Date();
     let verdict;

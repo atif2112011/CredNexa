@@ -5,11 +5,11 @@ import { consentFields } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
 export default async function ConsentVersionsPage() {
-  const data = await getList("/admin/consent-versions");
+  const data = await getList("/admin/consent-versions", { enrollmentMode: "DEVICE_OWNER_QR", limit: 100 });
 
   return (
     <>
-      <PageHeader title="Consent Versions" description="Create legal consent versions and publish the active platform version." actions={<FormDialog title="Create consent version" triggerLabel="Create version" endpoint="/api/admin/consent-versions" fields={consentFields} />} />
+      <PageHeader title="Device Owner Consent" description="Manage consent for QR-provisioned Device Owner enrollment." actions={<FormDialog title="Create Device Owner consent" triggerLabel="Create version" endpoint="/api/admin/consent-versions" fields={consentFields} fixedPayload={{ enrollmentMode: "DEVICE_OWNER_QR" }} />} />
       <ResourceTable
         rows={data.items}
         detailBasePath="/consent-versions"

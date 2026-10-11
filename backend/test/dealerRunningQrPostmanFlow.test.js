@@ -52,7 +52,6 @@ test("dealer HTTP login, running borrower registration, and Generate QR sequence
     replace(console, "log", () => {});
     replace(env, "runningEnrollmentSecretKey", crypto.randomBytes(32).toString("hex"));
     replace(env, "runningEnrollmentLinkBase", "https://enroll.example.test/running-enrollment");
-    replace(env, "runningEnrollmentPackageName", "test.example.running");
     replace(mongoose, "startSession", async () => ({
       startTransaction() {}, async commitTransaction() {}, async abortTransaction() {},
       inTransaction: () => false, endSession() {}

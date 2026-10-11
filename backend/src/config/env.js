@@ -43,7 +43,6 @@ export const env = {
   testOtpMobilePrefix: parseTestOtpMobilePrefix(process.env.TEST_OTP_MOBILE_PREFIX),
   runningEnrollmentSecretKey: process.env.RUNNING_ENROLLMENT_SECRET_KEY,
   runningEnrollmentLinkBase: process.env.RUNNING_ENROLLMENT_LINK_BASE,
-  runningEnrollmentPackageName: process.env.RUNNING_ENROLLMENT_PACKAGE_NAME,
   otpExpiresInSeconds: Number(process.env.OTP_EXPIRES_IN_SECONDS || 900),
   otpResendCooldownSeconds: Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 30),
   msg91AuthKey: process.env.MSG91_AUTH_KEY,
