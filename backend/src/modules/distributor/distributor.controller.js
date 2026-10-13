@@ -1,6 +1,4 @@
-import crypto from "crypto";
 import mongoose from "mongoose";
-import QRCode from "qrcode";
 
 import { AUDIT_EVENTS } from "../../constants/auditEvents.js";
 import { ENROLLMENT_MODES, getEnrollmentMode, isRunningDevice } from "../../constants/enrollmentModes.js";
@@ -22,9 +20,7 @@ import { Payment } from "../../models/Payment.js";
 import { TENANT_CREDIT_PURCHASE_STATUSES, TenantCreditPurchaseRequest } from "../../models/TenantCreditPurchaseRequest.js";
 import { TenantPolicy } from "../../models/TenantPolicy.js";
 import { Tenant } from "../../models/Tenant.js";
-import { TenantCreditLedger, TENANT_CREDIT_LEDGER_TYPES } from "../../models/TenantCreditLedger.js";
 import { UnlockRequest } from "../../models/UnlockRequest.js";
-import {ProvisioningDetails} from "../../models/ProvisioningDetails.js";
 import { User } from "../../models/User.js";
 import {
   DEVICE_POLICY_KEYS,
@@ -78,12 +74,7 @@ import {
   isManualDeviceControl
 } from "../../services/tenantDeviceControl.service.js";
 import { isTenantDeviceCommandStateSatisfied } from "../../services/tenantDeviceCommand.service.js";
-import {
-  assertRunningEnrollmentConfigured,
-  buildRunningQrText,
-  createRunningTokenFields,
-  decryptRunningSecret
-} from "../../services/runningEnrollment.service.js";
+import { createBorrowerEnrollment, getBorrowerEnrollmentQr, buildQrResponse } from "../../services/borrowerEnrollment.service.js";
 import {
   assertRunningActionCapability,
   assertRunningCommandAllowed,
@@ -104,23 +95,6 @@ import {
 } from "../../utils/tenantCreditDiscount.js";
 import { hasRequiredFields, isValidObjectId } from "../../utils/validators.js";
 import { deliverDeviceCommandImmediately } from "../../jobs/fcmDeliveryWorker.js";
-
-const addMonths = (date, months) => {
-  const dueDate = new Date(date);
-  dueDate.setMonth(dueDate.getMonth() + months);
-  return dueDate;
-};
-
-const generateInstallments = ({ emiAmount, tenureMonths, disbursementDate }) => {
-  const startDate = new Date(disbursementDate);
-
-  return Array.from({ length: Number(tenureMonths) }, (_, index) => ({
-    installmentNumber: index + 1,
-    dueDate: addMonths(startDate, index + 1),
-    emiAmount: Number(emiAmount),
-    status: "pending"
-  }));
-};
 
 const getPagination = (query) => {
   const page = Math.max(Number(query.page) || 1, 1);
@@ -480,67 +454,6 @@ const applyPaymentToEmiSchedule = async ({ payment, accountId, session }) => {
   };
 };
 
-const createEnrollmentTokenValue = () => crypto.randomBytes(24).toString("hex");
-
-const getEnrollmentTokenExpiry = () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-const createBorrowerUid = () => `BRW-${new Date().getFullYear()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
-
-const generateUniqueBorrowerUid = async () => {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const loanId = createBorrowerUid();
-    const existingUser = await User.exists({ loanId });
-    if (!existingUser) return loanId;
-  }
-
-  throw new Error("Unable to generate borrower UID");
-};
-
-const buildQrPayload = (enrollmentToken, provisioningDetails) => (
-  {
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": provisioningDetails?.adminComponentName,
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": provisioningDetails?.adminPackageDownloadUrl,
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM": provisioningDetails?.adminSignatureChecksum,
-  "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": provisioningDetails?.skipEncryption || false,
-  "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
-    enrollmentToken
-  }
-});
-
-const buildQrResponse = async (enrollmentToken) => {
-  if (isRunningDevice(enrollmentToken)) {
-    const secret = decryptRunningSecret(enrollmentToken.runningTokenCiphertext);
-    const qrText = buildRunningQrText(secret);
-    return {
-      enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
-      qrType: "RUNNING_APP_LINK",
-      qrText,
-      qrCodeDataUrl: await QRCode.toDataURL(qrText, {
-        errorCorrectionLevel: "M",
-        margin: 2,
-        width: 512
-      }),
-      qrCodeMimeType: "image/png",
-      tokenExpiresAt: enrollmentToken.expiresAt
-    };
-  }
-  const provisioningDetails = await ProvisioningDetails.findOne({}).lean();
-  const qrPayload = buildQrPayload(enrollmentToken.token, provisioningDetails);
-  const qrCodeDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
-    errorCorrectionLevel: "M",
-    margin: 2,
-    width: 512
-  });
-
-  return {
-    qrPayload,
-    qrCodeDataUrl,
-    qrCodeMimeType: "image/png",
-    enrollmentToken: enrollmentToken.token,
-    tokenExpiresAt: enrollmentToken.expiresAt
-  };
-};
-
 const getEnrollmentStatus = ({ enrollmentToken, user, device, now = new Date() }) => {
   if (enrollmentToken.cancelledAt) return "TOKEN_CANCELLED";
   if (!enrollmentToken.consumedAt && enrollmentToken.expiresAt <= now) return "TOKEN_EXPIRED";
@@ -556,235 +469,13 @@ const getEnrollmentStatus = ({ enrollmentToken, user, device, now = new Date() }
  * Sample body: { "name": "Ramesh Kumar", "mobile": "9876543210", "aadhaarLinkedMobile": "9876543210", "loanAmount": 18000, "emiAmount": 3000, "tenureMonths": 6, "disbursementDate": "2026-05-21" }
  */
 export const registerBorrower = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-
-    const requiredFields = [
-      "name",
-      "mobile",
-      "aadhaarLinkedMobile",
-      "loanAmount",
-      "emiAmount",
-      "tenureMonths",
-      "disbursementDate"
-    ];
-
-    if (!hasRequiredFields(req.body, requiredFields)) {
-      return sendError(res, 400, "Borrower and EMI details are required");
-    }
-
-    const enrollmentMode = req.body.enrollmentMode === undefined
-      ? ENROLLMENT_MODES.DEVICE_OWNER_QR
-      : req.body.enrollmentMode;
-    if (!Object.values(ENROLLMENT_MODES).includes(enrollmentMode)) {
-      return sendError(res, 400, "Invalid enrollmentMode");
-    }
-    if (enrollmentMode === ENROLLMENT_MODES.RUNNING_APP) {
-      const tenantPolicy = await TenantPolicy.findOne({ tenantId: tenant._id }).lean();
-      if (tenantPolicy?.runningEnrollmentEnabled !== true) {
-        return sendError(res, 409, "Running enrollment is not enabled for this dealer", {
-          code: "RUNNING_ENROLLMENT_DISABLED"
-        });
-      }
-      try {
-        assertRunningEnrollmentConfigured();
-      } catch (error) {
-        return sendError(res, 409, error.message, { code: "RUNNING_ENROLLMENT_NOT_CONFIGURED" });
-      }
-    }
-
-    const loanAmount = Number(req.body.loanAmount);
-    const emiAmount = Number(req.body.emiAmount);
-    const tenureMonths = Number(req.body.tenureMonths);
-
-    if (!Number.isFinite(tenureMonths) || tenureMonths <= 0) {
-      return sendError(res, 400, "Tenure months must be greater than 0");
-    }
-    if (!Number.isFinite(loanAmount) || loanAmount <= 0) {
-      return sendError(res, 400, "Loan amount must be greater than 0");
-    }
-    if (!Number.isFinite(emiAmount) || emiAmount <= 0) {
-      return sendError(res, 400, "EMI amount must be greater than 0");
-    }
-    if (emiAmount > loanAmount) {
-      return sendError(res, 400, "EMI amount cannot be greater than loan amount");
-    }
-
-    const expectedTenureMonths = Math.ceil(loanAmount / emiAmount);
-    if (tenureMonths !== expectedTenureMonths) {
-      return sendError(res, 400, "Tenure months does not match loan amount and EMI amount");
-    }
-
-    const disbursementDate = new Date(req.body.disbursementDate);
-    const previousDayStart = new Date();
-    previousDayStart.setHours(0, 0, 0, 0);
-    previousDayStart.setDate(previousDayStart.getDate() - 1);
-
-    if (disbursementDate < previousDayStart) {
-      return sendError(res, 400, "Disbursement date cannot be earlier than previous day");
-    }
-
-    const existingUser = await User.findOne({ mobile: req.body.mobile }).lean();
-
-    if (existingUser) {
-      return sendError(res, 400, "User mobile already exists");
-    }
-
-    const loanId = await generateUniqueBorrowerUid();
-
-    session.startTransaction();
-
-    const creditedTenant = await Tenant.findOneAndUpdate(
-      { _id: tenant._id, creditBalance: { $gte: 1 } },
-      { $inc: { creditBalance: -1 } },
-      { new: false, session }
-    );
-
-    if (!creditedTenant) {
-      await session.abortTransaction();
-      return sendError(res, 402, "Insufficient credits to create borrower");
-    }
-
-    const balanceBefore = Number(creditedTenant.creditBalance || 0);
-    const balanceAfter = balanceBefore - 1;
-
-    const users = await User.create(
-      [
-        {
-          name: req.body.name,
-          mobile: req.body.mobile,
-          email: req.body.email,
-          aadhaarLinkedMobile: req.body.aadhaarLinkedMobile,
-          tenantId: tenant._id,
-          loanId,
-          enrollmentMode,
-          loanAmount,
-          emiAmount,
-          tenureMonths,
-          disbursementDate: req.body.disbursementDate,
-          registeredBy: req.auth.id
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    const user = users[0];
-
-    await TenantCreditLedger.create(
-      [
-        {
-          tenantId: tenant._id,
-          type: TENANT_CREDIT_LEDGER_TYPES.BORROWER_CREATION,
-          delta: -1,
-          balanceBefore,
-          balanceAfter,
-          actorId: req.auth.id,
-          actorCollection: "accounts",
-          userId: user._id,
-          reason: "Borrower created",
-          metadata: { loanId: user.loanId }
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    const installments = generateInstallments({ emiAmount, tenureMonths, disbursementDate: req.body.disbursementDate });
-
-    const schedules = await EmiSchedule.create(
-      [
-        {
-          userId: user._id,
-          tenantId: tenant._id,
-          loanId: user.loanId,
-          installments
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    const runningTokenFields = enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
-      ? createRunningTokenFields()
-      : null;
-    const enrollmentTokenValue = runningTokenFields?.token || createEnrollmentTokenValue();
-    const expiresAt = getEnrollmentTokenExpiry();
-    const enrollmentTokens = await EnrollmentToken.create(
-      [
-        {
-          token: enrollmentTokenValue,
-          enrollmentMode,
-          ...(runningTokenFields || {}),
-          userId: user._id,
-          tenantId: tenant._id,
-          expiresAt,
-          createdBy: req.auth.id
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    await createAuditLog(
-      {
-        eventType: AUDIT_EVENTS.USER_REGISTERED,
-        actorId: req.auth.id,
-        tenantId: tenant._id,
-        channelPartnerId: tenant.channelPartnerId,
-        userId: user._id,
-        metadata: { loanId: user.loanId, tenureMonths: user.tenureMonths }
-      },
-      { session }
-    );
-
-    await createAuditLog(
-      {
-        eventType: AUDIT_EVENTS.TENANT_CREDIT_CONSUMED,
-        actorId: req.auth.id,
-        tenantId: tenant._id,
-        channelPartnerId: tenant.channelPartnerId,
-        userId: user._id,
-        reason: "Borrower created",
-        metadata: {
-          loanId: user.loanId,
-          delta: -1,
-          balanceBefore,
-          balanceAfter
-        }
-      },
-      { session }
-    );
-
-    await session.commitTransaction();
-
-    await safeRefreshTenantMetrics(tenant._id, { source: "borrower_registration" });
-
-    return sendSuccess(res, 201, "Borrower registered successfully", {
-      userId: user._id,
-      tenantId: user.tenantId,
-      tenant: {
-        id: tenant._id,
-        name: tenant.name
-      },
-      loanId: user.loanId,
-      emiScheduleId: schedules[0]._id,
-      emiScheduleTenantId: schedules[0].tenantId,
-      ...(enrollmentMode === ENROLLMENT_MODES.RUNNING_APP
-        ? { enrollmentMode, enrollmentId: enrollmentTokens[0]._id }
-        : { enrollmentToken: enrollmentTokens[0].token }),
-      enrollmentTokenTenantId: enrollmentTokens[0].tenantId,
-      tokenExpiresAt: enrollmentTokens[0].expiresAt,
-      credits: {
-        remaining: balanceAfter
-      }
-    });
+    const result = await createBorrowerEnrollment({ tenant, actor: req.auth, body: req.body });
+    return sendSuccess(res, result.statusCode, result.message, result.data);
   } catch (error) {
-    if (session.inTransaction()) {
-      await session.abortTransaction();
-    }
-    return sendError(res, 500, error.message || "Internal server error");
-  } finally {
-    session.endSession();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.data);
   }
 };
 
@@ -2651,184 +2342,13 @@ export const sendUpcomingPaymentCommand = async (req, res) => {
  * Sample request: POST /distributor/users/665f.../enrollment/qr
  */
 export const regenerateEnrollmentQr = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const tenant = await ensureDistributorAccess(req, res);
     if (!tenant) return null;
-
-    if (!mongoose.isValidObjectId(req.params.userId)) {
-      return sendError(res, 400, "Valid user ID is required");
-    }
-
-    const user = await User.findOne({ _id: req.params.userId, tenantId: tenant._id }).lean();
-
-    if (!user || !user.isActive) {
-      return sendError(res, 404, "Active borrower not found");
-    }
-
-    const savedMode = getEnrollmentMode(user);
-    if (savedMode === ENROLLMENT_MODES.RUNNING_APP) {
-      const runningPolicy = await TenantPolicy.findOne({ tenantId: tenant._id })
-        .select("runningEnrollmentEnabled").lean();
-      if (runningPolicy?.runningEnrollmentEnabled !== true) {
-        return sendError(res, 409, "Running enrollment is disabled for this dealer", {
-          code: "RUNNING_ENROLLMENT_DISABLED"
-        });
-      }
-    }
-    if (req.body.enrollmentMode !== undefined && req.body.enrollmentMode !== savedMode) {
-      return sendError(res, 409, "Enrollment mode does not match borrower", {
-        code: "ENROLLMENT_MODE_MISMATCH"
-      });
-    }
-    // Older dealer builds omit mode and must never render a running claim as an owner QR.
-    if (savedMode === ENROLLMENT_MODES.RUNNING_APP && req.body.enrollmentMode !== savedMode) {
-      return sendError(res, 409, "Dealer app upgrade required for running enrollment", {
-        code: "DEALER_APP_UPGRADE_REQUIRED"
-      });
-    }
-
-    const existingDevice = await Device.findOne({ userId: user._id, tenantId: tenant._id }).lean();
-    // The list hides Generate QR for linked borrowers. Enforce that saved link state here too,
-    // including an inconsistent record whose linked Device document is temporarily missing.
-    if (user.isDeviceLinked === true || existingDevice) {
-      return sendError(res, 400, "Device is already registered for this borrower");
-    }
-
-    const now = new Date();
-    const validEnrollmentToken = await EnrollmentToken.findOne({
-      userId: user._id,
-      tenantId: tenant._id,
-      enrollmentMode: savedMode === ENROLLMENT_MODES.RUNNING_APP
-        ? ENROLLMENT_MODES.RUNNING_APP
-        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
-      consumedAt: null,
-      cancelledAt: null,
-      expiresAt: { $gt: now }
-    }).select("+runningTokenCiphertext").sort({ createdAt: -1 });
-
-    if (validEnrollmentToken && req.body.rotate !== true) {
-      validEnrollmentToken.lastQrGeneratedAt = now;
-      await validEnrollmentToken.save();
-
-      await createAuditLog({
-        eventType: AUDIT_EVENTS.ENROLLMENT_QR_GENERATED,
-        actorId: req.auth.id,
-        tenantId: tenant._id,
-        channelPartnerId: tenant.channelPartnerId,
-        userId: user._id,
-        metadata: { enrollmentTokenId: validEnrollmentToken._id, reused: true }
-      });
-
-      const qrResponse = await buildQrResponse(validEnrollmentToken);
-
-      return sendSuccess(res, 200, "Enrollment QR generated successfully", {
-        reusedExistingToken: true,
-        borrower: {
-          id: user._id,
-          name: user.name,
-          mobile: user.mobile,
-          loanId: user.loanId
-        },
-        ...qrResponse
-      });
-    }
-
-    session.startTransaction();
-
-    const oldEnrollmentToken = await EnrollmentToken.findOne({
-      userId: user._id,
-      tenantId: tenant._id,
-      enrollmentMode: savedMode === ENROLLMENT_MODES.RUNNING_APP
-        ? ENROLLMENT_MODES.RUNNING_APP
-        : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] },
-      consumedAt: null,
-      cancelledAt: null
-    })
-      .sort({ createdAt: -1 })
-      .session(session);
-
-    if (oldEnrollmentToken) {
-      oldEnrollmentToken.cancelledAt = now;
-      await oldEnrollmentToken.save({ session });
-    }
-
-    if (savedMode === ENROLLMENT_MODES.RUNNING_APP && user.consentRecordId) {
-      // A rotated QR is a new claim. Keep the old consent record immutable but require
-      // fresh OTP and acceptance bound to the new claim before activation.
-      await User.updateOne(
-        { _id: user._id, tenantId: tenant._id, isDeviceLinked: false },
-        { $set: { consentRecordId: null } },
-        { session }
-      );
-    }
-
-    const runningTokenFields = savedMode === ENROLLMENT_MODES.RUNNING_APP
-      ? createRunningTokenFields()
-      : null;
-    const newEnrollmentTokens = await EnrollmentToken.create(
-      [
-        {
-          token: runningTokenFields?.token || createEnrollmentTokenValue(),
-          enrollmentMode: savedMode,
-          ...(runningTokenFields || {}),
-          userId: user._id,
-          tenantId: tenant._id,
-          expiresAt: getEnrollmentTokenExpiry(),
-          lastQrGeneratedAt: now,
-          regeneratedFrom: oldEnrollmentToken?._id,
-          createdBy: req.auth.id
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    if (oldEnrollmentToken) {
-      oldEnrollmentToken.regeneratedTo = newEnrollmentTokens[0]._id;
-      await oldEnrollmentToken.save({ session });
-    }
-
-    await createAuditLog(
-      {
-        eventType: AUDIT_EVENTS.ENROLLMENT_QR_REGENERATED,
-        actorId: req.auth.id,
-        tenantId: tenant._id,
-        channelPartnerId: tenant.channelPartnerId,
-        userId: user._id,
-        metadata: {
-          oldEnrollmentTokenId: oldEnrollmentToken?._id,
-          newEnrollmentTokenId: newEnrollmentTokens[0]._id
-        }
-      },
-      { session }
-    );
-
-    await session.commitTransaction();
-
-    const qrResponse = await buildQrResponse(newEnrollmentTokens[0]);
-
-    return sendSuccess(res, 201, "Enrollment QR regenerated successfully", {
-      reusedExistingToken: false,
-      ...(savedMode === ENROLLMENT_MODES.DEVICE_OWNER_QR
-        ? { oldEnrollmentToken: oldEnrollmentToken?.token }
-        : {}),
-      oldEnrollmentTokenId: oldEnrollmentToken?._id,
-      borrower: {
-        id: user._id,
-        name: user.name,
-        mobile: user.mobile,
-        loanId: user.loanId
-      },
-      ...qrResponse
-    });
+    const result = await getBorrowerEnrollmentQr({ tenant, actor: req.auth, userId: req.params.userId, body: req.body });
+    return sendSuccess(res, result.statusCode, result.message, result.data);
   } catch (error) {
-    if (session.inTransaction()) {
-      await session.abortTransaction();
-    }
-    return sendError(res, 500, error.message || "Internal server error");
-  } finally {
-    session.endSession();
+    return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.data);
   }
 };
 

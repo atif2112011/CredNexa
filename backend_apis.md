@@ -12,6 +12,7 @@ Base path: `/api`
    - [Consent Versions](#get-adminconsent-versions)
    - [Escalations / Cases](#get-adminescalations)
    - [Devices and Commands](#get-admindevices)
+   - [Dev Tools](#dev-tools)
    - [Risk Flags](#get-adminrisk-flags)
    - [Audit Logs](#get-adminaudit-logs)
 2. [Tenant / Distributor APIs](#tenant-apis)
@@ -171,6 +172,138 @@ Sample response:
 ```
 
 ## Admin APIs
+
+### Dev Tools
+
+All four endpoints below require a **super-admin account JWT**. The admin portal accesses them through its existing `/api/admin/...` cookie-authenticated proxy. They add testing utilities without changing dealer or borrower app contracts.
+
+#### `GET /admin/dev-tools/dealers`
+
+Query: `enrollmentMode=DEVICE_OWNER_QR|RUNNING_APP` (required), `search` (optional dealer-name search), `page` (default 1), `limit` (default 20, maximum 100).
+
+QR eligibility is an active tenant with `distribute` capability. Running eligibility adds `runningEnrollmentEnabled: true`. Both Automatic and Manual dealers are included; credit balance may be zero.
+
+```json
+{
+  "success": true,
+  "message": "Eligible dealers fetched",
+  "data": {
+    "items": [{ "_id": "665f00000000000000000010", "name": "Example Manual Dealer", "creditBalance": 0, "deviceControlMode": "MANUAL" }],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "pages": 1 }
+  }
+}
+```
+
+#### `POST /admin/dev-tools/test-borrowers`
+
+Request:
+
+```json
+{ "tenantId": "665f00000000000000000010", "enrollmentMode": "RUNNING_APP" }
+```
+
+The server generates `TESTBORROWER-QR-YYYYMMDD-XXXXXXXX` or `TESTBORROWER-RUNNING-YYYYMMDD-XXXXXXXX` (UTC date, eight uppercase hex characters), a standard `BRW-...` loan ID, an unused mobile from the existing configured test OTP range, and the same Aadhaar-linked mobile. Loan defaults are ₹12,000, six monthly ₹2,000 installments and today's UTC disbursement date. Client-supplied identity, loan and credit-exemption fields are ignored.
+
+HTTP `201` returns the existing borrower-registration fields plus `borrower`, `creditsCharged: 0` and `otp`. An owner registration still returns its `enrollmentToken`; a running registration returns its `enrollmentId`. Example running response:
+
+```json
+{
+  "success": true,
+  "message": "Test borrower created without charging a dealer key",
+  "data": {
+    "userId": "665f00000000000000000020",
+    "tenantId": "665f00000000000000000010",
+    "tenant": { "id": "665f00000000000000000010", "name": "Example Manual Dealer" },
+    "loanId": "BRW-2026-AB12CD34",
+    "emiScheduleId": "665f00000000000000000030",
+    "emiScheduleTenantId": "665f00000000000000000010",
+    "enrollmentMode": "RUNNING_APP",
+    "enrollmentId": "665f00000000000000000040",
+    "enrollmentTokenTenantId": "665f00000000000000000010",
+    "tokenExpiresAt": "2026-10-20T12:00:00.000Z",
+    "credits": { "remaining": 0 },
+    "creditsCharged": 0,
+    "otp": "123456",
+    "borrower": {
+      "id": "665f00000000000000000020",
+      "name": "TESTBORROWER-RUNNING-20261013-A1B2C3D4",
+      "mobile": "9999900042",
+      "aadhaarLinkedMobile": "9999900042",
+      "loanId": "BRW-2026-AB12CD34",
+      "enrollmentMode": "RUNNING_APP",
+      "loanAmount": 12000,
+      "emiAmount": 2000,
+      "tenureMonths": 6,
+      "disbursementDate": "2026-10-13",
+      "deviceControlMode": "MANUAL"
+    }
+  }
+}
+```
+
+No key is deducted and no credit-ledger entry is created. Transactional audit records identify the admin, dealer, borrower, mode and zero charge. Normal dealer registration continues to charge a key, even for a test-looking name. Test borrowers follow existing consent, OTP, activation, cron and dealer policies and appear in ordinary dealer lists/metrics.
+
+#### `GET /admin/dev-tools/test-borrowers`
+
+Query: `search` (literal, case-insensitive name/mobile/loan ID/dealer-name search), `page` (default 1), `limit` (default 20, maximum 100). The strict generated-name filter applies before search and pagination; legacy differently named test records are not included. Results sort by `createdAt` and `_id`, newest first.
+
+```json
+{
+  "success": true,
+  "message": "Test borrowers fetched",
+  "data": {
+    "items": [{
+      "_id": "665f00000000000000000020",
+      "name": "TESTBORROWER-RUNNING-20261013-A1B2C3D4",
+      "mobile": "9999900042",
+      "loanId": "BRW-2026-AB12CD34",
+      "enrollmentMode": "RUNNING_APP",
+      "tenantId": { "_id": "665f00000000000000000010", "name": "Example Manual Dealer" },
+      "deviceControlMode": "MANUAL",
+      "isActive": true,
+      "isDeviceLinked": false,
+      "linkedDeviceId": null,
+      "canShowQr": true,
+      "enrollmentStatus": "PENDING_ENROLLMENT",
+      "createdAt": "2026-10-13T12:00:00.000Z"
+    }],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "pages": 1 },
+    "otp": "123456"
+  }
+}
+```
+
+`enrollmentStatus` is `PENDING_ENROLLMENT`, `PROVISIONED`, `LINKED_DEVICE_UNAVAILABLE` or `INACTIVE`. An actual device record also counts as linked even if the borrower's link flag is stale. Use `linkedDeviceId` for `/devices/:deviceId`; a marked-linked borrower without a resolvable device has no QR action. Listing returns no enrollment secrets or QR data.
+
+#### `POST /admin/dev-tools/test-borrowers/:userId/enrollment/qr`
+
+Request: `{}`. The server derives enrollment mode from storage, rechecks dealer eligibility/configuration and rejects inactive, non-test or already-linked borrowers. Client mode/rotation values do not change this behavior. A valid token is reused (`200`); an expired token is renewed (`201`), preserving the existing running-consent rebinding rules. Neither path charges a key.
+
+Returns existing mode-specific QR fields plus saved `enrollmentMode` and `otp`:
+
+```json
+{
+  "success": true,
+  "message": "Enrollment QR generated successfully",
+  "data": {
+    "reusedExistingToken": true,
+    "borrower": { "id": "665f00000000000000000020", "name": "TESTBORROWER-RUNNING-20261013-A1B2C3D4", "mobile": "9999900042", "loanId": "BRW-2026-AB12CD34" },
+    "enrollmentMode": "RUNNING_APP",
+    "qrType": "RUNNING_APP_LINK",
+    "qrText": "https://admin.crednexa.co.in/running-enrollment?code=EXAMPLE_ONLY",
+    "qrCodeDataUrl": "data:image/png;base64,...",
+    "qrCodeMimeType": "image/png",
+    "tokenExpiresAt": "2026-10-20T12:00:00.000Z",
+    "otp": "123456"
+  }
+}
+```
+
+Owner responses instead contain the existing `qrPayload` with Android provisioning extras and `enrollmentToken`, together with `qrCodeDataUrl`, MIME type, expiry and `enrollmentMode: "DEVICE_OWNER_QR"`. Display the returned PNG directly in a modal; a running QR is scanned inside the running app, while an owner QR is scanned during Android setup.
+
+**Errors/configuration:** Missing or invalid IDs/modes return `400`; an inactive/non-test borrower or missing dealer returns `404`; a linked borrower returns `400`. Configuration/eligibility failures return `409` with `data.code` of `DEALER_NOT_ELIGIBLE`, `RUNNING_ENROLLMENT_DISABLED`, `RUNNING_ENROLLMENT_NOT_CONFIGURED`, `OWNER_PROVISIONING_NOT_CONFIGURED`, `TEST_MOBILE_RANGE_NOT_CONFIGURED` or `TEST_MOBILE_RANGE_EXHAUSTED`. Missing authentication returns `401`; dealer/partner account access returns `403`.
+
+The existing eight-digit `TEST_OTP_MOBILE_PREFIX` supplies exactly 100 candidates, suffix `00`–`99`; current occupied borrower/account mobiles are skipped. There is no fallback outside this range. No new environment setting or database migration is introduced. QR/OTP values remain redacted from API logs.
 
 All `/admin` APIs require a `super_admin` account token.
 

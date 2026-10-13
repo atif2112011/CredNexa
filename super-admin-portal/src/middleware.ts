@@ -15,6 +15,7 @@ const protectedPrefixes = [
   "/commands",
   "/escalations",
   "/devices",
+  "/dev-tools",
   "/risk-flags",
   "/audit-logs"
 ];

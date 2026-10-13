@@ -6,6 +6,7 @@ import { parseApkUpload } from "../../middleware/parseApkUpload.js";
 import { parseAdminCreditPurchaseQrImageUpload, parsePaymentProofUpload } from "../../middleware/parsePaymentProofUpload.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { verifyJwt } from "../../middleware/verifyJwt.js";
+import { listDevDealers, listDevTestBorrowers, registerDevTestBorrower, showDevTestBorrowerQr } from "./adminDevTools.controller.js";
 import {
   acknowledgeRiskFlag,
   adjustTenantCredits,
@@ -106,6 +107,11 @@ export const adminRoutes = Router();
 
 adminRoutes.use(verifyJwt);
 adminRoutes.use(requireRole(ACCOUNT_ROLES.SUPER_ADMIN));
+
+adminRoutes.get("/dev-tools/dealers", listDevDealers);
+adminRoutes.post("/dev-tools/test-borrowers", registerDevTestBorrower);
+adminRoutes.get("/dev-tools/test-borrowers", listDevTestBorrowers);
+adminRoutes.post("/dev-tools/test-borrowers/:userId/enrollment/qr", showDevTestBorrowerQr);
 
 adminRoutes.get("/dashboard", getAdminDashboard);
 
