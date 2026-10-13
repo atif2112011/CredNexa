@@ -89,7 +89,8 @@ import {
   queueDeviceRelease,
   RELEASE_COMMAND_TYPE
 } from "../../services/deviceRelease.service.js";
-import { runAdminDeviceTestAction } from "../../services/adminDeviceTesting.service.js";
+import { queueAdminDeviceCommand } from "../../services/adminDeviceCommand.service.js";
+import { getAdminDeviceTestingActions, runAdminDeviceTestAction } from "../../services/adminDeviceTesting.service.js";
 import {
   GET_LOCATION_COMMAND_TYPE,
   queueGetLocationCommand
@@ -526,77 +527,6 @@ const applyEscalationDeviceCommand = async ({
   return { device, command: command[0] };
 };
 
-const queueAdminDeviceCommand = async ({
-  device,
-  accountId,
-  commandType,
-  targetState,
-  policyKey,
-  reason,
-  durationHours,
-  extraPayload = {},
-  session
-}) => {
-  assertRunningCommandAllowed(device, commandType, extraPayload);
-  assertRunningActionCapability(device, commandType);
-  const tempUnlockExpiresAt = durationHours ? new Date(Date.now() + durationHours * 60 * 60 * 1000) : null;
-  const activePolicy = await DevicePolicy.findOne({
-    tenantId: device.tenantId,
-    policyKey,
-    isActive: true
-  }).lean();
-
-  if (!activePolicy) {
-    throw new Error(`Active ${policyKey} policy not found for tenant`);
-  }
-
-  const nextPolicyVersion = Number(device.desiredPolicyVersion || 0) + 1;
-  const deviceUpdate = {
-    $set: {
-      state: targetState,
-      stateUpdatedAt: new Date(),
-      stateUpdatedBy: accountId,
-      currentPolicyKey: policyKey,
-      currentPolicyId: activePolicy._id,
-      desiredPolicyVersion: nextPolicyVersion
-    }
-  };
-
-  if (durationHours) {
-    deviceUpdate.$set.tempUnlockExpiresAt = tempUnlockExpiresAt;
-  } else {
-    deviceUpdate.$unset = { tempUnlockExpiresAt: "" };
-  }
-
-  const updatedDevice = await Device.findByIdAndUpdate(device._id, deviceUpdate, {
-    new: true,
-    session
-  });
-
-  const command = await DeviceCommand.create(
-    [
-      {
-        deviceId: device._id,
-        tenantId: device.tenantId,
-        commandType,
-        triggeredBy: "super_admin",
-        triggeredByAccountId: accountId,
-        payload: {
-          reason,
-          durationHours,
-          ...(tempUnlockExpiresAt ? { tempUnlockExpiresAt } : {}),
-          policyKey,
-          policyVersion: nextPolicyVersion,
-          ...extraPayload
-        }
-      }
-    ],
-    { session, ordered: true }
-  );
-
-  return { device: updatedDevice, command: command[0] };
-};
-
 const buildRiskWarningPayload = async (deviceId) => {
   const activeCriticalRiskFlags = await getActiveCriticalRiskFlagsForDevice(deviceId);
 
@@ -737,7 +667,7 @@ export const getAdminDashboard = async (req, res) => {
       riskFlagsBySeverity: toCountMap(riskFlagsBySeverity),
       recentEscalations: recentEscalations.map((item) => ({
         ...item,
-        deviceId: formatDeviceReference(item.deviceId)
+        deviceId: formatDeviceReference(item.deviceId, { maskImei: false })
       })),
       recentRiskFlags,
       recentAuditLogs
@@ -3768,7 +3698,7 @@ export const listAdminEscalations = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Escalations fetched successfully", {
-      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId, { maskImei: false }) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -3799,7 +3729,7 @@ export const getAdminEscalationByCaseId = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Escalation fetched successfully", {
-      unlockRequest: { ...unlockRequest, deviceId: formatDeviceReference(unlockRequest.deviceId) },
+      unlockRequest: { ...unlockRequest, deviceId: formatDeviceReference(unlockRequest.deviceId, { maskImei: false }) },
       commands,
       auditLogs
     });
@@ -3903,7 +3833,7 @@ export const unlockAdminEscalation = async (req, res) => {
 
     return sendSuccess(res, 200, "Admin unlock override queued successfully", {
       unlockRequest,
-      device: formatDeviceReference(device.toObject?.() || device),
+      device: formatDeviceReference(device.toObject?.() || device, { maskImei: false }),
       command
     });
   } catch (error) {
@@ -4081,30 +4011,33 @@ export const listDevices = async (req, res) => {
         .lean(),
       Device.countDocuments(filter)
     ]);
-    const runningTenantIds = [...new Set(items.filter(isRunningDevice).map((device) =>
+    const tenantIds = [...new Set(items.map((device) =>
       String(device.tenantId?._id || device.tenantId)))];
-    const runningPolicies = runningTenantIds.length
-      ? await TenantPolicy.find({ tenantId: { $in: runningTenantIds } })
-        .select("tenantId runningEnrollmentEnabled runningLocationEnabled").lean()
+    const tenantPolicies = tenantIds.length
+      ? await TenantPolicy.find({ tenantId: { $in: tenantIds } })
+        .select("tenantId runningEnrollmentEnabled runningLocationEnabled deviceControlRules").lean()
       : [];
-    const locationByTenant = new Map(runningPolicies.map((policy) => [
+    const locationByTenant = new Map(tenantPolicies.map((policy) => [
       String(policy.tenantId),
       policy.runningLocationEnabled === true
     ]));
+    const modeByTenant = new Map(tenantPolicies.map((policy) => [String(policy.tenantId), getTenantDeviceControlMode(policy)]));
 
     return sendSuccess(res, 200, "Devices fetched successfully", {
-      items: items.map((device) => isRunningDevice(device)
+      items: items.map((item) => {
+        const device = { ...item, enrollmentMode: getEnrollmentMode(item),
+          deviceControlMode: modeByTenant.get(String(item.tenantId?._id || item.tenantId)) || getTenantDeviceControlMode(null) };
+        return isRunningDevice(device)
         ? {
             ...device,
-            imei: `***********${device.imei.slice(-4)}`,
-            imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null,
             activationIdempotencyKey: undefined,
             fcmToken: undefined,
             allowedActions: getRunningAllowedActions(device, {
               locationEnabled: locationByTenant.get(String(device.tenantId?._id || device.tenantId)) === true
             })
           }
-        : { ...device, enrollmentMode: getEnrollmentMode(device) }),
+        : device;
+      }),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -4133,7 +4066,7 @@ export const getDeviceById = async (req, res) => {
     device.restrictionState = normalizeDeviceRestrictionState(device.restrictionState);
     device.securityControlState = normalizeDeviceSecurityControlState(device.securityControlState);
 
-    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands, tenantPolicy] = await Promise.all([
+    const [policy, commands, cases, riskFlags, emiSchedule, latestReleaseCommand, latestSecurityControlCommands, tenantPolicy, testingPolicies] = await Promise.all([
       DevicePolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId, policyKey: device.currentPolicyKey }).lean(),
       DeviceCommand.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
       UnlockRequest.find({ deviceId: device._id }).sort({ createdAt: -1 }).limit(10).lean(),
@@ -4154,11 +4087,11 @@ export const getDeviceById = async (req, res) => {
           }).sort({ createdAt: -1 }).lean()
         )
       ),
-      isRunningDevice(device)
-        ? TenantPolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId })
-          .select("runningEnrollmentEnabled runningLocationEnabled").lean()
-        : null
+      TenantPolicy.findOne({ tenantId: device.tenantId?._id || device.tenantId }).lean(),
+      DevicePolicy.find({ tenantId: device.tenantId?._id || device.tenantId, isActive: true }).select("policyKey").lean()
     ]);
+    device.enrollmentMode = getEnrollmentMode(device);
+    device.deviceControlMode = getTenantDeviceControlMode(tenantPolicy);
     const release = getDeviceReleaseSummary({
       schedule: emiSchedule,
       device,
@@ -4167,8 +4100,6 @@ export const getDeviceById = async (req, res) => {
     const responseDevice = isRunningDevice(device)
       ? {
           ...device,
-          imei: `***********${device.imei.slice(-4)}`,
-          imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null,
           activationIdempotencyKey: undefined,
           fcmToken: undefined,
           allowedActions: getRunningAllowedActions(device, {
@@ -4180,6 +4111,8 @@ export const getDeviceById = async (req, res) => {
 
     return sendSuccess(res, 200, "Device fetched successfully", {
       device: responseDevice,
+      testingActions: getAdminDeviceTestingActions({ device, schedule: emiSchedule, tenantPolicy,
+        policyKeys: testingPolicies.map((item) => item.policyKey) }),
       policy,
       commands,
       latestSecurityControlCommands: formatLatestSecurityControlCommands(
@@ -4262,7 +4195,7 @@ export const releaseAdminDevice = async (req, res) => {
     );
 
     await session.commitTransaction();
-    return sendSuccess(res, 200, "Device release queued successfully", formatControlResult(result));
+    return sendSuccess(res, 200, "Device release queued successfully", formatControlResult(result, { maskImei: false }));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error");
@@ -4337,7 +4270,8 @@ export const runAdminDeviceTestingAction = async (req, res) => {
     const result = await runAdminDeviceTestAction({
       deviceId: req.params.deviceId,
       action: req.params.action,
-      actorId: req.auth.id
+      actorId: req.auth.id,
+      durationHours: req.body?.durationHours
     });
     const auditDevice = await Device.findById(req.params.deviceId)
       .select("tenantId userId")
@@ -4358,7 +4292,7 @@ export const runAdminDeviceTestingAction = async (req, res) => {
       }
     });
 
-    return sendSuccess(res, 200, "Device testing action completed successfully", result);
+    return sendSuccess(res, 200, "Device testing action completed successfully", formatControlResult(result, { maskImei: false }));
   } catch (error) {
     return sendError(
       res,
@@ -4629,7 +4563,7 @@ export const lockAdminDevice = async (req, res) => {
 
     await session.commitTransaction();
 
-    return sendSuccess(res, 200, "Device lock queued successfully", formatControlResult(result));
+    return sendSuccess(res, 200, "Device lock queued successfully", formatControlResult(result, { maskImei: false }));
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     return sendError(res, error.statusCode || 500, error.message || "Internal server error", error.code ? { code: error.code } : null);
@@ -4762,7 +4696,7 @@ export const unlockAdminDevice = async (req, res) => {
     await session.commitTransaction();
 
     return sendSuccess(res, 200, "Device unlock queued successfully", {
-      ...formatControlResult(result),
+      ...formatControlResult(result, { maskImei: false }),
       riskWarning: riskWarningPayload.riskWarning,
       activeCriticalRiskFlags: riskWarningPayload.activeCriticalRiskFlags
     });
@@ -5400,7 +5334,7 @@ export const getAdminRiskFlags = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Risk flags fetched successfully", {
-      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId) })),
+      items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId, { maskImei: false }) })),
       pagination: buildPagination(page, limit, total)
     });
   } catch (error) {
@@ -5446,7 +5380,7 @@ export const getAdminRiskFlagById = async (req, res) => {
     ]);
 
     return sendSuccess(res, 200, "Risk flag fetched successfully", {
-      riskFlag: { ...riskFlag, deviceId: formatDeviceReference(riskFlag.deviceId) },
+      riskFlag: { ...riskFlag, deviceId: formatDeviceReference(riskFlag.deviceId, { maskImei: false }) },
       integrityChecks,
       commands,
       auditLogs,

@@ -432,6 +432,8 @@ test("running controls allow timed overlay unlock but reject owner-only commands
   assert.equal(getRunningAllowedActions({ ...device, capabilitiesReceivedAt: new Date(0) }).lock.enabled, false);
   assert.deepEqual(formatDeviceReference({ ...device, imei: "490154203237518", activationIdempotencyKey: "internal" }).imei,
     "***********7518");
+  assert.equal(formatDeviceReference({ ...device, imei: "490154203237518" }, { maskImei: false }).imei,
+    "490154203237518");
   assert.equal(formatDeviceReference({ ...device, activationIdempotencyKey: "internal" }).activationIdempotencyKey, undefined);
   assert.equal(formatControlResult({ device: { ...device, activationIdempotencyKey: "internal" } }).device.activationIdempotencyKey,
     undefined);

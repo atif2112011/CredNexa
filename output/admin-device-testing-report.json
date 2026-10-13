@@ -1,0 +1,371 @@
+{
+  "runId": "ADMIN-DEVICE-TEST-5f74eb41-f136-4d17-9b27-5062b44eff73",
+  "database": "emi_shield",
+  "results": [
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: list and detail labels",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: send-upcoming-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: send-overdue-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-upcoming-emi, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-device-grace, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-auto-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-temp-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-temp-unlock-expiry, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-payment-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: simulate-release, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: request-location, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: incompatible and invalid options reject without mutation",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: all temporary-unlock duration choices",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: final payment releases; active non-final payment queues no unlock",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: full unlock and payment supersede temporary expiry",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: missing or stale capabilities and location consent reject before mutation",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: missing schedule blocks EMI actions but allows device controls",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: list and detail labels",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: send-upcoming-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: send-overdue-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-upcoming-emi, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-device-grace, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-auto-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-temp-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-temp-unlock-expiry, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-payment-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: simulate-release, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: request-location, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: incompatible and invalid options reject without mutation",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: all temporary-unlock duration choices",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: final payment releases; active non-final payment queues no unlock",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: full unlock and payment supersede temporary expiry",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: missing schedule blocks EMI actions but allows device controls",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: list and detail labels",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: send-upcoming-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: send-overdue-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-upcoming-emi, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: manual-set-upcoming, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: manual-set-overdue, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: manual-set-grace, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: manual-set-paid, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-temp-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-temp-unlock-expiry, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-payment-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: simulate-release, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: request-location, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: incompatible and invalid options reject without mutation",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: all temporary-unlock duration choices",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: final payment releases; active non-final payment queues no unlock",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: full unlock and payment supersede temporary expiry",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: manual overdue cron never queues EMI lock or grace policy",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: missing or stale capabilities and location consent reject before mutation",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: missing schedule blocks EMI actions but allows device controls",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: list and detail labels",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: send-upcoming-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: send-overdue-reminder, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-upcoming-emi, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: manual-set-upcoming, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: manual-set-overdue, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: manual-set-grace, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: manual-set-paid, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-lock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-temp-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-temp-unlock-expiry, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-payment-unlock, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: simulate-release, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: request-location, sync and acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: incompatible and invalid options reject without mutation",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: all temporary-unlock duration choices",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: final payment releases; active non-final payment queues no unlock",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: full unlock and payment supersede temporary expiry",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: manual overdue cron never queues EMI lock or grace policy",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: missing schedule blocks EMI actions but allows device controls",
+      "passed": true
+    },
+    {
+      "name": "Disabled auto-lock/location, missing policy and empty schedule reject without mutation",
+      "passed": true
+    },
+    {
+      "name": "Testing endpoint requires super-admin authentication",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/EMI_AUTOMATED: rendered detail page",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/EMI_AUTOMATED: rendered detail page",
+      "passed": true
+    },
+    {
+      "name": "RUNNING_APP/MANUAL: rendered detail page",
+      "passed": true
+    },
+    {
+      "name": "DEVICE_OWNER_QR/MANUAL: rendered detail page",
+      "passed": true
+    },
+    {
+      "name": "Rendered device table includes provisioning and dealer mode columns",
+      "passed": true
+    }
+  ],
+  "failure": null,
+  "cleanup": {
+    "devicecommands": 106,
+    "accounts": 1,
+    "devices": 93,
+    "deviceevents": 52,
+    "tenants": 2,
+    "channelpartners": 1,
+    "tenantpolicies": 2,
+    "users": 93,
+    "auditlogs": 176,
+    "devicepolicies": 10,
+    "fcmdeliverylogs": 35,
+    "emischedules": 89
+  },
+  "verifiedZeroResidualRecords": true,
+  "physicalDeviceAcknowledgements": "simulated"
+}

@@ -47,6 +47,8 @@ export function DeviceTelemetryPanel({
     : "";
   const locationStatus = String(locationCommand?.status || "");
   const released = ["RELEASE_PENDING", "RELEASED"].includes(String(device.state || ""));
+  const locationAvailability = asRecord(asRecord(device.allowedActions).location);
+  const locationUnavailable = device.enrollmentMode === "RUNNING_APP" && locationAvailability.enabled === false;
 
   async function requestLocation() {
     setRequestingLocation(true);
@@ -79,7 +81,7 @@ export function DeviceTelemetryPanel({
     <Card>
       <CardHeader>
         <CardTitle>Device Telemetry</CardTitle>
-        <CardDescription>Latest SIM identity and location reported by the managed device.</CardDescription>
+        <CardDescription>Latest SIM identity and location reported by the device.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4 xl:grid-cols-2">
         <section className="rounded-xl border bg-muted/20 p-4">
@@ -118,7 +120,7 @@ export function DeviceTelemetryPanel({
               type="button"
               size="sm"
               variant="outline"
-              disabled={released || requestingLocation}
+              disabled={released || requestingLocation || locationUnavailable}
               onClick={requestLocation}
             >
               <MapPin aria-hidden="true" />

@@ -270,10 +270,11 @@ export const runTenantMetricsReconciliationJob = async ({ limit = SCHEDULED_JOB_
   return refreshAllTenantMetrics({ limit });
 };
 
-export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.tempUnlockExpiry } = {}) => {
+export const runTempUnlockExpiryJob = async ({ limit = SCHEDULED_JOB_LIMITS.tempUnlockExpiry, deviceId } = {}) => {
   await connectDatabase();
   const now = new Date();
   const devices = await Device.find({
+    ...(deviceId ? { _id: deviceId } : {}),
     state: DEVICE_STATES.TEMP_UNLOCK,
     tempUnlockExpiresAt: { $lte: now }
   }).limit(limit);

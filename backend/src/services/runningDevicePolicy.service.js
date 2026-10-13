@@ -9,7 +9,7 @@ export const runningModeError = (message = "Control is not supported for running
   Object.assign(new Error(message), { statusCode: 409, code: "UNSUPPORTED_FOR_ENROLLMENT_MODE" });
 
 /** Add the mode to linked-device references while withholding internal request IDs. */
-export const formatDeviceReference = (device) => {
+export const formatDeviceReference = (device, { maskImei = true } = {}) => {
   if (!device) return device;
   if (!isRunningDevice(device)) return { ...device, enrollmentMode: getEnrollmentMode(device) };
   const safe = { ...device };
@@ -18,13 +18,13 @@ export const formatDeviceReference = (device) => {
   return {
     ...safe,
     enrollmentMode: getEnrollmentMode(device),
-    imei: device.imei ? `***********${device.imei.slice(-4)}` : null,
-    imei2: device.imei2 ? `***********${device.imei2.slice(-4)}` : null
+    imei: maskImei && device.imei ? `***********${device.imei.slice(-4)}` : device.imei,
+    imei2: maskImei && device.imei2 ? `***********${device.imei2.slice(-4)}` : device.imei2
   };
 };
 
-export const formatControlResult = (result) => result?.device && isRunningDevice(result.device)
-  ? { ...result, device: formatDeviceReference(result.device.toObject?.() || result.device) }
+export const formatControlResult = (result, options) => result?.device && isRunningDevice(result.device)
+  ? { ...result, device: formatDeviceReference(result.device.toObject?.() || result.device, options) }
   : result;
 
 export const assertRunningCommandAllowed = (device, commandType, payload = {}) => {

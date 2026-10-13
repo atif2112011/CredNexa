@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
 
 import { DEVICE_POLICY_KEYS, DEVICE_STATES, isDeviceReleaseState } from "../constants/deviceStates.js";
-import { runEmiPolicyJob } from "../jobs/scheduledJobs.js";
+import { runEmiPolicyJob, runTempUnlockExpiryJob } from "../jobs/scheduledJobs.js";
+import { isRunningDevice } from "../constants/enrollmentModes.js";
+import { getRunningAllowedActions, formatControlResult } from "./runningDevicePolicy.service.js";
+import { queueAdminDeviceCommand } from "./adminDeviceCommand.service.js";
+import { queueGetLocationCommand } from "./deviceLocation.service.js";
 import { Device } from "../models/Device.js";
 import { DeviceCommand } from "../models/DeviceCommand.js";
 import { DevicePolicy } from "../models/DevicePolicy.js";
@@ -14,7 +18,7 @@ import {
   EMI_REMINDER_TYPES,
   queueEmiReminder
 } from "./emiReminder.service.js";
-import { markEmiInstallmentPaid } from "./emiInstallment.service.js";
+import { markEmiInstallmentPaid, shouldUnlockDeviceAfterInstallmentPayment } from "./emiInstallment.service.js";
 import { isManualDeviceControl } from "./tenantDeviceControl.service.js";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -30,8 +34,54 @@ export const ADMIN_DEVICE_TEST_ACTIONS = Object.freeze({
   MANUAL_SET_UPCOMING: "manual-set-upcoming",
   MANUAL_SET_OVERDUE: "manual-set-overdue",
   MANUAL_SET_GRACE: "manual-set-grace",
-  MANUAL_SET_PAID: "manual-set-paid"
+  MANUAL_SET_PAID: "manual-set-paid",
+  SIMULATE_LOCK: "simulate-lock",
+  SIMULATE_UNLOCK: "simulate-unlock",
+  SIMULATE_TEMP_UNLOCK: "simulate-temp-unlock",
+  SIMULATE_TEMP_UNLOCK_EXPIRY: "simulate-temp-unlock-expiry",
+  REQUEST_LOCATION: "request-location"
 });
+
+export const TEST_TEMP_UNLOCK_DURATIONS = Object.freeze([6, 12, 24, 48, 60, 72, 168]);
+
+const ACTION_DEFINITIONS = [
+  { action: "send-upcoming-reminder", label: "Send Upcoming Reminder", description: "Queue a reminder for the next future unpaid installment.", group: "Reminders", capability: "reminder", schedule: true, upcoming: true },
+  { action: "send-overdue-reminder", label: "Send Overdue Reminder", description: "Make the next unpaid installment overdue if needed and queue its reminder.", group: "Reminders", capability: "reminder", schedule: true },
+  { action: "simulate-upcoming-emi", label: "Simulate Upcoming EMI Cron", description: "Make the next unpaid installment due in five days and run its reminder cron.", group: "EMI simulations", capability: "reminder", schedule: true },
+  { action: "simulate-device-grace", label: "Simulate EMI Grace", description: "Move an unpaid installment into grace and queue the grace policy and reminder.", group: "EMI simulations", mode: "automatic", capability: "reminder", schedule: true, policies: ["EMI_PAID", "EMI_GRACE"] },
+  { action: "simulate-auto-lock", label: "Simulate EMI Auto-lock", description: "Move an unpaid installment beyond grace and run its automatic lock cron.", group: "EMI simulations", mode: "automatic", capability: "lock", schedule: true, policies: ["EMI_PAID", "EMI_LOCKED"] },
+  ...["upcoming", "overdue", "grace", "paid"].map((state) => ({ action: `manual-set-${state}`, label: `Set Installment ${state === "upcoming" ? "Due in 6 Days" : state[0].toUpperCase() + state.slice(1)}`, description: "Change the latest unpaid installment only; no device command is queued.", group: "Manual schedule simulations", mode: "manual", schedule: true })),
+  { action: "simulate-lock", label: "Test Lock", description: "Queue a lock command without changing EMI records.", group: "Device controls", capability: "lock", policies: ["EMI_LOCKED"] },
+  { action: "simulate-unlock", label: "Test Full Unlock", description: "Queue a full unlock and cancel the temporary-unlock deadline without changing EMI records.", group: "Device controls", capability: "unlock", policies: ["EMI_PAID"] },
+  { action: "simulate-temp-unlock", label: "Test Temporary Unlock", description: "Queue temporary access for the selected duration.", group: "Device controls", capability: "tempUnlock", policies: ["TEMP_UNLOCKED"] },
+  { action: "simulate-temp-unlock-expiry", label: "Force Temporary Unlock Expiry", description: "Expire this device's active temporary unlock and run its relock processing immediately.", group: "Device controls", capability: "lock", policies: ["EMI_LOCKED"] },
+  { action: "simulate-payment-unlock", label: "Record Payment & Test Outcome", description: "Pay the next unpaid installment; unlock when required, or release after the final payment.", group: "Payment and release", schedule: true, policies: ["EMI_PAID"] },
+  { action: "simulate-release", label: "Settle & Release Device", description: "Pay every remaining installment and queue permanent device release.", group: "Payment and release", schedule: true, destructive: true },
+  { action: "request-location", label: "Test Location Request", description: "Queue a location request and inspect its acknowledgement in command history.", group: "Device controls", capability: "location" }
+];
+
+// One eligibility source for both page rendering and POST validation.
+export const getAdminDeviceTestingActions = ({ device, schedule, tenantPolicy, policyKeys = [] }) => {
+  const manual = isManualDeviceControl(tenantPolicy);
+  const running = isRunningDevice(device);
+  const capabilities = getRunningAllowedActions(device, { locationEnabled: tenantPolicy?.runningLocationEnabled === true });
+  return ACTION_DEFINITIONS.filter((item) => !item.mode || item.mode === (manual ? "manual" : "automatic")).map((item) => {
+    let reason = null;
+    if (isDeviceReleaseState(device.state) || device.deviceOwnerStatus === "RELEASED") reason = "Device release has started.";
+    else if (!tenantPolicy) reason = "Dealer policy is missing.";
+    else if (item.schedule && !schedule) reason = "EMI schedule is missing.";
+    else if (item.schedule && item.action !== "simulate-release" && !findNextUnpaidInstallment(schedule)) reason = "No unpaid installment is available.";
+    else if (item.action === "simulate-release" && !schedule?.installments?.length) reason = "No installments are available to settle.";
+    else if (item.upcoming && !schedule?.installments?.some((i) => ["pending", "partial"].includes(i.status) && new Date(i.dueDate) > new Date())) reason = "No future unpaid installment is available.";
+    else if (item.action === "simulate-auto-lock" && tenantPolicy?.lockRules?.lockOnGraceExpiry === false) reason = "Automatic EMI locking is disabled.";
+    else if (["simulate-device-grace", "manual-set-grace"].includes(item.action) && Number(tenantPolicy?.lockRules?.gracePeriodDays ?? 7) <= 0) reason = "Dealer grace period is disabled.";
+    else if (item.action === "simulate-temp-unlock-expiry" && (device.state !== "TEMP_UNLOCK" || !device.tempUnlockExpiresAt)) reason = "No active temporary unlock is available.";
+    else if (running && item.capability && !capabilities[item.capability]?.enabled) reason = { OVERLAY_UNAVAILABLE: "A current overlay permission report is required.", NOTIFICATIONS_UNAVAILABLE: "A current notification permission report is required.", LOCATION_NOT_AVAILABLE: "Location requires dealer enablement, borrower consent, and a current permission report." }[capabilities[item.capability]?.reason] || "Required device permission is unavailable.";
+    else if (item.policies?.some((key) => !policyKeys.includes(key))) reason = "A required active device policy is missing.";
+    const { capability, schedule: needsSchedule, upcoming, policies, mode, ...visible } = item;
+    return { ...visible, label: running && ["simulate-lock", "simulate-unlock", "simulate-temp-unlock"].includes(item.action) ? visible.label.replace("Test ", "Test Overlay ") : visible.label, enabled: !reason, reason };
+  });
+};
 
 const createActionError = (message, statusCode = 400, code) => {
   const error = new Error(message);
@@ -60,15 +110,6 @@ const findNextUnpaidInstallment = (schedule) =>
     .filter((installment) => ["pending", "overdue", "partial"].includes(installment.status))
     .sort((left, right) => new Date(left.dueDate) - new Date(right.dueDate))[0] || null;
 
-const findMostRecentOverdueInstallment = (schedule, now = new Date()) =>
-  [...(schedule.installments || [])]
-    .filter(
-      (installment) =>
-        ["overdue", "partial"].includes(installment.status) ||
-        (installment.status === "pending" && new Date(installment.dueDate) < startOfUtcDay(now))
-    )
-    .sort((left, right) => new Date(right.dueDate) - new Date(left.dueDate))[0] || null;
-
 const findLatestUnpaidInstallment = (schedule, now = new Date()) => {
   const unpaidInstallments = [...(schedule.installments || [])]
     .filter((installment) => ["pending", "overdue", "partial"].includes(installment.status))
@@ -84,15 +125,13 @@ const loadTestingContext = async (deviceId) => {
   const device = await Device.findById(deviceId);
   if (!device) throw createActionError("Device not found", 404);
 
-  const [schedule, tenantPolicy] = await Promise.all([
+  const [schedule, tenantPolicy, policies] = await Promise.all([
     EmiSchedule.findOne({ userId: device.userId, tenantId: device.tenantId }),
-    TenantPolicy.findOne({ tenantId: device.tenantId }).lean()
+    TenantPolicy.findOne({ tenantId: device.tenantId }).lean(),
+    DevicePolicy.find({ tenantId: device.tenantId, isActive: true }).select("policyKey").lean()
   ]);
 
-  if (!schedule) throw createActionError("EMI schedule not found for device", 404);
-  if (!tenantPolicy) throw createActionError("Tenant policy not found for device", 409);
-
-  return { device, schedule, tenantPolicy };
+  return { device, schedule, tenantPolicy, policyKeys: policies.map((p) => p.policyKey) };
 };
 
 const assertCommandAllowed = (device) => {
@@ -184,7 +223,7 @@ const resetDeviceForEmiCron = async ({ device, actorId }) => {
 const prepareCronSimulation = async ({ context, actorId, mode }) => {
   const { device, schedule, tenantPolicy } = context;
   assertCommandAllowed(device);
-  assertAutomaticEmiControl(tenantPolicy);
+  if (mode !== "upcoming") assertAutomaticEmiControl(tenantPolicy);
 
   const installment = findNextUnpaidInstallment(schedule);
   if (!installment) throw createActionError("No unpaid EMI installment is available for simulation", 409);
@@ -214,7 +253,7 @@ const prepareCronSimulation = async ({ context, actorId, mode }) => {
   await schedule.save();
 
   await Promise.all([
-    resetDeviceForEmiCron({ device, actorId }),
+    mode !== "upcoming" ? resetDeviceForEmiCron({ device, actorId }) : Promise.resolve(),
     Device.updateOne(
       { _id: device._id },
       { $pull: { graceReminderHistory: { installmentId: installment._id } } }
@@ -356,14 +395,15 @@ const queueManualReminder = async ({ context, actorId, reminderType }) => {
 const simulatePaymentUnlock = async ({ context, actorId }) => {
   const { device, schedule } = context;
   assertCommandAllowed(device);
-  const installment = findMostRecentOverdueInstallment(schedule);
-  if (!installment) throw createActionError("No overdue EMI installment is available to mark paid", 409);
+  const installment = findNextUnpaidInstallment(schedule);
+  if (!installment) throw createActionError("No unpaid EMI installment is available to mark paid", 409);
 
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
     const transactionalDevice = await Device.findById(device._id).session(session);
     const transactionalSchedule = await EmiSchedule.findById(schedule._id).session(session);
+    assertCommandAllowed(transactionalDevice);
     const paymentResult = markEmiInstallmentPaid({
       schedule: transactionalSchedule,
       installmentId: installment._id,
@@ -375,65 +415,24 @@ const simulatePaymentUnlock = async ({ context, actorId }) => {
     });
     await transactionalSchedule.save({ session });
 
-    const paidPolicy = await DevicePolicy.findOne({
-      tenantId: transactionalDevice.tenantId,
-      policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
-      isActive: true
-    }).lean();
-    if (!paidPolicy) throw createActionError("Active EMI_PAID policy not found for tenant", 409);
-
-    const nextPolicyVersion = Number(transactionalDevice.desiredPolicyVersion || 0) + 1;
-    const updatedDevice = await Device.findByIdAndUpdate(
-      transactionalDevice._id,
-      {
-        $set: {
-          state: DEVICE_STATES.UNLOCK_PENDING,
-          currentPolicyKey: DEVICE_POLICY_KEYS.EMI_PAID,
-          currentPolicyId: paidPolicy._id,
-          desiredPolicyVersion: nextPolicyVersion,
-          stateUpdatedAt: new Date(),
-          stateUpdatedBy: actorId
-        },
-        $pull: { graceReminderHistory: { installmentId: installment._id } },
-        $unset: { tempUnlockExpiresAt: "" }
-      },
-      { new: true, session }
-    );
-
-    const commands = await DeviceCommand.create(
-      [
-        {
-          deviceId: transactionalDevice._id,
-          tenantId: transactionalDevice.tenantId,
-          commandType: "UNLOCK",
-          triggeredBy: "payment_unlock",
-          triggeredByAccountId: actorId,
-          payload: {
-            reason: "Admin testing panel payment simulation",
-            installmentId: installment._id.toString(),
-            policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
-            policyVersion: nextPolicyVersion
-          }
-        }
-      ],
-      { session, ordered: true }
-    );
-
-    const restrictionClearResult = await queueDeviceRestrictionClear({
-      device: updatedDevice,
-      accountId: actorId,
-      triggeredBy: "payment_unlock",
-      session
-    });
-
+    let outcome = { device: transactionalDevice, command: null };
+    if (paymentResult.newlySettled) {
+      outcome = await queueDeviceRelease({ device: transactionalDevice, schedule: transactionalSchedule,
+        accountId: actorId, triggeredBy: "payment_settlement", reason: "Admin testing panel final payment", session });
+    } else if (shouldUnlockDeviceAfterInstallmentPayment({ deviceState: transactionalDevice.state, newlySettled: false })) {
+      outcome = await queueAdminDeviceCommand({ device: transactionalDevice, accountId: actorId,
+        triggeredBy: "payment_unlock",
+        commandType: "UNLOCK", targetState: DEVICE_STATES.UNLOCK_PENDING, policyKey: DEVICE_POLICY_KEYS.EMI_PAID,
+        reason: "Admin testing panel payment simulation", extraPayload: { installmentId: installment._id.toString() }, session });
+      if (!isRunningDevice(transactionalDevice)) {
+        outcome.restrictionCommand = (await queueDeviceRestrictionClear({ device: outcome.device,
+          accountId: actorId, triggeredBy: "payment_unlock", session })).command;
+      }
+    }
+    await Device.updateOne({ _id: device._id }, { $pull: { graceReminderHistory: { installmentId: installment._id } } }, { session });
     await session.commitTransaction();
-    return {
-      installment: paymentResult.installment,
-      scheduleStatus: transactionalSchedule.status,
-      device: updatedDevice,
-      command: commands[0],
-      restrictionCommand: restrictionClearResult.command
-    };
+    return { installment: paymentResult.installment, scheduleStatus: transactionalSchedule.status, ...outcome };
+
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     throw error;
@@ -527,6 +526,25 @@ const simulateManualInstallmentState = async ({ context, actorId, state }) => {
   };
 };
 
+const simulateControl = async ({ context, actorId, action, durationHours }) => {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    const device = await Device.findById(context.device._id).session(session);
+    assertCommandAllowed(device);
+    const commandType = action === "simulate-lock" ? "LOCK" : action === "simulate-unlock" ? "UNLOCK" : "TEMP_UNLOCK";
+    const result = await queueAdminDeviceCommand({ device, accountId: actorId, commandType,
+      targetState: commandType === "LOCK" ? DEVICE_STATES.LOCKED : commandType === "UNLOCK" ? DEVICE_STATES.UNLOCK_PENDING : DEVICE_STATES.TEMP_UNLOCK,
+      policyKey: commandType === "LOCK" ? DEVICE_POLICY_KEYS.EMI_LOCKED : commandType === "UNLOCK" ? DEVICE_POLICY_KEYS.EMI_PAID : DEVICE_POLICY_KEYS.TEMP_UNLOCKED,
+      reason: "Admin testing panel device control", ...(commandType === "TEMP_UNLOCK" ? { durationHours } : {}), session });
+    await session.commitTransaction();
+    return formatControlResult(result, { maskImei: false });
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    throw error;
+  } finally { await session.endSession(); }
+};
+
 const simulateRelease = async ({ context, actorId }) => {
   const { device, schedule } = context;
   if (device.state === DEVICE_STATES.RELEASED) {
@@ -538,6 +556,7 @@ const simulateRelease = async ({ context, actorId }) => {
     session.startTransaction();
     const transactionalDevice = await Device.findById(device._id).session(session);
     const transactionalSchedule = await EmiSchedule.findById(schedule._id).session(session);
+    assertCommandAllowed(transactionalDevice);
     const now = new Date();
     const updatedInstallmentIds = [];
 
@@ -583,14 +602,33 @@ const simulateRelease = async ({ context, actorId }) => {
   }
 };
 
-export const runAdminDeviceTestAction = async ({ deviceId, action, actorId }) => {
+export const runAdminDeviceTestAction = async ({ deviceId, action, actorId, durationHours = 6 }) => {
   if (!Object.values(ADMIN_DEVICE_TEST_ACTIONS).includes(action)) {
     throw createActionError("Unsupported device testing action", 400);
   }
 
   const context = await loadTestingContext(deviceId);
+  const eligibility = getAdminDeviceTestingActions(context).find((item) => item.action === action);
+  if (!eligibility?.enabled) throw createActionError(eligibility?.reason || "Testing action is unavailable for this dealer mode", 409, "TEST_ACTION_UNAVAILABLE");
+  if (action === "simulate-temp-unlock" && !TEST_TEMP_UNLOCK_DURATIONS.includes(Number(durationHours))) {
+    throw createActionError("Select a supported temporary-unlock duration", 400);
+  }
 
   switch (action) {
+    case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_LOCK:
+    case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_UNLOCK:
+    case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_TEMP_UNLOCK:
+      return simulateControl({ context, actorId, action, durationHours: Number(durationHours) });
+    case ADMIN_DEVICE_TEST_ACTIONS.SIMULATE_TEMP_UNLOCK_EXPIRY: {
+      const expired = await Device.findOneAndUpdate({ _id: deviceId, state: DEVICE_STATES.TEMP_UNLOCK,
+        tempUnlockExpiresAt: context.device.tempUnlockExpiresAt }, { $set: { tempUnlockExpiresAt: new Date() } });
+      if (!expired) throw createActionError("Temporary unlock was superseded", 409);
+      await runTempUnlockExpiryJob({ deviceId, limit: 1 });
+      return { device: await Device.findById(deviceId).lean(), command: await DeviceCommand.findOne({ deviceId,
+        commandType: "LOCK", triggeredBy: "temp_unlock_expiry" }).sort({ createdAt: -1 }).lean() };
+    }
+    case ADMIN_DEVICE_TEST_ACTIONS.REQUEST_LOCATION:
+      return queueGetLocationCommand({ device: context.device, accountId: actorId, triggeredBy: "super_admin" });
     case ADMIN_DEVICE_TEST_ACTIONS.SEND_OVERDUE_REMINDER:
       return queueManualReminder({ context, actorId, reminderType: EMI_REMINDER_TYPES.OVERDUE });
     case ADMIN_DEVICE_TEST_ACTIONS.SEND_UPCOMING_REMINDER:

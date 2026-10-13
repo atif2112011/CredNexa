@@ -1,6 +1,7 @@
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getList } from "@/services/admin";
+import { withDeviceLabels } from "@/lib/device-provisioning";
 
 export default async function DevicesPage() {
   const data = await getList("/admin/devices");
@@ -9,12 +10,14 @@ export default async function DevicesPage() {
     <>
       <PageHeader title="Device Oversight" description="Search registered devices and inspect state, command history, and audit activity." />
       <ResourceTable
-        rows={data.items}
+        rows={data.items.map(withDeviceLabels)}
         detailBasePath="/devices"
         columns={[
           { key: "imei", header: "IMEI" },
           { key: "deviceModel", header: "Model" },
           { key: "manufacturer", header: "Maker" },
+          { key: "provisioningLabel", header: "Provisioning" },
+          { key: "dealerModeLabel", header: "Dealer Mode" },
           { key: "state", header: "State", type: "status" },
           { key: "tenantId.name", header: "Tenant" },
           { key: "userId.name", header: "Borrower" },

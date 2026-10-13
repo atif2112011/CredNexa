@@ -12,14 +12,18 @@ import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getDetail } from "@/services/admin";
 import type { RecordItem } from "@/types/api";
+import { withDeviceLabels, type DeviceTestingAction } from "@/lib/device-provisioning";
 
 export default async function DeviceDetailPage({ params }: { params: Promise<{ deviceId: string }> }) {
   const { deviceId } = await params;
   const detail = await getDetail<RecordItem>(`/admin/devices/${deviceId}`);
   const commands = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/commands`);
   const auditLogs = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/audit-logs`);
-  const manualOverrideTokens = await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/manual-override-tokens`);
-  const device = detail.device as RecordItem;
+  const device = withDeviceLabels(detail.device as RecordItem);
+  const running = device.enrollmentMode === "RUNNING_APP";
+  const manualOverrideTokens = running ? [] : await getDetail<RecordItem[]>(`/admin/devices/${deviceId}/manual-override-tokens`);
+  const capabilities = (device.capabilities as RecordItem) || {};
+  const capabilitiesFresh = Boolean(device.capabilitiesReceivedAt) && Date.now() - new Date(String(device.capabilitiesReceivedAt)).getTime() <= 24 * 60 * 60 * 1000;
   const riskFlags = (detail.riskFlags as RecordItem[]) || [];
   const emiSchedule = (detail.emiSchedule as RecordItem | null) || null;
   const release = (detail.release as RecordItem | null) || null;
@@ -29,23 +33,34 @@ export default async function DeviceDetailPage({ params }: { params: Promise<{ d
     <>
       <PageHeader title={String(device.imei || "Device")} description="Device state, borrower mapping, policy snapshot, command history, and audit trail." />
       <div className="space-y-6">
-        <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
+        <DetailGrid title="Device Detail" data={device} fields={[{ label: "IMEI", key: "imei" }, { label: "Provisioning", key: "provisioningLabel" }, { label: "Dealer Mode", key: "dealerModeLabel" }, { label: "Model", key: "deviceModel" }, { label: "Maker", key: "manufacturer" }, { label: "State", key: "state" }, { label: "Policy", key: "currentPolicyKey" }, { label: "Tenant", key: "tenantId.name" }, { label: "Borrower", key: "userId.name" }, { label: "Last Active", key: "lastSeenAt", type: "date" }]} />
         <DeviceReleasePanel deviceId={deviceId} schedule={emiSchedule} release={release} />
-        <DeviceTestingPanel deviceId={deviceId} />
+        <DeviceTestingPanel deviceId={deviceId} actions={(detail.testingActions as DeviceTestingAction[]) || []} running={running} />
+        {running ? <Card>
+          <CardHeader><CardTitle>Running App Permission Health</CardTitle></CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            <p>Lock controls use the app overlay. Command acknowledgement confirms the reported result.</p>
+            <p>Overlay: {capabilities.overlayAllowed === true ? "Allowed" : "Missing"} · Notifications: {capabilities.notificationsAllowed === true ? "Allowed" : "Missing"}</p>
+            <p>Location: {String(capabilities.locationGrant || "Not granted")} · Location consent: {device.locationConsentAccepted ? "Accepted" : "Missing"}</p>
+            <p>Permission report: {capabilitiesFresh ? "Current" : "Stale or missing"}</p>
+          </CardContent>
+        </Card> : null}
         <DeviceTelemetryPanel device={device} commands={(commands as RecordItem[]) || []} />
         {!releaseInProgressOrComplete ? (
           <>
+            {!running ? <>
             <DeviceRestrictionsPanel device={device} commands={(commands as RecordItem[]) || []} />
             <DeviceSecurityControlsPanel
               device={device}
               latestCommands={(detail.latestSecurityControlCommands as RecordItem) || {}}
             />
-            <DeviceOverridePanel device={device} riskFlags={riskFlags} />
             <ManualOverrideTokenPanel deviceId={deviceId} initialTokens={manualOverrideTokens || []} />
+            </> : null}
+            <DeviceOverridePanel device={device} riskFlags={riskFlags} />
           </>
         ) : null}
         <div className="grid gap-6 xl:grid-cols-2">
-          <ActivePolicyPanel policy={detail.policy} />
+          <ActivePolicyPanel policy={detail.policy} running={running} />
           <RiskFlagMetricsPanel flags={riskFlags} />
         </div>
         <Card>

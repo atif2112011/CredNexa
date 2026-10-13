@@ -11,6 +11,8 @@
     "deploy": "firebase deploy --only functions",
     "lint": "eslint . --ext .js",
     "test": "node --test",
+    "test:admin-devices:connected": "node src/scripts/testAdminDeviceTesting.js --connected-database --render-pages",
+    "test:admin-devices:cleanup": "node src/scripts/testAdminDeviceTesting.js --cleanup",
     "worker:fcm": "node src/jobs/fcmDeliveryWorker.js",
     "jobs:scheduled": "node src/jobs/scheduledJobs.js",
     "migrate:optional-account-email": "node src/scripts/migrateOptionalAccountEmail.js",

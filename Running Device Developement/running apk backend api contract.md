@@ -246,6 +246,7 @@ Headers: `Authorization: Bearer {{JWT}}`. Request:
   "capabilities": {
     "notificationsAllowed": true,
     "overlayAllowed": true,
+    "deviceAdminActive": true,
     "locationGrant": "none",
     "observedAt": "2026-10-08T12:00:00.000Z"
   },
@@ -283,7 +284,7 @@ Response `201` (relevant fields):
 }
 ```
 
-Activation requires fresh `capabilities.observedAt` (within five minutes), notifications and overlay set to `true`, a valid FCM token, matching running consent, and an unused claim. The stored device starts `ACTIVE`; `deviceOwnerStatus` remains `UNKNOWN`. For a real single-IMEI phone send `singleImeiDevice: true` and omit `imei2`. Optional observed capability names (for example Device Admin or accessibility) can be included, but do not substitute for the two required grants. A successful idempotent retry using the same `activationRequestId` returns `200` and `{ deviceId, userId, tenantId, state, enrollmentMode }`; do not expect the full first-registration policy in that response.
+Activation requires fresh `capabilities.observedAt` (within five minutes), notifications and overlay set to `true`, a valid FCM token, matching running consent, and an unused claim. The stored device starts `ACTIVE`; `deviceOwnerStatus` remains `UNKNOWN`. For a real single-IMEI phone send `singleImeiDevice: true` and omit `imei2`. Ask the borrower to activate Device Admin so ordinary uninstall requires a prior deactivation step; if declined, enrollment still proceeds. Report its actual `deviceAdminActive` state as an optional observed capability. It does not substitute for the two required grants, does not provide Device Owner powers, and is not used for `lockNow()`. A successful idempotent retry using the same `activationRequestId` returns `200` and `{ deviceId, userId, tenantId, state, enrollmentMode }`; do not expect the full first-registration policy in that response.
 
 ### 3.8 `POST /api/app/device/capabilities`
 
@@ -294,6 +295,7 @@ Headers: Bearer JWT. Call at app startup, after a grant/FCM change, and at least
   "capabilities": {
     "notificationsAllowed": true,
     "overlayAllowed": true,
+    "deviceAdminActive": true,
     "locationGrant": "precise",
     "observedAt": "2026-10-08T12:15:00.000Z"
   },
@@ -708,7 +710,7 @@ FCM messages are not HTTP API responses and may arrive late, out of order, or no
 | Running temporary unlock command arrives after its deadline or after another state superseded it | `409 COMMAND_EXPIRED` on ACK | Keep or restore the overlay as indicated by the latest sync state; do not clear it for the stale command. |
 | Release completed | `200` ACK, backend `RELEASED` | Clear local enforcement and stored borrower tokens; cease management calls. |
 
-The running app should present actual Android permission results, keep a durable local queue for command ACK retries, and reconcile on every startup/FCM message. The backend records desired state and command outcomes; it cannot guarantee that an ordinary installed APK can prevent uninstall or maintain an overlay after its permissions are revoked.
+The running app should present actual Android permission results, keep a durable local queue for command ACK retries, and reconcile on every startup/FCM message. An active Device Admin generally blocks a normal direct uninstall until the borrower deactivates it; the borrower can still do so. On authorized release, the APK should remove its own active admin and confirm removal before reporting local release complete. The backend records desired state and command outcomes; it cannot guarantee an ordinary installed APK remains installed or keeps its overlay access.
 
 ## 9. Source of truth and validation
 

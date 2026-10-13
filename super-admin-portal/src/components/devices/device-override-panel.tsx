@@ -37,6 +37,9 @@ export function DeviceOverridePanel({ device, riskFlags = [] }: { device: Record
   const [isSubmitting, setIsSubmitting] = useState(false);
   const deviceId = String(device._id || device.id || "");
   const selectedAction = actions.find((item) => item.value === action) || actions[0];
+  const allowedActions = (device.allowedActions as RecordItem) || {};
+  const availability = (allowedActions[action === "temp-unlock" ? "tempUnlock" : action] as RecordItem) || {};
+  const actionUnavailable = device.enrollmentMode === "RUNNING_APP" && availability.enabled === false;
   const Icon = selectedAction.icon;
   const activeCriticalRisks = riskFlags.filter((riskFlag) => {
     const severity = String(riskFlag.severity || "").toLowerCase();
@@ -45,6 +48,7 @@ export function DeviceOverridePanel({ device, riskFlags = [] }: { device: Record
   });
 
   async function submit() {
+    if (actionUnavailable) return;
     if (!reason.trim()) {
       toast.error("Reason is required");
       return;
@@ -160,7 +164,8 @@ export function DeviceOverridePanel({ device, riskFlags = [] }: { device: Record
             />
           </div>
           <div className="flex justify-end">
-            <Button type="button" onClick={submit} disabled={isSubmitting}>
+            {actionUnavailable ? <p className="text-sm text-muted-foreground">A current overlay permission report is required to lock this device.</p> : null}
+            <Button type="button" onClick={submit} disabled={isSubmitting || actionUnavailable}>
               {isSubmitting ? "Queueing..." : "Queue override"}
             </Button>
           </div>

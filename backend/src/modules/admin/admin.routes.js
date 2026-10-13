@@ -190,7 +190,7 @@ adminRoutes.post("/devices/:deviceId/unlock", unlockAdminDevice);
 adminRoutes.post("/devices/:deviceId/unlock-waive", ownerOnlyAdminDevice, unlockAdminDeviceWithWaive);
 adminRoutes.post("/devices/:deviceId/release", releaseAdminDevice);
 adminRoutes.post("/devices/:deviceId/emi-reminder", sendAdminEmiReminder);
-adminRoutes.post("/devices/:deviceId/testing/:action", ownerOnlyAdminDevice, runAdminDeviceTestingAction);
+adminRoutes.post("/devices/:deviceId/testing/:action", runAdminDeviceTestingAction);
 adminRoutes.patch("/devices/:deviceId/restrictions", ownerOnlyAdminDevice, updateAdminDeviceRestrictions);
 adminRoutes.patch("/devices/:deviceId/controls/factory-reset", ownerOnlyAdminDevice, updateAdminFactoryResetControl);
 adminRoutes.patch("/devices/:deviceId/controls/usb-debugging", ownerOnlyAdminDevice, updateAdminUsbDebuggingControl);

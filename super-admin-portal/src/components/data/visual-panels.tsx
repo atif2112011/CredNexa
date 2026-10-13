@@ -228,7 +228,7 @@ export function ConsentTextPanel({ consent }: { consent: RecordItem }) {
   );
 }
 
-export function ActivePolicyPanel({ policy }: { policy?: unknown }) {
+export function ActivePolicyPanel({ policy, running = false }: { policy?: unknown; running?: boolean }) {
   const item = (policy || {}) as RecordItem;
   const restrictions = (item.restrictions || {}) as RecordItem;
 
@@ -244,15 +244,15 @@ export function ActivePolicyPanel({ policy }: { policy?: unknown }) {
             <p className="text-sm text-muted-foreground">Version {String(item.version ?? "-")}</p>
           </div>
           <div className="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
-            {restrictions.lockMode ? <LockKeyhole className="size-5" aria-hidden="true" /> : <ShieldCheck className="size-5" aria-hidden="true" />}
+            {(running ? item.policyKey === "EMI_LOCKED" : restrictions.lockMode) ? <LockKeyhole className="size-5" aria-hidden="true" /> : <ShieldCheck className="size-5" aria-hidden="true" />}
           </div>
         </div>
-        <div className="grid gap-2 sm:grid-cols-2">
+        {running ? <p className="text-sm text-muted-foreground">This policy controls the running app overlay and reminders.</p> : <div className="grid gap-2 sm:grid-cols-2">
           <BoolPill value={restrictions.lockMode} label="Lock mode" />
           <BoolPill value={restrictions.disableFactoryReset} label="Factory reset blocked" />
           <BoolPill value={restrictions.disableStatusBar} label="Status bar blocked" />
           <BoolPill value={restrictions.disableAdb} label="ADB blocked" />
-        </div>
+        </div>}
       </CardContent>
     </Card>
   );
