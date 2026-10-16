@@ -5,7 +5,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { Eye } from "lucide-react";
 
 import { ResolveCaseDialog } from "@/components/cases/resolve-case-dialog";
-import { DataTable } from "@/components/data/data-table";
+import { DataTable, type ServerTableProps } from "@/components/data/data-table";
 import { StatusBadge } from "@/components/data/status-badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, getNestedValue } from "@/lib/utils";
@@ -16,7 +16,7 @@ function text(row: RecordItem, key: string) {
   return String(value ?? "-");
 }
 
-export function CasesTable({ rows }: { rows: RecordItem[] }) {
+export function CasesTable({ rows, ...serverProps }: { rows: RecordItem[] } & ServerTableProps) {
   const columns: ColumnDef<RecordItem>[] = [
     {
       accessorKey: "caseId",
@@ -29,22 +29,22 @@ export function CasesTable({ rows }: { rows: RecordItem[] }) {
       cell: ({ row }) => <StatusBadge value={row.original.status} />
     },
     {
-      accessorKey: "tenant",
+      accessorKey: "tenantId.name",
       header: "Tenant",
       cell: ({ row }) => text(row.original, "tenantId.name")
     },
     {
-      accessorKey: "partner",
+      accessorKey: "channelPartnerId.name",
       header: "Partner",
       cell: ({ row }) => text(row.original, "channelPartnerId.name")
     },
     {
-      accessorKey: "borrower",
+      accessorKey: "userId.name",
       header: "Borrower",
       cell: ({ row }) => text(row.original, "userId.name")
     },
     {
-      accessorKey: "imei",
+      accessorKey: "deviceId.imei",
       header: "IMEI",
       cell: ({ row }) => text(row.original, "deviceId.imei")
     },
@@ -73,5 +73,5 @@ export function CasesTable({ rows }: { rows: RecordItem[] }) {
     }
   ];
 
-  return <DataTable data={rows} columns={columns} />;
+  return <DataTable data={rows} columns={columns} sortFields={{ caseId: "caseId", status: "status", tenantId_name: "tenantId.name", channelPartnerId_name: "channelPartnerId.name", userId_name: "userId.name", deviceId_imei: "deviceId.imei", createdAt: "createdAt" }} {...serverProps} />;
 }

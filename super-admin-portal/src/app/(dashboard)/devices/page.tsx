@@ -1,15 +1,18 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getList } from "@/services/admin";
 import { withDeviceLabels } from "@/lib/device-provisioning";
 
-export default async function DevicesPage() {
-  const data = await getList("/admin/devices");
+export default async function DevicesPage({ searchParams }: { searchParams: Promise<TableSearchParams> }) {
+  const params = await searchParams;
+  const data = await getList("/admin/devices", { ...params, ...tableQuery(params) });
 
   return (
     <>
       <PageHeader title="Device Oversight" description="Search registered devices and inspect state, command history, and audit activity." />
       <ResourceTable
+        pagination={data.pagination}
         rows={data.items.map(withDeviceLabels)}
         detailBasePath="/devices"
         columns={[

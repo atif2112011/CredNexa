@@ -11,12 +11,21 @@ import {
   type SortingState
 } from "@tanstack/react-table";
 import { ArrowUpDown, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { Pagination } from "@/types/api";
+import { tableHref } from "@/lib/table-query";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-type DataTableProps<TData> = {
+export type ServerTableProps = {
+  pagination?: Pagination;
+  sortFields?: Record<string, string>;
+  queryPrefix?: string;
+};
+
+type DataTableProps<TData> = ServerTableProps & {
   data: TData[];
   columns: ColumnDef<TData>[];
   searchPlaceholder?: string;
@@ -27,16 +36,47 @@ export function DataTable<TData>({
   data,
   columns,
   searchPlaceholder = "Search records...",
-  onRowClick
+  onRowClick,
+  pagination,
+  sortFields = {},
+  queryPrefix = ""
 }: DataTableProps<TData>) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [pending, startTransition] = useTransition();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+  const [searchInput, setSearchInput] = useState(searchParams.get(`${queryPrefix}search`) || "");
+  const remote = Boolean(pagination);
+  const serverSearch = searchParams.get(`${queryPrefix}search`) || "";
+  useEffect(() => { setSearchInput(serverSearch); }, [serverSearch]);
+
+  function navigate(updates: Record<string, string | undefined>) {
+    const href = tableHref(pathname, new URLSearchParams(searchParams), updates, queryPrefix);
+    startTransition(() => router.push(href, { scroll: false }));
+  }
+
+  const sortId = Object.keys(sortFields).find((key) => sortFields[key] === searchParams.get(`${queryPrefix}sortBy`));
+  const serverSorting: SortingState = sortId ? [{ id: sortId, desc: searchParams.get(`${queryPrefix}sortOrder`) !== "asc" }] : [];
 
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, globalFilter },
-    onSortingChange: setSorting,
+    state: {
+      sorting: remote ? serverSorting : sorting,
+      globalFilter: remote ? serverSearch : globalFilter,
+      ...(pagination ? { pagination: { pageIndex: pagination.page - 1, pageSize: pagination.limit } } : {})
+    },
+    manualPagination: remote,
+    manualFiltering: remote,
+    manualSorting: remote,
+    pageCount: pagination ? Math.max(1, pagination.pages) : undefined,
+    onSortingChange: (updater) => {
+      if (!remote) { setSorting(updater); return; }
+      const next = typeof updater === "function" ? updater(serverSorting) : updater;
+      navigate({ page: "1", sortBy: next[0] ? sortFields[next[0].id] : undefined, sortOrder: next[0] ? (next[0].desc ? "desc" : "asc") : undefined });
+    },
     onGlobalFilterChange: setGlobalFilter,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -48,20 +88,23 @@ export function DataTable<TData>({
   const colSpan = useMemo(() => columns.length, [columns.length]);
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm">
+    <div aria-busy={pending} className="overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm">
       <div className="flex flex-col gap-3 border-b bg-muted/30 p-4 md:flex-row md:items-center md:justify-between">
-        <label className="relative block w-full md:max-w-sm">
+        <form className="flex w-full gap-2 md:max-w-lg" onSubmit={(event) => { event.preventDefault(); if (remote) navigate({ search: searchInput.trim(), page: "1" }); }}>
+        <label className="relative block w-full">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <span className="sr-only">Search table</span>
           <Input
-            value={globalFilter}
-            onChange={(event) => setGlobalFilter(event.target.value)}
+            value={remote ? searchInput : globalFilter}
+            onChange={(event) => remote ? setSearchInput(event.target.value) : setGlobalFilter(event.target.value)}
             placeholder={searchPlaceholder}
             className="pl-9"
           />
         </label>
+        {remote ? <Button type="submit" variant="outline" disabled={pending}>Search</Button> : null}
+        </form>
         <p className="rounded-full bg-background px-3 py-1 text-xs font-medium text-muted-foreground ring-1 ring-border">
-          {data.length} records
+          {pagination ? pagination.total : table.getFilteredRowModel().rows.length} records
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -70,15 +113,16 @@ export function DataTable<TData>({
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <th key={header.id} className="whitespace-nowrap border-b px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  <th key={header.id} aria-sort={header.column.getIsSorted() === "asc" ? "ascending" : header.column.getIsSorted() === "desc" ? "descending" : undefined} className="whitespace-nowrap border-b px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     {header.isPlaceholder ? null : (
                       <button
                         type="button"
+                        disabled={pending || (remote && !sortFields[header.column.id]) || !header.column.getCanSort()}
                         className="inline-flex items-center gap-2"
                         onClick={header.column.getToggleSortingHandler()}
                       >
                         {flexRender(header.column.columnDef.header, header.getContext())}
-                        <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                        {header.column.getCanSort() && (!remote || sortFields[header.column.id]) ? <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" /> : null}
                       </button>
                     )}
                   </th>
@@ -124,10 +168,15 @@ export function DataTable<TData>({
           Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount() || 1}
         </p>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>
+          {pagination ? <label className="flex items-center gap-2 text-sm">Rows
+            <select aria-label="Rows per page" value={pagination.limit} disabled={pending} onChange={(event) => navigate({ limit: event.target.value, page: "1" })} className="h-9 rounded-lg border bg-background px-2">
+              {[20, 50, 100].map((limit) => <option key={limit} value={limit}>{limit}</option>)}
+            </select>
+          </label> : null}
+          <Button variant="outline" size="sm" onClick={() => pagination ? navigate({ page: String(pagination.page - 1) }) : table.previousPage()} disabled={pending || !table.getCanPreviousPage()}>
             Previous
           </Button>
-          <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()}>
+          <Button variant="outline" size="sm" onClick={() => pagination ? navigate({ page: String(pagination.page + 1) }) : table.nextPage()} disabled={pending || !table.getCanNextPage()}>
             Next
           </Button>
         </div>

@@ -1,11 +1,13 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { partnerCreateFields } from "@/lib/forms";
 import { getList } from "@/services/admin";
 
-export default async function PartnersPage() {
-  const data = await getList("/admin/channel-partners");
+export default async function PartnersPage({ searchParams }: { searchParams: Promise<TableSearchParams> }) {
+  const params = await searchParams;
+  const data = await getList("/admin/channel-partners", { ...params, ...tableQuery(params) });
 
   return (
     <>
@@ -24,6 +26,7 @@ export default async function PartnersPage() {
         }
       />
       <ResourceTable
+        pagination={data.pagination}
         rows={data.items}
         detailBasePath="/partners"
         columns={[

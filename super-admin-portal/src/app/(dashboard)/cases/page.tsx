@@ -1,10 +1,11 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { CaseFilter } from "@/components/cases/case-filter";
 import { CasesTable } from "@/components/cases/cases-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getList } from "@/services/admin";
 
 type CasesPageProps = {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<TableSearchParams>;
 };
 
 const filterLabels: Record<string, string> = {
@@ -14,8 +15,9 @@ const filterLabels: Record<string, string> = {
 };
 
 export default async function CasesPage({ searchParams }: CasesPageProps) {
-  const { status = "all" } = await searchParams;
-  const data = await getList("/admin/escalations", { status, limit: 100 });
+  const params = await searchParams;
+  const status = params.status || "all";
+  const data = await getList("/admin/escalations", { ...params, ...tableQuery(params), status });
 
   return (
     <>
@@ -24,7 +26,7 @@ export default async function CasesPage({ searchParams }: CasesPageProps) {
         description={filterLabels[status] || "All temporary unlock requests"}
         actions={<CaseFilter />}
       />
-      <CasesTable rows={data.items} />
+      <CasesTable rows={data.items} pagination={data.pagination} />
     </>
   );
 }

@@ -1,5 +1,5 @@
 import { PageHeader } from "@/components/shell/page-header";
-import { getList } from "@/services/admin";
+import { getAllList, getList } from "@/services/admin";
 
 import { KeyRequestFilters } from "./key-request-filters";
 import { KeyRequestsTable } from "./key-requests-table";
@@ -31,8 +31,8 @@ export default async function KeyRequestsPage({ searchParams }: KeyRequestsPageP
       sortBy: params.sortBy,
       sortOrder: params.sortOrder
     }),
-    getList("/admin/tenants", { limit: 500 }),
-    getList("/admin/channel-partners", { limit: 500 })
+    getAllList("/admin/tenants"),
+    getAllList("/admin/channel-partners")
   ]);
 
   return (

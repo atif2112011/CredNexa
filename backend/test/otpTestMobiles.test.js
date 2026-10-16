@@ -17,6 +17,15 @@ import {
 
 const TEST_MOBILE_PREFIX = "99999000";
 
+test("temporary device-testing numbers use mock OTP without bypassing nearby numbers", () => {
+  for (const mobile of ["9336616695", "9336616697", "9336616698", "+91 9336616695", "09336616697"]) {
+    assert.equal(resolveOtpProvider({ mobile, configuredProvider: OTP_PROVIDERS.MSG91, testMobilePrefix: "" }), OTP_PROVIDERS.MOCK);
+  }
+  for (const mobile of ["9336616694", "9336616696", "9336616699"]) {
+    assert.equal(resolveOtpProvider({ mobile, configuredProvider: OTP_PROVIDERS.MSG91, testMobilePrefix: "" }), OTP_PROVIDERS.MSG91);
+  }
+});
+
 test("recognizes the complete configured test-number range", () => {
   assert.equal(isTestOtpMobile("9999900000", TEST_MOBILE_PREFIX), true);
   assert.equal(isTestOtpMobile("9999900042", TEST_MOBILE_PREFIX), true);

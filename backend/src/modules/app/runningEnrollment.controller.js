@@ -31,11 +31,6 @@ const getActiveRunningClaim = (secret, extra = {}) => findEnrollmentTokenBySecre
   ...extra
 });
 
-const maskName = (name) => {
-  const text = String(name || "").trim();
-  return text ? `${text[0]}${"*".repeat(Math.min(Math.max(text.length - 1, 1), 12))}` : "";
-};
-
 const errorResponse = (res, status, code, message) => sendError(res, status, message, { code });
 
 /** Preview never consumes the QR claim or returns its secret in response data. */
@@ -58,7 +53,10 @@ export const previewRunningEnrollment = async (req, res) => {
       enrollmentId: token._id,
       enrollmentMode: ENROLLMENT_MODES.RUNNING_APP,
       lenderName: tenant.name,
-      borrowerName: maskName(user.name),
+      borrowerName: user.name,
+      emiAmount: user.emiAmount ?? null,
+      tenureMonths: user.tenureMonths ?? null,
+      totalAmount: user.loanAmount ?? null,
       loanIdSuffix: String(user.loanId || "").slice(-4),
       expiresAt: token.expiresAt,
       requirementsVersion: RUNNING_REQUIREMENTS_VERSION,

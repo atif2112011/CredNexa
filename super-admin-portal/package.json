@@ -7,6 +7,7 @@
     "build": "next build",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "test:tables": "node --test test/table-pagination.test.cjs",
     "start": "next start"
   },
   "dependencies": {

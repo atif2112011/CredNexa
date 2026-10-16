@@ -1,14 +1,18 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { RiskFlagActions } from "@/components/actions/risk-flag-actions";
 import { DetailGrid } from "@/components/data/detail-grid";
 import { JsonPanel } from "@/components/data/json-panel";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getDetail } from "@/services/admin";
-import type { RecordItem } from "@/types/api";
+import type { Pagination, RecordItem } from "@/types/api";
 
-export default async function RiskFlagDetailPage({ params }: { params: Promise<{ flagId: string }> }) {
+export default async function RiskFlagDetailPage({ params, searchParams }: { params: Promise<{ flagId: string }>; searchParams: Promise<TableSearchParams> }) {
   const { flagId } = await params;
-  const data = await getDetail<RecordItem>(`/admin/risk-flags/${flagId}`);
+  const filters = await searchParams;
+  const historyQuery = Object.fromEntries(["integrity_", "commands_", "audit_"].flatMap((prefix) => Object.entries(tableQuery(filters, prefix)).map(([key, value]) => [`${prefix}${key}`, value])));
+  const data = await getDetail<RecordItem>(`/admin/risk-flags/${flagId}`, { paginateHistory: true, ...historyQuery });
+  const historyPagination = data.historyPagination as Record<string, Pagination>;
   const riskFlag = data.riskFlag as RecordItem;
   const integrityChecks = (data.integrityChecks as RecordItem[]) || [];
   const commands = (data.commands as RecordItem[]) || [];
@@ -46,6 +50,8 @@ export default async function RiskFlagDetailPage({ params }: { params: Promise<{
             <h2 className="text-lg font-semibold tracking-tight">Integrity Checks</h2>
             <ResourceTable
               rows={integrityChecks}
+              pagination={historyPagination.integrity}
+              queryPrefix="integrity_"
               columns={[
                 { key: "result", header: "Result", type: "status" },
                 { key: "reasonCode", header: "Reason" },
@@ -59,6 +65,8 @@ export default async function RiskFlagDetailPage({ params }: { params: Promise<{
             <h2 className="text-lg font-semibold tracking-tight">Commands</h2>
             <ResourceTable
               rows={commands}
+              pagination={historyPagination.commands}
+              queryPrefix="commands_"
               columns={[
                 { key: "commandType", header: "Command" },
                 { key: "status", header: "Status", type: "status" },
@@ -72,6 +80,8 @@ export default async function RiskFlagDetailPage({ params }: { params: Promise<{
           <h2 className="text-lg font-semibold tracking-tight">Audit Trail</h2>
           <ResourceTable
             rows={auditLogs}
+              pagination={historyPagination.audit}
+              queryPrefix="audit_"
             columns={[
               { key: "eventType", header: "Event" },
               { key: "reason", header: "Reason" },

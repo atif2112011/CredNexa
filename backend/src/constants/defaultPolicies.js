@@ -4,6 +4,7 @@ import { DEVICE_CONTROL_MODES } from "./tenant.js";
 export const DEFAULT_TENANT_POLICY = Object.freeze({
   // Both automatic and manual dealers can register running devices by default.
   runningEnrollmentEnabled: true,
+  runningLocationEnabled: true,
   deviceControlRules: {
     mode: DEVICE_CONTROL_MODES.EMI_AUTOMATED
   },

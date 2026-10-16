@@ -3,7 +3,7 @@ import { Building2, Landmark } from "lucide-react";
 
 import { PageHeader } from "@/components/shell/page-header";
 import { cn } from "@/lib/utils";
-import { getList } from "@/services/admin";
+import { getAllList, getList } from "@/services/admin";
 
 import { LedgerFilters } from "./ledger-filters";
 import { LedgerTable } from "./ledger-table";
@@ -40,8 +40,8 @@ export default async function LedgersPage({ searchParams }: LedgerPageProps) {
       from: params.from,
       to: params.to
     }),
-    getList("/admin/channel-partners", { limit: 500 }),
-    getList("/admin/tenants", { limit: 500 })
+    getAllList("/admin/channel-partners"),
+    getAllList("/admin/tenants")
   ]);
 
   return (

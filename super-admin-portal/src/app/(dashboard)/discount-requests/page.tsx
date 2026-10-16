@@ -1,5 +1,5 @@
 import { PageHeader } from "@/components/shell/page-header";
-import { getList } from "@/services/admin";
+import { getAllList, getList } from "@/services/admin";
 
 import { DiscountRequestFilters } from "./discount-request-filters";
 import { DiscountRequestsTable } from "./discount-requests-table";
@@ -27,8 +27,8 @@ export default async function DiscountRequestsPage({ searchParams }: DiscountReq
       status: params.status,
       search: params.search
     }),
-    getList("/admin/tenants", { limit: 500 }),
-    getList("/admin/channel-partners", { limit: 500 })
+    getAllList("/admin/tenants"),
+    getAllList("/admin/channel-partners")
   ]);
 
   return (

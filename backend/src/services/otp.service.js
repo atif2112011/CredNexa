@@ -17,6 +17,9 @@ export const OTP_PROVIDERS = Object.freeze({
 
 const MSG91_OTP_BASE_URL = "https://control.msg91.com/api/v5/otp";
 
+// TODO: Remove these temporary OTP bypass numbers after device testing is complete.
+const TEMPORARY_OTP_BYPASS_MOBILES = new Set(["9336616695", "9336616697", "9336616698"]);
+
 const getMsg91Config = () => {
   if (!env.msg91AuthKey || !env.msg91OtpTemplateId) {
     throw new Error("MSG91 OTP configuration is missing");
@@ -66,7 +69,10 @@ export const resolveOtpProvider = ({
   configuredProvider = env.otpProvider,
   testMobilePrefix = env.testOtpMobilePrefix
 } = {}) => {
-  if (isTestOtpMobile(mobile, testMobilePrefix)) {
+  if (
+    TEMPORARY_OTP_BYPASS_MOBILES.has(normalizeMobileForOtpRouting(mobile)) ||
+    isTestOtpMobile(mobile, testMobilePrefix)
+  ) {
     return OTP_PROVIDERS.MOCK;
   }
 

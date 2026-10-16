@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Eye } from "lucide-react";
 
-import { DataTable } from "@/components/data/data-table";
+import { DataTable, type ServerTableProps } from "@/components/data/data-table";
 import { StatusBadge } from "@/components/data/status-badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, getNestedValue } from "@/lib/utils";
@@ -17,7 +17,7 @@ export type ResourceColumn = {
   className?: string;
 };
 
-type ResourceTableProps = {
+type ResourceTableProps = ServerTableProps & {
   rows: RecordItem[];
   columns: ResourceColumn[];
   detailBasePath?: string;
@@ -33,10 +33,11 @@ function renderValue(row: RecordItem, column: ResourceColumn) {
   return String(value ?? "-");
 }
 
-export function ResourceTable({ rows, columns, detailBasePath }: ResourceTableProps) {
+export function ResourceTable({ rows, columns, detailBasePath, ...serverProps }: ResourceTableProps) {
   const tableColumns: ColumnDef<RecordItem>[] = [
     ...columns.map((column) => ({
       accessorKey: column.key,
+      id: column.key,
       header: column.header,
             cell: ({ row }: { row: { original: RecordItem } }) => (
               <div className={column.className}>{renderValue(row.original, column)}</div>
@@ -63,5 +64,6 @@ export function ResourceTable({ rows, columns, detailBasePath }: ResourceTablePr
       : [])
   ];
 
-  return <DataTable data={rows} columns={tableColumns} />;
+  const sortFields = Object.fromEntries(columns.map((column) => [column.key, column.key]));
+  return <DataTable data={rows} columns={tableColumns} sortFields={sortFields} {...serverProps} />;
 }

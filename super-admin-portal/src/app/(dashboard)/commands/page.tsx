@@ -1,16 +1,11 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { CommandFilters } from "@/components/commands/command-filters";
 import { CommandsTable } from "@/components/commands/commands-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { getList } from "@/services/admin";
 
 type CommandsPageProps = {
-  searchParams: Promise<{
-    status?: string;
-    commandType?: string;
-    triggeredBy?: string;
-    from?: string;
-    to?: string;
-  }>;
+  searchParams: Promise<TableSearchParams>;
 };
 
 export default async function CommandsPage({ searchParams }: CommandsPageProps) {
@@ -21,7 +16,7 @@ export default async function CommandsPage({ searchParams }: CommandsPageProps) 
     triggeredBy: filters.triggeredBy,
     from: filters.from,
     to: filters.to,
-    limit: 100
+    ...tableQuery(filters)
   });
 
   return (
@@ -31,7 +26,7 @@ export default async function CommandsPage({ searchParams }: CommandsPageProps) 
         description="Track device commands and select any row to view its delivery and acknowledgement details."
         actions={<CommandFilters />}
       />
-      <CommandsTable rows={data.items} />
+      <CommandsTable rows={data.items} pagination={data.pagination} />
     </>
   );
 }

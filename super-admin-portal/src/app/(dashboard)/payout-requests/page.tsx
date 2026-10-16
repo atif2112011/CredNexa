@@ -1,5 +1,5 @@
 import { PageHeader } from "@/components/shell/page-header";
-import { getList } from "@/services/admin";
+import { getAllList, getList } from "@/services/admin";
 
 import { PayoutRequestFilters } from "./payout-request-filters";
 import { PayoutRequestsTable } from "./payout-requests-table";
@@ -29,7 +29,7 @@ export default async function PayoutRequestsPage({ searchParams }: PayoutRequest
       sortBy: params.sortBy,
       sortOrder: params.sortOrder
     }),
-    getList("/admin/channel-partners", { limit: 500 })
+    getAllList("/admin/channel-partners")
   ]);
 
   return (

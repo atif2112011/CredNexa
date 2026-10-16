@@ -21,6 +21,7 @@ export function CaseFilter() {
         value={current}
         onChange={(event) => {
           const params = new URLSearchParams(searchParams);
+          params.set("page", "1");
           params.set("status", event.target.value);
           router.push(`${pathname}?${params.toString()}`);
         }}

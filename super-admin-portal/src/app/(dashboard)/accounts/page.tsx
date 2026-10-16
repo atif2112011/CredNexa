@@ -1,14 +1,16 @@
+import { tableQuery, type TableSearchParams } from "@/lib/table-query";
 import { FormDialog } from "@/components/data/form-dialog";
 import { ResourceTable } from "@/components/data/resource-table";
 import { PageHeader } from "@/components/shell/page-header";
 import { buildAccountFields } from "@/lib/forms";
-import { getList } from "@/services/admin";
+import { getAllList, getList } from "@/services/admin";
 
-export default async function AccountsPage() {
+export default async function AccountsPage({ searchParams }: { searchParams: Promise<TableSearchParams> }) {
+  const params = await searchParams;
   const [data, partners, tenants] = await Promise.all([
-    getList("/admin/accounts"),
-    getList("/admin/channel-partners", { limit: 100 }),
-    getList("/admin/tenants", { limit: 100 })
+    getList("/admin/accounts", { ...params, ...tableQuery(params) }),
+    getAllList("/admin/channel-partners"),
+    getAllList("/admin/tenants")
   ]);
   const accountFields = buildAccountFields(partners.items, tenants.items);
 
@@ -16,6 +18,7 @@ export default async function AccountsPage() {
     <>
       <PageHeader title="Admin Accounts" description="Create and manage partner_admin and tenant_admin accounts." actions={<FormDialog title="Create admin account" triggerLabel="Create account" endpoint="/api/admin/accounts" fields={accountFields} payloadMode="account" />} />
       <ResourceTable
+        pagination={data.pagination}
         rows={data.items}
         detailBasePath="/accounts"
         columns={[

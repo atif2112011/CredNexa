@@ -3,7 +3,7 @@
 import type { ColumnDef } from "@tanstack/react-table";
 import { useState } from "react";
 
-import { DataTable } from "@/components/data/data-table";
+import { DataTable, type ServerTableProps } from "@/components/data/data-table";
 import { StatusBadge } from "@/components/data/status-badge";
 import {
   Dialog,
@@ -146,7 +146,7 @@ function JsonDetails({ title, value }: { title: string; value: RecordItem }) {
   );
 }
 
-export function CommandsTable({ rows }: { rows: RecordItem[] }) {
+export function CommandsTable({ rows, ...serverProps }: { rows: RecordItem[] } & ServerTableProps) {
   const [selectedCommand, setSelectedCommand] = useState<RecordItem | null>(null);
   const device = asRecord(selectedCommand?.deviceId);
   const tenant = asRecord(selectedCommand?.tenantId);
@@ -157,6 +157,8 @@ export function CommandsTable({ rows }: { rows: RecordItem[] }) {
   return (
     <>
       <DataTable
+        {...serverProps}
+        sortFields={{ commandType: "commandType", status: "status", triggeredBy: "triggeredBy", tenantId_name: "tenantId.name", deviceId_imei: "deviceId.imei", deviceId_state: "deviceId.state", triggeredByAccountId_name: "triggeredByAccountId.name", sentAt: "sentAt", acknowledgedAt: "acknowledgedAt", createdAt: "createdAt" }}
         data={rows}
         columns={columns}
         searchPlaceholder="Search commands..."

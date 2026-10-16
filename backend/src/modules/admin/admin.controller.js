@@ -1,3 +1,4 @@
+import { findAdminTablePage } from "../../services/adminTable.service.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import mongoose from "mongoose";
@@ -142,8 +143,10 @@ import {
 import { normalizeTenantCreditDiscountSlabs } from "../../utils/tenantCreditDiscount.js";
 
 const getPagination = (query) => {
-  const page = Math.max(Number(query.page || 1), 1);
-  const limit = Math.min(Math.max(Number(query.limit || 20), 1), 100);
+  const requestedPage = Number(query.page);
+  const requestedLimit = Number(query.limit);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 100) : 20;
   return { page, limit, skip: (page - 1) * limit };
 };
 
@@ -689,12 +692,10 @@ export const listChannelPartners = async (req, res) => {
     if (req.query.status === "active") filter.isActive = true;
     if (req.query.status === "inactive") filter.isActive = false;
     if (req.query.type) filter.type = req.query.type;
-    if (req.query.search) filter.name = buildRegex(req.query.search);
 
-    const [items, total] = await Promise.all([
-      ChannelPartner.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
-      ChannelPartner.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: ChannelPartner, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Channel partners fetched successfully", {
       items,
@@ -1258,12 +1259,10 @@ export const listTenants = async (req, res) => {
     if (req.query.capability) filter.capabilities = req.query.capability;
     if (req.query.status === "active") filter.isActive = true;
     if (req.query.status === "inactive") filter.isActive = false;
-    if (req.query.search) filter.name = buildRegex(req.query.search);
 
-    const [items, total] = await Promise.all([
-      Tenant.find(filter).populate("channelPartnerId", "name type").skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
-      Tenant.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: Tenant, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Tenants fetched successfully", {
       items,
@@ -3140,21 +3139,10 @@ export const listAdminAccounts = async (req, res) => {
     if (req.query.status === "inactive") filter.isActive = false;
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
     if (req.query.channelPartnerId) filter.channelPartnerId = req.query.channelPartnerId;
-    if (req.query.search) {
-      filter.$or = [{ name: buildRegex(req.query.search) }, { email: buildRegex(req.query.search) }];
-    }
 
-    const [items, total] = await Promise.all([
-      Account.find(filter)
-        .select("-passwordHash")
-        .populate("tenantId", "name type")
-        .populate("channelPartnerId", "name type")
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .lean(),
-      Account.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: Account, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Accounts fetched successfully", {
       items,
@@ -3419,10 +3407,9 @@ export const listConsentVersions = async (req, res) => {
         : { $in: [ENROLLMENT_MODES.DEVICE_OWNER_QR, null] };
     }
 
-    const [items, total] = await Promise.all([
-      ConsentVersion.find(filter).skip(skip).limit(limit).sort({ createdAt: -1, _id: -1 }).lean(),
-      ConsentVersion.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: ConsentVersion, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Consent versions fetched successfully", {
       items,
@@ -3684,18 +3671,9 @@ export const listAdminEscalations = async (req, res) => {
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
     if (req.query.channelPartnerId) filter.channelPartnerId = req.query.channelPartnerId;
 
-    const [items, total] = await Promise.all([
-      UnlockRequest.find(filter)
-        .populate("userId", "name mobile")
-        .populate("deviceId", "imei deviceModel manufacturer state enrollmentMode")
-        .populate("tenantId", "name")
-        .populate("channelPartnerId", "name")
-        .skip(skip)
-        .limit(limit)
-        .sort({ escalatedToAdminAt: -1, escalatedToPartnerAt: -1, createdAt: -1 })
-        .lean(),
-      UnlockRequest.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: UnlockRequest, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Escalations fetched successfully", {
       items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId, { maskImei: false }) })),
@@ -4001,16 +3979,9 @@ export const listDevices = async (req, res) => {
       filter.userId = { $in: users.map((user) => user._id) };
     }
 
-    const [items, total] = await Promise.all([
-      Device.find(filter)
-        .populate("userId", "name mobile")
-        .populate("tenantId", "name channelPartnerId")
-        .skip(skip)
-        .limit(limit)
-        .sort({ updatedAt: -1 })
-        .lean(),
-      Device.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: Device, filter, query: req.query, page, limit, skip
+    });
     const tenantIds = [...new Set(items.map((device) =>
       String(device.tenantId?._id || device.tenantId)))];
     const tenantPolicies = tenantIds.length
@@ -5164,17 +5135,9 @@ export const listDeviceCommands = async (req, res) => {
       if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
     }
 
-    const [items, total] = await Promise.all([
-      DeviceCommand.find(filter)
-        .populate("deviceId", "imei deviceModel manufacturer state userId")
-        .populate("tenantId", "name")
-        .populate("triggeredByAccountId", "name email role")
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 })
-        .lean(),
-      DeviceCommand.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: DeviceCommand, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Device commands fetched successfully", {
       items,
@@ -5299,7 +5262,6 @@ export const getAdminRiskFlags = async (req, res) => {
   try {
     const { page, limit, skip } = getPagination(req.query);
     const filter = {};
-    const allowedSortFields = new Set(["createdAt", "updatedAt", "lastDetectedAt", "severity", "status", "type", "riskBucket"]);
 
     if (req.query.severity && req.query.severity !== "all") filter.severity = req.query.severity;
     if (req.query.status && req.query.status !== "all") {
@@ -5310,28 +5272,11 @@ export const getAdminRiskFlags = async (req, res) => {
     if (req.query.tenantId) filter.tenantId = req.query.tenantId;
     if (req.query.deviceId) filter.deviceId = req.query.deviceId;
     if (req.query.userId) filter.userId = req.query.userId;
-    if (req.query.search) {
-      const search = new RegExp(escapeRegex(req.query.search), "i");
-      filter.$or = [{ type: search }, { riskType: search }, { message: search }, { caseId: search }];
-    }
 
-    const sortBy = allowedSortFields.has(req.query.sortBy) ? req.query.sortBy : "createdAt";
-    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
-    const sort = sortBy === "createdAt" ? { createdAt: sortOrder, _id: -1 } : { [sortBy]: sortOrder, createdAt: -1, _id: -1 };
 
-    const [items, total] = await Promise.all([
-      RiskFlag.find(filter)
-        .populate("tenantId", "name")
-        .populate("deviceId", "imei deviceModel manufacturer state deviceSecurityState enrollmentMode")
-        .populate("userId", "name mobile loanId")
-        .populate("acknowledgedBy", "name email role")
-        .populate("clearedBy", "name email role")
-        .skip(skip)
-        .limit(limit)
-        .sort(sort)
-        .lean(),
-      RiskFlag.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: RiskFlag, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Risk flags fetched successfully", {
       items: items.map((item) => ({ ...item, deviceId: formatDeviceReference(item.deviceId, { maskImei: false }) })),
@@ -5361,29 +5306,36 @@ export const getAdminRiskFlagById = async (req, res) => {
     }
 
     const deviceId = riskFlag.deviceId?._id || riskFlag.deviceId;
-    const [integrityChecks, commands, auditLogs, activeCriticalRiskFlags] = await Promise.all([
-      deviceId
+    const paginatedHistory = req.query.paginateHistory === "true";
+    const historyQuery = (prefix) => Object.fromEntries(["page", "limit", "search", "sortBy", "sortOrder"].map((key) => [key, req.query[`${prefix}${key}`]]));
+    const historyPage = async (model, filter, prefix) => {
+      const query = historyQuery(prefix);
+      return findAdminTablePage({ model, filter, query, ...getPagination(query) });
+    };
+    const auditFilter = { $or: [
+      { "metadata.riskFlagId": riskFlag._id },
+      { "metadata.riskFlagIds": riskFlag._id },
+      ...(deviceId ? [{ deviceId }] : [])
+    ] };
+    const [checksResult, commandsResult, auditsResult, activeCriticalRiskFlags] = await Promise.all([
+      paginatedHistory
+        ? historyPage(IntegrityCheck, deviceId ? { deviceId } : { userId: riskFlag.userId?._id || riskFlag.userId }, "integrity_")
+        : deviceId
         ? IntegrityCheck.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean()
         : IntegrityCheck.find({ userId: riskFlag.userId?._id || riskFlag.userId }).sort({ createdAt: -1 }).limit(10).lean(),
-      deviceId ? DeviceCommand.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean() : [],
-      AuditLog.find({
-        $or: [
-          { "metadata.riskFlagId": riskFlag._id },
-          { "metadata.riskFlagIds": riskFlag._id },
-          ...(deviceId ? [{ deviceId }] : [])
-        ]
-      })
-        .sort({ timestamp: -1 })
-        .limit(10)
-        .lean(),
+      paginatedHistory
+        ? historyPage(DeviceCommand, deviceId ? { deviceId } : { _id: { $in: [] } }, "commands_")
+        : deviceId ? DeviceCommand.find({ deviceId }).sort({ createdAt: -1 }).limit(10).lean() : [],
+      paginatedHistory ? historyPage(AuditLog, auditFilter, "audit_") : AuditLog.find(auditFilter).sort({ timestamp: -1 }).limit(10).lean(),
       deviceId ? getActiveCriticalRiskFlagsForDevice(deviceId) : []
     ]);
 
     return sendSuccess(res, 200, "Risk flag fetched successfully", {
       riskFlag: { ...riskFlag, deviceId: formatDeviceReference(riskFlag.deviceId, { maskImei: false }) },
-      integrityChecks,
-      commands,
-      auditLogs,
+      integrityChecks: paginatedHistory ? checksResult.items : checksResult,
+      commands: paginatedHistory ? commandsResult.items : commandsResult,
+      auditLogs: paginatedHistory ? auditsResult.items : auditsResult,
+      ...(paginatedHistory ? { historyPagination: { integrity: checksResult.pagination, commands: commandsResult.pagination, audit: auditsResult.pagination } } : {}),
       activeCriticalRiskFlags
     });
   } catch (error) {
@@ -5932,17 +5884,9 @@ export const getAuditLogs = async (req, res) => {
     if (req.query.deviceId) filter.deviceId = req.query.deviceId;
     if (req.query.eventType) filter.eventType = req.query.eventType;
 
-    const [items, total] = await Promise.all([
-      AuditLog.find(filter)
-        .populate("actorId", "name email")
-        .populate("tenantId", "name")
-        .populate("channelPartnerId", "name")
-        .skip(skip)
-        .limit(limit)
-        .sort({ timestamp: -1 })
-        .lean(),
-      AuditLog.countDocuments(filter)
-    ]);
+    const { items, total } = await findAdminTablePage({
+      model: AuditLog, filter, query: req.query, page, limit, skip
+    });
 
     return sendSuccess(res, 200, "Audit logs fetched successfully", {
       items,
